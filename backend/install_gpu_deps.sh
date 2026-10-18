@@ -20,10 +20,11 @@ echo "== [3/4] web 依赖 =="
 echo "== [4/4] AI 依赖 =="
 # torchao 版本窗口（2026-10 实测，torch 2.6.0+cu124 固定）：
 # - >=0.18 用 torch.utils._pytree.register_constant（torch 2.7+ 才有）→ ImportError
-# - <0.15 缺 FqnToConfig，diffusers 0.41 的 quantizers/auto.py 导入即崩
-# 0.15.x 是两者交集；cpp 扩展会跳过（走 Python 回退内核，速度实测可接受）
+# - <0.16 缺 FqnToConfig 崩 diffusers 0.41 导入链；且 peft>=0.21 的 is_torchao_available() 也要求 >=0.16
+# 0.16.x 是唯一交集；cpp 扩展会跳过（走 Python 回退内核，速度实测可接受）
 "$PY" -m pip install diffusers transformers accelerate safetensors huggingface_hub -i "$MIRROR" $RETRY
-"$PY" -m pip install "torchao==0.15.0" -i "$MIRROR" $RETRY
+"$PY" -m pip install peft -i "$MIRROR" $RETRY
+"$PY" -m pip install "torchao==0.16.0" -i "$MIRROR" $RETRY
 
 echo "== 验证 =="
 "$PY" -c "import torch; print('TORCH OK', torch.__version__, 'cuda:', torch.cuda.is_available())"

@@ -35,6 +35,33 @@ _CAPS: Dict[str, Dict[str, Any]] = {}
 _FAMILY: Dict[str, str] = {}
 _LOCK = asyncio.Lock()
 
+_FP8_LINEAR_CLS: Any = None
+
+
+def _get_fp8_linear_cls() -> Any:
+    """懒加载 _FP8Linear 类（本模块遵循「无 torch 也能 import」的设计）。
+
+    fp8(E4M3) 权重量化 Linear：权重存 fp8 + 逐输出通道 scale，前向时反量化
+    成 bf16 再算。与 torchao Float8WeightOnlyConfig 数学等价，但权重是普通
+    fp8 张量（safetensors 0.4.2+ 原生支持、bit 级往返一致），因此可落盘缓存；
+    量化在 GPU 上逐层完成（峰值显存=单层），20B 模型约 10s（CPU 全量 58s）。
+    """
+    global _FP8_LINEAR_CLS
+    if _FP8_LINEAR_CLS is None:
+        import torch
+        import torch.nn.functional as F
+
+        class _FP8Linear(torch.nn.Linear):
+            def forward(self, x):  # type: ignore[override]
+                w = self.weight.to(x.dtype)
+                scale = getattr(self, "w_scale", None)
+                if scale is not None:
+                    w = w * scale.to(x.dtype)[:, None]
+                return F.linear(x, w, self.bias)
+
+        _FP8_LINEAR_CLS = _FP8Linear
+    return _FP8_LINEAR_CLS
+
 
 def _read_json(path: str) -> Dict[str, Any]:
     try:
@@ -202,10 +229,10 @@ class DiffusersProvider(BaseProvider):
         远超 24GB。原设想「bf16 + enable_model_cpu_offload」不可行——
         offload 钩子在前向时要把整个 transformer 搬上 GPU，39GB 必爆 OOM
         （torch.OutOfMemoryError: tried to allocate ... 23.99GiB total）。
-        解决：transformer 做 torchao fp8 权重量化（39GB → 约 20GB），
-        再开 cpu offload 让 text_encoder(14GB)/VAE 按阶段换入换出。
-        fp8 权重量化只省显存不改结构（matmul 前即时反量化），4090 Ada
-        架构上开销可忽略；可用环境变量 PIXELFORGE_QWEN_FP8=0 关闭退回 bf16。
+        解决：transformer 做 fp8 权重量化（39GB → 约 20GB），再开 cpu offload
+        让 text_encoder(14GB)/VAE 按阶段换入换出。4090 Ada 架构上 fp8 开销可忽略。
+        量化结果落盘缓存（transformer-fp8/），冷启动从 ~100s 降到 ~35s。
+        可用环境变量 PIXELFORGE_QWEN_FP8=0 关闭量化（需 >39GB 显存的卡）。
         """
         try:
             import torch
@@ -223,11 +250,25 @@ class DiffusersProvider(BaseProvider):
                 "Qwen-Image-Edit 是 20B DiT，需要 CUDA GPU（如 RTX 4090）；CPU 推理不可行。"
                 "无 GPU 请切回 SD1.5 系模型。"
             )
-        pipe = QwenImageEditPlusPipeline.from_pretrained(
-            model_id, torch_dtype=torch.bfloat16)
-        # fp8 权重量化必须在 offload 之前（量化在 CPU 上做，省一次 GPU 往返）
-        if os.environ.get("PIXELFORGE_QWEN_FP8", "1") != "0":
-            self._quantize_fp8(pipe.transformer, "qwen_edit.transformer")
+        use_fp8 = os.environ.get("PIXELFORGE_QWEN_FP8", "1") != "0"
+        transformer = None
+        if use_fp8:
+            try:
+                transformer = self._load_qwen_transformer_fp8(model_id)
+            except Exception as e:
+                print(f"[pixelforge] fp8 transformer 快速路径失败（{e}），退回完整加载", flush=True)
+                transformer = None
+        if transformer is not None:
+            # 注入已加载的 transformer：from_pretrained 对已实例化组件跳过磁盘读取
+            #（省掉管线侧 39GB bf16 读），其余组件（text_encoder/VAE）正常加载
+            pipe = QwenImageEditPlusPipeline.from_pretrained(
+                model_id, torch_dtype=torch.bfloat16, transformer=transformer)
+        else:
+            pipe = QwenImageEditPlusPipeline.from_pretrained(
+                model_id, torch_dtype=torch.bfloat16)
+            if use_fp8:
+                # 兜底：torchao CPU 量化（58s，慢但经过完整冒烟验证）
+                self._quantize_fp8(pipe.transformer, "qwen_edit.transformer")
         pipe.enable_model_cpu_offload()
         pipe.set_progress_bar_config(disable=True)
         caps: Dict[str, Any] = {
@@ -237,6 +278,165 @@ class DiffusersProvider(BaseProvider):
         _CAPS[model_id] = caps
         _CACHE[model_id] = pipe
         return pipe
+
+    # ---------- Qwen-Image-Edit fp8 transformer：量化 + 落盘缓存 ----------
+
+    def _load_qwen_transformer_fp8(self, model_id: str):
+        """加载 fp8 版 transformer（约 20GB，进 24GB 卡的关键）。
+
+        两条路径：
+        - 缓存命中（<model>/transformer-fp8/）：safetensors mmap 零拷贝 assign，
+          约 20s（整机 31.8GB 内存下 bf16 39GB 本就靠 mmap，缓存同理）；
+        - 缓存未命中：bf16 完整加载（mmap）→ GPU 逐层 fp8 量化（约 10s）
+          → 落盘缓存（约 20s，下次冷启动直接命中）。
+        任何失败都抛异常，由 _load_qwen_edit 退回「完整加载 + torchao 量化」。
+        """
+        import time
+        from pathlib import Path
+
+        import torch
+        from diffusers import QwenImageTransformer2DModel
+
+        model_dir = Path(model_id)
+        cache_dir = model_dir / "transformer-fp8"
+        if self._fp8_cache_valid(cache_dir, model_dir):
+            t0 = time.time()
+            t = self._load_fp8_cache(cache_dir)
+            print(f"[pixelforge] fp8 缓存命中：{cache_dir.name}/（{time.time() - t0:.0f}s，"
+                  f"跳过 39GB bf16 读取与量化）", flush=True)
+            return t
+
+        t0 = time.time()
+        t = QwenImageTransformer2DModel.from_pretrained(
+            str(model_dir / "transformer"), torch_dtype=torch.bfloat16)
+        t_load = time.time() - t0
+        n = self._quantize_transformer_gpu(t)
+        t_quant = time.time() - t0 - t_load
+        try:
+            self._save_fp8_cache(t, cache_dir, model_dir)
+        except Exception as e:
+            print(f"[pixelforge] fp8 缓存落盘失败（{e}），不影响本次运行", flush=True)
+        print(f"[pixelforge] transformer fp8 量化完成（{n} 个 Linear，"
+              f"bf16 加载 {t_load:.0f}s + GPU 量化 {t_quant:.0f}s，缓存已写 "
+              f"{cache_dir.name}/）", flush=True)
+        return t
+
+    @staticmethod
+    def _fp8_cache_valid(cache_dir, model_dir) -> bool:
+        """缓存有效性：三件套齐全 + 源 transformer 权重文件指纹未变。
+
+        环境变量 PIXELFORGE_QWEN_CACHE=0 可强制 miss（调试/重新量化用）。
+        """
+        if os.environ.get("PIXELFORGE_QWEN_CACHE", "1") == "0":
+            return False
+        if not ((cache_dir / "model.safetensors").is_file()
+                and (cache_dir / "config.json").is_file()
+                and (cache_dir / "fp8_cache_meta.json").is_file()):
+            return False
+        try:
+            meta = json.loads((cache_dir / "fp8_cache_meta.json").read_text())
+            for name, (size, mtime) in meta.get("files", {}).items():
+                f = model_dir / "transformer" / name
+                if not f.is_file() or f.stat().st_size != size or int(f.stat().st_mtime) != mtime:
+                    return False
+            return True
+        except Exception:
+            return False
+
+    @staticmethod
+    def _save_fp8_cache(transformer, cache_dir, model_dir) -> None:
+        """把量化后的 transformer 存成 diffusers 风格缓存目录（约 20GB）。
+
+        键布局与 diffusers 权重一致：<路径>.weight 为 float8_e4m3fn，
+        <路径>.w_scale 为 fp32 逐输出通道 scale，其余（norm/adaLN 的 bf16 等）
+        原样保存。safetensors 原生支持 fp8 且往返 bit 级一致（已实测）。
+        """
+        import shutil
+
+        from safetensors.torch import save_file
+
+        cache_dir.mkdir(parents=True, exist_ok=True)
+        sd = {k: v.detach().contiguous() for k, v in transformer.state_dict().items()}
+        save_file(sd, str(cache_dir / "model.safetensors"))
+        shutil.copy(str(model_dir / "transformer" / "config.json"),
+                    str(cache_dir / "config.json"))
+        # 源指纹：权重文件名 + 大小 + mtime（重新下载/换版本即失效，自动重建）
+        files = {}
+        for f in sorted((model_dir / "transformer").glob("*.safetensors")):
+            st = f.stat()
+            files[f.name] = [st.st_size, int(st.st_mtime)]
+        (cache_dir / "fp8_cache_meta.json").write_text(json.dumps(
+            {"source": str(model_dir), "format": "fp8-e4m3-rowwise", "files": files},
+            ensure_ascii=False, indent=1))
+
+    @staticmethod
+    def _load_fp8_cache(cache_dir):
+        """从缓存快速搭出 fp8 transformer：meta 骨架 + mmap assign + 换类。
+
+        用 diffusers 同款低内存加载路径（accelerate init_empty_weights +
+        load_state_dict(assign=True)），20B 模型不分配 bf16 空张量；
+        safetensors load_file 返回 mmap 视图，assign 后参数直接指向映射页。
+        """
+        import torch
+        from accelerate import init_empty_weights
+        from diffusers import QwenImageTransformer2DModel
+        from safetensors.torch import load_file
+
+        fp8_cls = _get_fp8_linear_cls()
+        config = QwenImageTransformer2DModel.load_config(str(cache_dir / "config.json"))
+        sd = load_file(str(cache_dir / "model.safetensors"))
+        try:
+            with init_empty_weights():
+                model = QwenImageTransformer2DModel.from_config(config)
+        except Exception:
+            # meta 路径失败时退回普通 from_config（CPU 上空张量，仅多耗内存）
+            model = QwenImageTransformer2DModel.from_config(config)
+        missing, unexpected = model.load_state_dict(sd, strict=False, assign=True)
+        # unexpected 必须全部是 .w_scale（骨架无此 buffer）；missing 必须为空
+        scales = [k for k in unexpected if k.endswith(".w_scale")]
+        if missing or len(scales) != len(unexpected):
+            raise RuntimeError(
+                f"缓存键不匹配（missing={len(missing)} unexpected={len(unexpected)}），"
+                "删除 transformer-fp8/ 可重建")
+        for key in scales:
+            mod = model.get_submodule(key[: -len(".w_scale")])
+            mod.register_buffer("w_scale", sd[key])
+        n = 0
+        for mod in model.modules():
+            if isinstance(mod, torch.nn.Linear) and getattr(mod, "w_scale", None) is not None:
+                mod.__class__ = fp8_cls
+                n += 1
+        if n == 0:
+            raise RuntimeError("缓存中没有任何 fp8 Linear，格式可能损坏")
+        return model
+
+    @staticmethod
+    def _quantize_transformer_gpu(transformer) -> int:
+        """逐 Linear 在 GPU 上做 fp8 权重量化，原地换类为 _FP8Linear。
+
+        E4M3 + 逐输出通道 scale（scale = amax(|W|, dim=1) / 448）。
+        峰值显存仅为单层权重（最大约 75MB），20B 模型全程约 10s；
+        CPU 全量量化实测 58s。与 torchao Float8WeightOnlyConfig 数学等价。
+        """
+        import torch
+
+        fp8_cls = _get_fp8_linear_cls()
+        n = 0
+        n_linear = sum(1 for m in transformer.modules()
+                       if type(m) is torch.nn.Linear)
+        for mod in transformer.modules():
+            if type(mod) is not torch.nn.Linear:
+                continue
+            w = mod.weight.detach().to("cuda", non_blocking=True)
+            scale = w.abs().amax(dim=1, keepdim=True).clamp_(min=1e-12) / 448.0
+            wq = (w / scale).clamp_(-448.0, 448.0).to(torch.float8_e4m3fn)
+            mod.weight = torch.nn.Parameter(wq.to("cpu"), requires_grad=False)
+            mod.register_buffer("w_scale", scale.squeeze(1).to("cpu").float())
+            mod.__class__ = fp8_cls
+            n += 1
+        if n != n_linear:  # 理论上相等；不等说明有 Linear 子类，日志可见
+            print(f"[pixelforge] 警告：{n_linear} 个 Linear 中仅量化 {n} 个", flush=True)
+        return n
 
     @staticmethod
     def _quantize_fp8(module: Any, tag: str) -> Any:
