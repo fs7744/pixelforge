@@ -7,7 +7,8 @@ type Props = { onSendToPost: (asset: Asset) => void }
 // 画风 chip：悬浮（120ms 延迟）/点击弹出示例图 tooltip。
 // 左侧 .panel 有 overflow-y:auto，组件内绝对定位会被裁剪，所以走 portal + fixed 定位，
 // 打开期间监听 scroll/resize 重定位；触屏没有 hover，用点击打开、点外部/Esc 关闭。
-function StyleChip({ style, active, onSelect }: { style: StyleInfo; active: boolean; onSelect: () => void }) {
+// PostProcess 的「AI 画风重统一」复用同一组件（选目标画风时同样想看示例）。
+export function StyleChip({ style, active, onSelect }: { style: StyleInfo; active: boolean; onSelect: () => void }) {
   const btnRef = useRef<HTMLButtonElement>(null)
   const [open, setOpen] = useState(false)
   const [pos, setPos] = useState<{ top: number; left: number } | null>(null)

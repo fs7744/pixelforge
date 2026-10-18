@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
-import { api, Asset } from '../api'
+import { api, Asset, StyleInfo } from '../api'
+import { StyleChip } from './Workbench'
 
 type Props = { incoming?: Asset | null }
 
@@ -9,9 +10,15 @@ const PIPELINES = [
   { id: 'sheet', name: 'Sprite Sheet 拆分', tag: 'N×M', desc: '按行列拆帧并生成引擎索引 JSON' },
   { id: 'pixelize', name: '像素化对齐', tag: 'PALETTE', desc: '分块单色 + 限定调色板，把 AI 图变成规整像素风' },
   { id: 'seamless', name: '左右无缝延展', tag: 'SEAMLESS', desc: '镜像拼接 ×N，接缝数学连续，用于视差图层循环' },
+  { id: 'seamless_ai', name: 'AI 左右延展', tag: 'AI-OUTPAINT', desc: 'Qwen-Edit 顺着场景续画，无对称重复感；仅适合非像素画风' },
   { id: 'tile', name: '瓦片接缝修补', tag: 'OFFSET-HEAL', desc: '偏移-修复法把贴图变成可平铺单元' },
-  { id: 'watermark', name: '去水印（Beta）', tag: 'REV-ALPHA', desc: '需水印掩码；无掩码时不做破坏性处理' },
+  { id: 'restyle', name: 'AI 画风重统一', tag: 'AI-RESTYLE', desc: '旧资产/旧帧重绘到选定画风；像素画风自动像素化归一化' },
+  { id: 'watermark', name: '去水印', tag: 'REV-ALPHA / AI', desc: '有掩码走反向 Alpha；无掩码用 AI 按周围内容补全' },
 ]
+
+// AI 管线（Qwen-Image-Edit-2511 指令式编辑）：单次 40 步 2-4 分钟
+const isAiPipeline = (p: string, wmMode: string) =>
+  p === 'seamless_ai' || p === 'restyle' || (p === 'watermark' && wmMode === 'ai')
 
 export default function PostProcess({ incoming }: Props) {
   const [file, setFile] = useState<File | null>(null)
@@ -26,6 +33,7 @@ export default function PostProcess({ incoming }: Props) {
   const [cols, setCols] = useState(4)
   const [rows, setRows] = useState(4)
   const [wmSize, setWmSize] = useState(48)
+  const [wmMode, setWmMode] = useState('alpha')
   const [mask, setMask] = useState<File | null>(null)
   const [seamTimes, setSeamTimes] = useState(2)
   const [seamMirror, setSeamMirror] = useState(true)
@@ -35,6 +43,9 @@ export default function PostProcess({ incoming }: Props) {
   const [pxColors, setPxColors] = useState(16)
   const [pxPalette, setPxPalette] = useState('auto')
   const [pxDither, setPxDither] = useState(false)
+  const [styles, setStyles] = useState<StyleInfo[]>([])
+  const [restyleId, setRestyleId] = useState('')
+  const [aiSeed, setAiSeed] = useState('')
   const [out, setOut] = useState<Asset | null>(null)
   const [frames, setFrames] = useState<Asset[]>([])
   const [index, setIndex] = useState<any>(null)
@@ -43,6 +54,14 @@ export default function PostProcess({ incoming }: Props) {
   const [note, setNote] = useState('')
   const [over, setOver] = useState(false)
   const inputRef = useRef<HTMLInputElement>(null)
+
+  // 画风列表：AI 画风重统一选目标用（chip 悬浮可见示例图）
+  useEffect(() => {
+    api.styles().then((r) => {
+      setStyles(r.styles || [])
+      if (r.styles?.length) setRestyleId((cur) => cur || r.styles[0].id)
+    }).catch(() => setStyles([]))
+  }, [])
 
   const accept = (f: File) => {
     setFile(f)
@@ -102,10 +121,39 @@ export default function PostProcess({ incoming }: Props) {
         const res = await api.seamless(file, seamTimes, 24, seamMirror)
         setOut(res.asset)
         setNote(`${res.meta.size[0]}×${res.meta.size[1]} · ${res.meta.mode} · ${res.meta.note}`)
+      } else if (pipeline === 'seamless_ai') {
+        const fd = new FormData()
+        fd.append('file', file)
+        fd.append('times', String(seamTimes))
+        fd.append('blend', '6')
+        if (aiSeed) fd.append('seed', aiSeed)
+        const res = await fetch('/api/pipeline/seamless/ai', { method: 'POST', body: fd }).then((r) => r.json())
+        if (!res.asset) throw new Error(res.meta?.reason || res.detail || 'AI 延展失败')
+        setOut(res.asset)
+        setNote(`${res.asset.width}×${res.asset.height} · 两侧各续画 ${res.meta.pad}px · ${res.meta.steps} 步 · seed ${res.meta.seed ?? '随机'}`)
+      } else if (pipeline === 'restyle') {
+        if (!restyleId) throw new Error('请先选择目标画风')
+        const fd = new FormData()
+        fd.append('file', file)
+        fd.append('style', restyleId)
+        if (aiSeed) fd.append('seed', aiSeed)
+        const res = await fetch('/api/pipeline/restyle', { method: 'POST', body: fd }).then((r) => r.json())
+        if (!res.asset) throw new Error(res.meta?.reason || res.detail || '画风重统一失败')
+        setOut(res.asset)
+        const px = res.meta.pixelize ? ` · 已按画风建议像素化（${res.meta.pixelize.grid[0]}×${res.meta.pixelize.grid[1]} 格 / ${res.meta.pixelize.colors} 色）` : ''
+        setNote(`${res.meta.styleName} · ${res.meta.steps} 步 · seed ${res.meta.seed ?? '随机'}${px}`)
       } else if (pipeline === 'tile') {
         const res = await api.tileRepair(file, tileBand, tileFeather)
         setOut(res.asset)
         setNote(`${res.meta.method} · band ${res.meta.band} · 已可平铺`)
+      } else if (pipeline === 'watermark' && wmMode === 'ai') {
+        const fd = new FormData()
+        fd.append('file', file)
+        if (aiSeed) fd.append('seed', aiSeed)
+        const res = await fetch('/api/pipeline/watermark/ai', { method: 'POST', body: fd }).then((r) => r.json())
+        if (!res.asset) throw new Error(res.meta?.reason || res.detail || 'AI 去水印失败')
+        setOut(res.asset)
+        setNote(`已按周围内容补全 · ${res.meta.steps} 步 · seed ${res.meta.seed ?? '随机'}`)
       } else {
         if (!mask) {
           setNote('请上传水印掩码（logo alpha 图），否则不做破坏性处理。')
@@ -338,6 +386,56 @@ export default function PostProcess({ incoming }: Props) {
           </div>
         )}
 
+        {pipeline === 'seamless_ai' && (
+          <div>
+            <div className="label">延展倍数</div>
+            <div className="chips mt8">
+              {[2, 3].map((n) => (
+                <button key={n} className={`chip ${seamTimes === n ? 'on' : ''}`} onClick={() => setSeamTimes(n)}>
+                  {n}×
+                </button>
+              ))}
+            </div>
+            <div className="hint" style={{ marginTop: 8 }}>
+              AI 顺着场景向左右续画（outpainting），接缝带交叉淡化 + 原图区域零损伤贴回。
+              写实 / 手绘 / 动漫等连续色调画风效果最佳；<b>像素画风会被抹掉硬边</b>，请用左侧「左右无缝延展」镜面管线。
+            </div>
+          </div>
+        )}
+
+        {pipeline === 'restyle' && (
+          <div>
+            <div className="label">目标画风（悬浮看示例）</div>
+            <div className="chips mt8">
+              {styles.map((s) => (
+                <StyleChip key={s.id} style={s} active={restyleId === s.id} onSelect={() => setRestyleId(s.id)} />
+              ))}
+            </div>
+            {styles.length === 0 && <div className="hint" style={{ marginTop: 6 }}>画风库加载中…</div>}
+            <div className="hint" style={{ marginTop: 8 }}>
+              保持主体、构图、角色外观不变，只换绘画风格。像素类画风会在 AI 重绘后自动按建议参数像素化归一化
+              （AI 直接出不了硬边像素，必须确定性管线收尾）。
+            </div>
+          </div>
+        )}
+
+        {isAiPipeline(pipeline, wmMode) && (
+          <div>
+            <div className="label">随机种子（可留空）</div>
+            <input
+              className="input"
+              type="number"
+              placeholder="留空则每次不同"
+              value={aiSeed}
+              onChange={(e) => setAiSeed(e.target.value)}
+            />
+            <div className="hint" style={{ marginTop: 6 }}>
+              AI 管线单次 40 步约 2-4 分钟（本机 4090）。同种子 + 同参数 + 同原图可复现同一张，方便对比调参。
+              期间如驻留着 Z-Image 生成模型，会自动换出显存再加载 Edit 模型。
+            </div>
+          </div>
+        )}
+
         {pipeline === 'tile' && (
           <div>
             <div className="label">
@@ -367,26 +465,46 @@ export default function PostProcess({ incoming }: Props) {
 
         {pipeline === 'watermark' && (
           <div>
-            <div className="label">水印掩码（logo alpha PNG）</div>
-            <input
-              type="file"
-              accept="image/png"
-              style={{ marginTop: 6, fontSize: 11, color: 'var(--muted)' }}
-              onChange={(e) => setMask(e.target.files?.[0] ?? null)}
-            />
-            <div className="label" style={{ marginTop: 8 }}>水印尺寸 {wmSize}px</div>
+            <div className="label">模式</div>
             <div className="chips mt8">
-              {[48, 96].map((s) => (
-                <button key={s} className={`chip sm ${wmSize === s ? 'on' : ''}`} onClick={() => setWmSize(s)}>
-                  {s}
+              {[
+                ['alpha', '反向 Alpha（需掩码）'],
+                ['ai', 'AI 修补（无需掩码）'],
+              ].map(([v, l]) => (
+                <button key={v} className={`chip ${wmMode === v ? 'on' : ''}`} onClick={() => setWmMode(v)}>
+                  {l}
                 </button>
               ))}
             </div>
+            {wmMode === 'ai' ? (
+              <div className="hint" style={{ marginTop: 8 }}>
+                指令式重绘：移除所有文字水印 / logo / 角标，按周围画面内容自然补全。适合 AI 出图自带的、
+                拿不到 alpha 掩码的合成水印；会轻微重绘覆盖区域，敏感画面请先用反向 Alpha 模式。
+              </div>
+            ) : (
+              <>
+                <div className="label" style={{ marginTop: 10 }}>水印掩码（logo alpha PNG）</div>
+                <input
+                  type="file"
+                  accept="image/png"
+                  style={{ marginTop: 6, fontSize: 11, color: 'var(--muted)' }}
+                  onChange={(e) => setMask(e.target.files?.[0] ?? null)}
+                />
+                <div className="label" style={{ marginTop: 8 }}>水印尺寸 {wmSize}px</div>
+                <div className="chips mt8">
+                  {[48, 96].map((s) => (
+                    <button key={s} className={`chip sm ${wmSize === s ? 'on' : ''}`} onClick={() => setWmSize(s)}>
+                      {s}
+                    </button>
+                  ))}
+                </div>
+              </>
+            )}
           </div>
         )}
 
         <button className="btn btn-primary btn-block" disabled={!file || busy} onClick={apply}>
-          {busy ? '处理中' : '应用管线'}
+          {busy ? (isAiPipeline(pipeline, wmMode) ? 'AI 处理中（数分钟）' : '处理中') : '应用管线'}
         </button>
         <div className="hint">全部处理在本机完成 · 原图不上传云端</div>
         {note && <div className="ok">{note}</div>}
@@ -471,6 +589,7 @@ export default function PostProcess({ incoming }: Props) {
             <br />· 硬缩放：最近邻，禁止插值
             <br />· RPGMaker：144² + 底部扩 48px
             <br />· 拆分：同尺寸切帧 + 时间戳索引
+            <br />· AI 管线：Qwen-Image-Edit-2511 fp8，40 步，单次 2-4 分钟
           </div>
         </div>
         {(out || frames[0]) && (

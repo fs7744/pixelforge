@@ -349,6 +349,55 @@ async def pipeline_watermark(
     return {"asset": item, "meta": meta}
 
 
+# ---------- AI 编辑管线（Qwen-Image-Edit-2511 指令式编辑） ----------
+# 共同特性：单次 40 步约 2-4 分钟；provider 内部 asyncio.to_thread 不阻塞
+# 事件循环；加载前自动换出另一大族模型（Z-Image ↔ Qwen-Edit 互斥）。
+@app.post("/api/pipeline/watermark/ai")
+async def pipeline_watermark_ai(
+    file: UploadFile = File(...),
+    steps: Optional[int] = Form(None),
+    seed: Optional[int] = Form(None),
+):
+    from .pipelines import ai_edit
+
+    img = await _read_image(file)
+    out, meta = await ai_edit.remove_watermark_ai(img, steps=steps, seed=seed)
+    item = storage.save_asset(out, kind="watermark", meta={"pipeline": "watermark_ai", **meta})
+    return {"asset": item, "meta": meta}
+
+
+@app.post("/api/pipeline/seamless/ai")
+async def pipeline_seamless_ai(
+    file: UploadFile = File(...),
+    times: int = Form(2),
+    blend: int = Form(6),
+    steps: Optional[int] = Form(None),
+    seed: Optional[int] = Form(None),
+):
+    from .pipelines import ai_edit
+
+    img = await _read_image(file)
+    out, meta = await ai_edit.extend_horizontal_ai(
+        img, times=times, blend=blend, steps=steps, seed=seed)
+    item = storage.save_asset(out, kind="seamless", meta={"pipeline": "seamless_ai", **meta})
+    return {"asset": item, "meta": meta}
+
+
+@app.post("/api/pipeline/restyle")
+async def pipeline_restyle(
+    file: UploadFile = File(...),
+    style: str = Form(...),
+    steps: Optional[int] = Form(None),
+    seed: Optional[int] = Form(None),
+):
+    from .pipelines import ai_edit
+
+    img = await _read_image(file)
+    out, meta = await ai_edit.restyle(img, style, steps=steps, seed=seed)
+    item = storage.save_asset(out, kind="restyled", meta={"pipeline": "restyle", **meta})
+    return {"asset": item, "meta": meta}
+
+
 # ---------- 资产库 ----------
 @app.get("/api/assets")
 async def assets(kind: Optional[str] = None):

@@ -98,6 +98,38 @@ def detect_family(model_id: str) -> str:
     return family
 
 
+# 单卡 24GB 的现实：Z-Image bf16 约 21GB、Qwen-Image-Edit fp8 前向峰值 20.3GB，
+# 两个大族模型在同进程共存必 OOM（实测 37.6GiB > 23.99GiB）。
+# SD 系模型小（<4GB），不参与换出——否则用户切 SD 时要反复重载大模型。
+_BIG_FAMILIES = {"zimage", "qwen_edit"}
+
+
+def _evict_other_families(incoming: str) -> None:
+    """加载大族模型前，把缓存里另一大族的驻留模型卸掉，给显存让位。"""
+    if incoming not in _BIG_FAMILIES:
+        return
+    victims = [m for m in list(_CACHE)
+               if (_FAMILY.get(m) or detect_family(m)) in _BIG_FAMILIES
+               and (_FAMILY.get(m) or detect_family(m)) != incoming]
+    if not victims:
+        return
+    for mid in victims:
+        _CACHE.pop(mid, None)
+        _CAPS.pop(mid, None)
+    import gc
+
+    gc.collect()
+    try:
+        import torch
+
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+    except Exception:
+        pass
+    print(f"[pixelforge] 显存换出：卸载 {'/'.join(victims)}，为 {incoming} 让位",
+          flush=True)
+
+
 def _torch_status() -> Dict[str, Any]:
     try:
         import torch  # noqa: F401
@@ -179,6 +211,9 @@ class DiffusersProvider(BaseProvider):
         if model_id in _CACHE:
             return _CACHE[model_id]
         family = detect_family(model_id)
+        # 单卡 24GB 只容一个大家族：切换前先把另一大族卸了，
+        # 否则 Z-Image(21GB) 与 Qwen-Edit fp8(峰值20.3GB) 同进程共存必 OOM
+        _evict_other_families(family)
         if family == "zimage":
             return self._load_zimage(model_id)
         if family == "qwen_edit":
