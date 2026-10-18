@@ -24,9 +24,10 @@ DEFAULT_SETTINGS: Dict[str, Any] = {
             "label": "内置推理服务（diffusers）",
             "baseUrl": "",
             "apiKey": "",
-            "model": "models/dreamshaper-8",
+            "model": "models/z-image-turbo",
             "negativePrompt": "blurry, low quality, watermark, text",
-            # 一致性增强（留空则自动探测 models/ 下的默认目录）
+            # 一致性增强（留空则自动探测 models/ 下的默认目录；仅 SD1.5 族有效，
+            # Z-Image 的 UNet 结构不同，挂了也会在 caps.notes 里说明不适用）
             "ipAdapter": "",
             "ipAdapterScale": 0.7,
             "lora": "",

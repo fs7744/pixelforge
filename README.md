@@ -22,7 +22,33 @@ cd frontend && npm install && npm run build && cd ..
 
 ## 启用本地真模型（可选）
 
-MVP 默认走 `mock` 引擎（无需模型即可跑通全链路）。要用真实模型：
+MVP 默认走 `mock` 引擎（无需模型即可跑通全链路）。要用真实模型，按显卡二选一：
+
+### 方案一：Z-Image-Turbo（推荐，需 16GB+ 显存，如 RTX 4090）
+
+阿里通义 2025-11 开源，6B S3-DiT + Qwen3-4B 中文编码器，**中文提示词直喂、无需翻译**，
+8 步蒸馏、4090 约 2.5s/张、Apache 2.0 可商用。
+
+```bash
+# 1. 一键装 GPU 依赖（torch cu124 + diffusers + transformers，约 2.8GB）
+bash backend/install_gpu_deps.sh
+
+# 2. 下载模型（走 ModelScope，约 20GB，断点续传；可中断后重跑续传）
+bash backend/fetch_zimage.sh
+
+# 3. 冒烟测试（中文提示词出首图，验证全链路）
+"%USERPROFILE%\.workbuddy\binaries\python\envs\pixelforge\Scripts\python.exe" backend/smoke_zimage.py
+```
+
+装完后在「模型设置 → 内置推理服务」确认模型为 `models/z-image-turbo`，点「测试连接」。
+Z-Image 模式下中文提示词**自动跳过** zh2en 翻译链路（provider 的 `supports_zh` 为真）。
+
+> 注意：Z-Image 是 bf16 单流 DiT，**没有 CPU 推理可行路径**；SD1.5 的像素 LoRA /
+> IP-Adapter / LCM 对其不适用（UNet 结构不同）。角色一致性暂用参考图 img2img 切回
+> SD 族，或后续接 Z-Image-Editor。出图后接项目已有的 `pixelize`（最近邻降采样 +
+> 调色板量化）即得像素素材——**1024² 出图再降采样，比 512² 直出细腻一个量级**。
+
+### 方案二：SD1.5 系（低配兜底，6GB 显存可跑）
 
 ```bash
 # 1. CPU 版（快装，1-3 分钟，验证用）

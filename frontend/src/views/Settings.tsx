@@ -135,10 +135,14 @@ export default function SettingsView() {
                       <div className="label">模型（HF 仓库名或本地路径）</div>
                       <input
                         className="input"
-                        placeholder="stabilityai/sd-turbo"
+                        placeholder="models/z-image-turbo"
                         value={cfg.model}
                         onChange={(e) => update(pid, 'model', e.target.value)}
                       />
+                      <div className="hint">
+                        Z-Image 族（如 models/z-image-turbo）：中文提示词直喂，自动跳过翻译；
+                        LoRA / IP-Adapter 仅对 SD1.5 族（如 dreamshaper-8）生效。
+                      </div>
                     </div>
                     <div>
                       <div className="label">负向提示词</div>

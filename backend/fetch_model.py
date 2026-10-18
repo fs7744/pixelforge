@@ -29,7 +29,7 @@ ALLOW = [
     "*.txt",
     "scheduler/*",
     "tokenizer/*",
-    # 只取 fp32 组件：CPU 推理需要 fp32；GPU 用户可另加 *.fp16.safetensors
+    # SD1.5 / SDXL 布局：只取 fp32 组件；CPU 推理需要 fp32；GPU 用户可另加 *.fp16.safetensors
     "text_encoder/config.json",
     "text_encoder/model.safetensors",
     "text_encoder/pytorch_model.bin",
@@ -39,6 +39,13 @@ ALLOW = [
     "vae/config.json",
     "vae/diffusion_pytorch_model.safetensors",
     "vae/diffusion_pytorch_model.bin",
+    # Z-Image 布局（S3-DiT 单流架构）：transformer 分片 + Qwen 文本编码器分片 + VAE
+    "transformer/config.json",
+    "transformer/diffusion_pytorch_model*.safetensors",
+    "transformer/diffusion_pytorch_model.safetensors.index.json",
+    "text_encoder/model-*.safetensors",
+    "text_encoder/model.safetensors.index.json",
+    "text_encoder/generation_config.json",
 ]
 
 MAX_RETRIES = int(os.environ.get("PF_FETCH_RETRIES", "8"))

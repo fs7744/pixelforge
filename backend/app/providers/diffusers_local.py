@@ -5,11 +5,21 @@
 - 单例缓存：同名模型只加载一次；切换模型时释放旧管线。
 - 显存自适应：<8GB 自动开启 attention slicing + vae slicing，必要时 cpu offload。
 - 异步：阻塞推理放到线程池，不卡事件循环。
+
+模型族（2026-10 新增 Z-Image）：
+- sd：SD1.5/SDXL/turbo 系（CLIP 编码器，中文须走 zh2en 翻译链路；
+      可挂 LCM/像素 LoRA + IP-Adapter）
+- zimage：阿里 Z-Image-Turbo（S3-DiT 单流 + Qwen3-4B 中文编码器）：
+      * 中文提示词直喂（supports_zh=True），翻译链路整个绕过
+      * bf16 · 8 步蒸馏 · guidance_scale 固定 0.0 · 1024² 原生分辨率
+      * SD1.5 的 LoRA/IP-Adapter/LCM 均不适用（UNet 结构不同），
+        一致性请用参考图 img2img 切回 SD 族，或后续接 Z-Image-Editor
 """
 from __future__ import annotations
 
 import asyncio
 import gc
+import json
 import os
 from typing import Any, Dict, List, Optional
 
@@ -17,7 +27,39 @@ from .base import BaseProvider, ProviderResult
 
 _CACHE: Dict[str, Any] = {}
 _CAPS: Dict[str, Dict[str, Any]] = {}
+_FAMILY: Dict[str, str] = {}
 _LOCK = asyncio.Lock()
+
+
+def _read_json(path: str) -> Dict[str, Any]:
+    try:
+        with open(path, encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return {}
+
+
+def detect_family(model_id: str) -> str:
+    """模型族识别：zimage（S3-DiT + Qwen3 编码器）或 sd（CLIP 编码器）。
+
+    先读 model_index.json 的 _class_name（最可靠），再看目录名兜底。
+    """
+    if model_id in _FAMILY:
+        return _FAMILY[model_id]
+    family = "sd"
+    if os.path.isdir(model_id):
+        idx = _read_json(os.path.join(model_id, "model_index.json"))
+        cls = str(idx.get("_class_name") or "")
+        if "ZImage" in cls:
+            family = "zimage"
+        elif cls:
+            family = "sd"
+    if family == "sd":
+        name = os.path.basename(model_id.rstrip("/\\")).lower()
+        if "z-image" in name or "zimage" in name:
+            family = "zimage"
+    _FAMILY[model_id] = family
+    return family
 
 
 def _torch_status() -> Dict[str, Any]:
@@ -40,6 +82,14 @@ def _torch_status() -> Dict[str, Any]:
 class DiffusersProvider(BaseProvider):
     id = "diffusers"
     label = "内置推理服务（diffusers）"
+
+    @property
+    def supports_zh(self) -> bool:
+        """Z-Image 的 Qwen3-4B 编码器原生吃中文；SD 系（CLIP）仍走翻译链路。"""
+        try:
+            return detect_family(self._resolve_model()) == "zimage"
+        except Exception:
+            return False
 
     def _resolve_model(self) -> str:
         model = (self.cfg.get("model") or "").strip()
@@ -92,7 +142,45 @@ class DiffusersProvider(BaseProvider):
     def _load(self, model_id: str):
         if model_id in _CACHE:
             return _CACHE[model_id]
+        if detect_family(model_id) == "zimage":
+            return self._load_zimage(model_id)
+        return self._load_sd(model_id)
 
+    def _load_zimage(self, model_id: str):
+        """Z-Image-Turbo：bf16 单流 S3-DiT + Qwen3-4B 中文编码器，8 步蒸馏。"""
+        try:
+            import torch
+            from diffusers import ZImagePipeline
+        except Exception as e:  # pragma: no cover
+            raise RuntimeError(
+                "Z-Image 需要较新版本的 diffusers（含 ZImagePipeline）。请执行：\n"
+                "  pip install -U diffusers\n"
+                f"原始错误：{e}"
+            )
+        # cuDNN 卷积算法启发式在显存紧张时会选中非 Tensor Core 慢速路径
+        # （实测 4090 上 VAE 解码从 5s 劣化到 4 分钟以上，非确定性复现），
+        # 开 benchmark 按实际 shape 自动调优，确定性走最快算法
+        torch.backends.cudnn.benchmark = True
+        if not torch.cuda.is_available():
+            raise RuntimeError(
+                "Z-Image 是 bf16 单流 DiT，需要 CUDA GPU（如 RTX 4090）；CPU 推理不可行。"
+                "无 GPU 请切回 SD1.5 系模型。"
+            )
+        # low_cpu_mem_usage 保持默认 True：实测 False 会让推理慢 10 倍以上
+        # （主线程直连对照实验：True 加载 20s + 推理 10s；False 推理 4-17 分钟），
+        # 且 True 加载完整性无问题（同种子出图与 False 完全一致）。
+        pipe = ZImagePipeline.from_pretrained(model_id, torch_dtype=torch.bfloat16)
+        pipe.to("cuda")
+        pipe.set_progress_bar_config(disable=True)
+        caps: Dict[str, Any] = {
+            "family": "zimage", "lora": None, "ipAdapter": None, "lcm": None,
+            "notes": ["Z-Image：中文提示词直喂无需翻译；SD1.5 LoRA/IP-Adapter 不适用"],
+        }
+        _CAPS[model_id] = caps
+        _CACHE[model_id] = pipe
+        return pipe
+
+    def _load_sd(self, model_id: str):
         try:
             import torch
             from diffusers import AutoPipelineForText2Image
@@ -105,6 +193,9 @@ class DiffusersProvider(BaseProvider):
             )
 
         use_cuda = torch.cuda.is_available()
+        if use_cuda:
+            # 同 _load_zimage：防止 cuDNN 选中慢速卷积路径劣化 VAE 解码
+            torch.backends.cudnn.benchmark = True
         dtype = torch.float16 if use_cuda else torch.float32
         kwargs: Dict[str, Any] = {"torch_dtype": dtype, "safety_checker": None}
         # 本地目录只有 fp16 权重时必须显式声明 variant，否则会找不到 fp32 分片
@@ -226,6 +317,38 @@ class DiffusersProvider(BaseProvider):
         _CACHE[key] = pipe
         return pipe
 
+    def _run_zimage(self, model_id: str, prompt: str, width: int, height: int,
+                    steps: Optional[int], seed: Optional[int], generator: Any, n: int):
+        """Z-Image 文生图：8 次 DiT 前向、CFG 固定 0、1024² 原生分辨率。
+
+        注意：
+        - 调度器把 step 0 当热身，num_inference_steps=9 才对应 8 次前向；
+        - Turbo 蒸馏已内化 CFG，guidance_scale 给正值反而掉画质；
+        - 参考图（ref）在当前版本忽略：Z-Image 暂无 img2img 管线，
+          角色一致性请切回 SD 族 refMode=ip/img2img，或后续接 Z-Image-Editor。
+        """
+        import torch
+
+        pipe = self._load(model_id)
+        use_steps = 9 if not steps else max(4, min(int(steps), 12))
+        w = int(width) // 16 * 16
+        h = int(height) // 16 * 16
+        images = []
+        for i in range(max(1, min(n, 4))):
+            out = pipe(
+                prompt=prompt,
+                num_inference_steps=use_steps,
+                guidance_scale=0.0,
+                height=h,
+                width=w,
+                generator=generator,
+            )
+            images.append(out.images[0].convert("RGBA"))
+            if generator is not None and seed is not None:
+                generator = torch.Generator(device=generator.device).manual_seed(int(seed) + i + 1)
+        return images, {"steps": use_steps, "cfg": 0.0, "family": "zimage",
+                        "mode": "txt2img", "turbo": True}
+
     def _run(self, model_id: str, prompt: str, negative: str, width: int, height: int,
              steps: int, cfg: float, seed: Optional[int], n: int,
              ref: Optional[Any] = None, strength: float = 0.6):
@@ -236,12 +359,14 @@ class DiffusersProvider(BaseProvider):
         if seed is not None:
             generator = torch.Generator(device="cuda" if torch.cuda.is_available() else "cpu").manual_seed(int(seed))
 
-        w = int(width) // 8 * 8
-        h = int(height) // 8 * 8
-
-        # 必须先加载：caps 是 _load 里写入的，先读会拿到空字典，
+        family = _CAPS.get(model_id, {}).get("family") or detect_family(model_id)
+        if family == "zimage":
+            return self._run_zimage(model_id, prompt, width, height, steps, seed, generator, n)
+        # SD 族：必须先加载——caps 是 _load 里写入的，先读会拿到空字典，
         # 导致 IP-Adapter 明明挂上了却不传参考图 → UNet 报 NoneType
         base_pipe = self._load(model_id)
+        w = int(width) // 8 * 8
+        h = int(height) // 8 * 8
         caps = _CAPS.get(model_id, {})
         is_lcm = bool(caps.get("lcm"))
         is_turbo = "turbo" in model_id.lower()
@@ -315,9 +440,16 @@ class DiffusersProvider(BaseProvider):
         strength: float = 0.6,
     ) -> ProviderResult:
         model_id = self._resolve_model()
+        family = detect_family(model_id)
         if steps is None:
-            # 蒸馏模型（turbo / LCM）只需极少步数，28 步纯属浪费
-            steps = 4 if "turbo" in model_id.lower() else 28
+            # 蒸馏模型只需极少步数：Z-Image 9 步（8 次前向）、turbo 4 步，
+            # 普通 SD 28 步；28 步纯属浪费
+            if family == "zimage":
+                steps = 9
+            elif "turbo" in model_id.lower():
+                steps = 4
+            else:
+                steps = 28
         async with _LOCK:
             images, meta = await asyncio.to_thread(
                 self._run, model_id, prompt, self.cfg.get("negativePrompt", ""),
@@ -346,9 +478,11 @@ class DiffusersProvider(BaseProvider):
             extra.append(f"LoRA {os.path.basename(caps['lora']['path'])}@{caps['lora']['scale']}")
         if caps.get("ipAdapter"):
             extra.append(f"IP-Adapter@{caps['ipAdapter']['scale']}")
+        family = detect_family(model)
         return {
             "ok": True,
-            "message": f"{st['device']} · {st['vramGB']}GB 显存 · 模型 {model}"
+            "message": f"{st['device']} · {st['vramGB']}GB 显存 · 模型 {model} · 族 {family}"
+                       + ("（中文直喂）" if family == "zimage" else "")
                        + ("" if model not in _CACHE else " · 已加载")
                        + (f" · {' · '.join(extra)}" if extra else ""),
             "caps": caps,

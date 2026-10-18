@@ -1,6 +1,6 @@
 # PixelForge 设计文档（Design & Progress）
 
-> 版本：V1.1 ｜ 更新：2026-10-18
+> 版本：V1.2 ｜ 更新：2026-10-18（接入 Z-Image-Turbo 原生中文底座）
 > 目的：让任何新接手的人**不看聊天记录、不翻外部资料**也能理解项目全貌并继续开发。
 > 关联文档：仓库内 `README.md`（如何跑起来）、仓库外 `PixelForge-项目方案.md`（产品愿景 V1.0）。
 
@@ -28,6 +28,7 @@
 |---|---|---|
 | Provider 抽象 | ✅ | `mock` / `diffusers`(本地) / `openai_compat`(云端) / `a1111`，统一 `generate()` |
 | 内置 diffusers 推理 | ✅ | txt2img + img2img（`from_pipe` 共享权重）· 懒加载 · 单例缓存 · 6GB 显存自适应 · 国内 hf-mirror |
+| **Z-Image 原生中文底座** | ✅ | `detect_family()` 模型族识别 · `ZImagePipeline` bf16 · 8 步蒸馏 · `supports_zh` 为真时全链路自动跳过翻译 |
 | 角色一致性 | ✅ | 两条路：`refMode=ip`（IP-Adapter 控身份，推荐）/ `refMode=img2img`（参考图当初始图） |
 | 中文提示词翻译 | ✅ | 领域词典优先（覆盖 90-100%）→ 漏译/长描述时本地 Marian 机翻兜底（`opus-mt-zh-en`），术语表校正 |
 | 工作流引擎 | ✅ | 3 条工作流 · 多段步骤 · 单步重跑 · 产物自动传递 · 状态落盘 `data/runs/{id}.json` |
@@ -81,14 +82,16 @@
 │  · 资产服务（storage.py + index.json）       │
 ├─────────────────────────────────────────────┤
 │ 推理层（providers/diffusers_local.py）       │
+│  Z-Image-Turbo（默认，中文直喂，8 步蒸馏）    │
 │  SD1.5 底座 + LCM LoRA(提速) + 像素 LoRA     │
-│  + IP-Adapter(一致性)                        │
+│  + IP-Adapter(一致性，仅 SD 族)              │
 ├─────────────────────────────────────────────┤
 │ 后处理层 pipelines/                          │
 │  matte(抠图) pixelize(像素化) resize sheet   │
 │  seamless(无缝) tile(瓦片) watermark sprite  │
 ├─────────────────────────────────────────────┤
 │ 提示词翻译 zh2en.py + mt.py(Marian 机翻)     │
+│  （Z-Image 族自动跳过，仅 SD 族走此链路）     │
 └─────────────────────────────────────────────┘
 ```
 
@@ -152,57 +155,137 @@ cd frontend && npm install && npm run build && cd ..
 
 ### 4.3 当前配置状态
 
-`data/settings.json` 默认 `activeProvider = "diffusers"`，模型指向 `models/dreamshaper-8`，`ipAdapterScale 0.75` / `loraScale 0.8` / `refMode ip`。
+`data/settings.json` 默认 `activeProvider = "mock"`（在设置页切换到 `diffusers` 即用真模型）。
+diffusers provider 默认模型为 `models/z-image-turbo`（Z-Image 族，中文直喂）；
+`ipAdapter` / `lora` / `lcmLora` 留空时自动探测 `models/` 下默认目录，**仅 SD1.5 族生效**。
+一键部署：`bash backend/install_gpu_deps.sh && bash backend/fetch_zimage.sh`，
+冒烟：`python backend/smoke_zimage.py`。
 
 ---
 
 ## 五、模型选型分析：中文提示词更优的开源本地模型
 
+> 2026-10-18 重写：本机已确认是 **RTX 4090 24GB**（早期文档按 6GB 显卡论证，选型空间被严重低估），
+> 且 Z-Image-Turbo 已于 2025-11 开源并成为中文开源生图的新标杆。本章以 4090 24GB 为约束重排。
+
 ### 5.1 现状问题
 
-当前底座是 **SD1.5（dreamshaper-8）+ CLIP 文本编码器**。CLIP 训练语料以英文为主，直接喂中文会丢语义，因此必须走「中文 → 词典/机翻 → 英文 → CLIP」的**间接链路**（`zh2en.py`）。这套词典 + Marian 机翻方案在短语式游戏素材描述上覆盖率高、够用，但**语义有天然损耗**，遇到长句、生僻词、文化意象时仍会打折。
+早期底座是 **SD1.5（dreamshaper-8）+ CLIP 文本编码器**。CLIP 训练语料以英文为主，直接喂中文会丢语义，因此必须走「中文 → 词典/机翻 → 英文 → CLIP」的间接链路（`zh2en.py` + `mt.py`）。这套方案在短语式游戏素材描述上覆盖率高、够用，但语义有天然损耗。
 
-### 5.2 根本解法：换「原生中文文本编码器」的底座
+### 5.2 2026-10 中文友好开源模型横评（按 4090 24GB 适配排序）
 
-开源社区已出现一批用**中文 LLM 做文本编码器**（而非 CLIP）的生图模型，能**直接吃中文提示词**，从根上绕开翻译损耗。按本项目「像素素材 + 本地优先 + 消费级硬件」的约束排序：
+| 排序 | 模型 | 文本编码器 | 中文能力 | 架构/体积 | 4090 24GB 适配 | 许可 | 结论 |
+|---|---|---|---|---|---|---|---|
+| **1** | **Z-Image-Turbo**（阿里通义，2025-11） | Qwen3-4B | **原生中文直喂**，指令理解率 92% | 6B S3-DiT 单流，bf16 约 20GB | ✅ 全载，**8 步约 2.5s/张** | Apache 2.0 | ⭐ **已落地为本项目默认底座**（见 §4.3） |
+| 2 | Qwen-Image 2.0（阿里，2026-02） | Qwen2.5-VL 7B | 中文文字渲染顶尖，语义编辑强 | 20.4B DiT | ⚠️ FP16 42GB 超了；FP8 约 22GB 勉强进，需 offload | Apache 2.0 | 备选：图内中文字样 / 指令式角色编辑 |
+| 3 | GLM-Image（智谱） | Glyph-byT5 | 双语文字渲染 #1（CVTG-2K 91.16%） | 16B（9B AR + 7B DiT） | ⚠️ 需 offload | MIT | 观察：游戏招牌/标题嵌字 |
+| 4 | Kolors 2.1（快手） | GLM | 中文美学/写实强 | SDXL 架构，8-12GB | ✅ 宽松 | 商用需登记 | 生态备选：唯一能复用 SDXL 像素 LoRA |
+| 5 | HunyuanImage 3.0（腾讯） | — | 中文尚可 | 80B MoE | ❌ 单卡跑不动 | 开源 | 排除 |
+| 6 | FLUX.2 [dev] | T5（偏英文） | 中文弱 | 32B | ⚠️ 24GB 紧张 | 商用另收费 | 不推荐（中文弱 + 许可） |
 
-| 排序 | 模型 | 文本编码器 | 中文支持 | 架构/体积 | 显存 | 许可 | 适配像素素材 | 结论 |
-|---|---|---|---|---|---|---|---|---|
-| **1** | **Kolors（快手可图）** | ChatGLM3-6B | **原生中文（最强）** | SDXL 系 UNet，2.6B | 8–12GB（量化可更低） | Apache 2.0（商用需登记） | **好**：兼容 SDXL 像素 LoRA 生态 | ⭐ **首选** |
-| 2 | Qwen-Image（阿里） | Qwen2.5-VL | 原生中文，文字渲染顶尖 | 20B MMDiT | 12GB+ 起步 | Apache 2.0 | 一般：偏海报/文字，对像素素材偏重 | 备选（重） |
-| 3 | SD3.5 Medium/Large | T5+CLIP | 原生中文 | DiT | 6–12GB | 社区许可 | 中：LoRA 生态比 SDXL 薄 | 备选 |
-| 4 | FLUX.1 schnell/dev | T5（偏英文） | 中文弱 | 12B | 12–16GB | schnell Apache2.0 / dev 非商用 | 薄：像素 LoRA 少 | 不推荐（中文弱） |
-| 5 | HunyuanDiT（腾讯）/ Z-Image（阿里） | 中文 LLM | 中文尚可 | DiT | 12GB+ | 开源 | 中 | 观察 |
+**为什么 Z-Image-Turbo 是首选**：原生中文（翻译链路整个绕过）+ 8 步蒸馏（4090 约 2.5s/张，
+与项目「快速迭代素材」的工作流匹配）+ bf16 全载进 24GB + Apache 2.0 可商用 +
+diffusers 有原生 `ZImagePipeline`（ComfyUI day-0）。开源榜第一（Artificial Analysis
+Elo 1025，超过 GPT-Image-1 / Seedream 3.0）。
 
-### 5.3 首选：Kolors 的接入评估
+### 5.3 落地方式：Z-Image 已接入（2026-10-18）
 
-**为什么是 Kolors：**
-- **中文理解最强**：ChatGLM3-6B 是全自回归 LLM（非 CLIP 对比学习），中文语义、成语、文化意象理解远超 CLIP，256 token 提示词预算（SDXL 仅 77）。
-- **生态最顺**：SDXL 同构 UNet，可直接复用 SDXL 的像素 LoRA 生态（如 Pixel Art XL 等），迁移成本最低。
-- **显存友好**：fp16 UNet 仅 5.16GB；文本编码器 ChatGLM 是主要开销（12.5GB），社区 8-bit/4-bit 量化可压到 6.78GB/3.92GB，整管线可落在 10GB 内。
+代码已落地，新增/改动：
 
-**接入成本与注意点（需新写一个 provider 或适配层）：**
-1. ChatGLM 编码器大 → 走 `Kijai/ChatGLM3-safetensors` 量化；SDXL VAE 有 fp16 溢出黑图 bug，需 fp32 或换 fp16-fix VAE。
-2. 官方 repo 是 pickle 分片（非 safetensors），diffusers 加载需注意；提示词超 256 token 静默截断。
-3. 原官方环境 pin Python 3.8（本项目是 3.13，需验证兼容）。
-4. **保留现有像素 LoRA 的复用**：需要把 SD1.5 像素 LoRA 换成 SDXL 版（如 Pixel Art XL），IP-Adapter 也需 SDXL 版本。
+1. `providers/diffusers_local.py`：新增模型族识别 `detect_family()`（读 `model_index.json`
+   的 `_class_name`，目录名兜底）；`_load_zimage()` 走 `ZImagePipeline`（bf16、
+   `low_cpu_mem_usage=False` 官方要求）；`_run_zimage()` 固定 `guidance_scale=0.0`、
+   `num_inference_steps=9`（调度器把 step 0 当热身，实际 8 次 DiT 前向）、分辨率按 16 对齐；
+   `supports_zh` 属性为真时，`main.py` / `workflows.py` 自动跳过翻译链路。
+2. `config.py`：默认模型改为 `models/z-image-turbo`。
+3. 新增脚本：`backend/install_gpu_deps.sh`（一键装 torch cu124 + diffusers）、
+   `backend/fetch_zimage.sh`（ModelScope 下载，断点续传）、
+   `backend/smoke_zimage.py`（中文提示词冒烟测试）。
+4. `fetch_model.py` 的 ALLOW 增加 Z-Image 布局（`transformer/` 分片 + `text_encoder/` 分片）。
 
-**建议落地方式：** 在 Provider 抽象下新增 `kolors` provider（或给 `diffusers_local` 加模型族分支），保留现有 SD1.5 链路作为低配兜底，实现「Kolors 原生中文（推荐）/ SD1.5 翻译链路（兜底）」双底座。
+**接入注意点（代码已处理）**：
 
-### 5.4 纯像素风专精的补充方向（不换底座，轻量）
+- Z-Image 是 bf16 单流 DiT，**CPU 推理不可行**，无 GPU 时需切回 SD 族；
+- SD1.5 的像素 LoRA / IP-Adapter / LCM 均不适用（UNet 结构不同），caps.notes 会说明；
+- 参考图（ref）当前版本在 Z-Image 分支被忽略：一致性改走双底座——动画帧 2+ 切
+  Qwen-Image-Edit-2511 指令式编辑（见 §5.5），或短期用 SD 族 `refMode=ip/img2img`；
+- diffusers 需较新版本（含 `ZImagePipeline`），`install_gpu_deps.sh` 装的是最新 stable。
 
-若暂不换底座，可只加/换**像素风 LoRA/checkpoint**提升风格一致性（不改中文翻译链路）：
+### 5.4 像素风专精：不换底座的轻量路线（对 Z-Image 同样适用）
 
-- **Pixel Art XL（nerijs）**：SDXL 像素 LoRA，等距/非等距，无触发词，配 LCM 8 步。
-- **Pixel Party XL**：整 UNet 替换的纯像素 checkpoint，128×128 出图。
-- 关键后处理铁律：**生图后 8× 最近邻降采样**（绝不 bilinear/bicubic）+ 调色板量化，本项目 `pixelize.py` 已实现这部分。
+像素风格一致性主要靠后处理而非 LoRA：
 
-### 5.5 结论
+- **1024² 出图 + 8× 最近邻降采样**（绝不 bilinear/bicubic）+ 调色板量化——
+  本项目 `pixelize.py` 已实现；大图降采样比 512² 直出细腻一个量级；
+- **cuDNN benchmark 必开**（`torch.backends.cudnn.benchmark = True`，已写进
+  `_load_zimage`/`_load_sd`）：cuDNN 卷积算法启发式在显存紧张时会选中非 Tensor Core
+  慢速路径，实测 4090 上 VAE 解码从 5s 劣化到 4 分钟以上且**非确定性复现**（py-spy
+  栈定位卡在 `vae.decode → conv_forward`）；开 benchmark 后确定性走最快算法，
+  稳态 1024² 九步 5.1s/张、峰值显存 21.0GB；
+- 若后续要风格 LoRA：Z-Image 生态的像素 LoRA 尚未成熟，可训练（DiffSynth-Studio 支持
+  Z-Image/Qwen-Image LoRA），或短期切 Kolors 2.1 复用 SDXL 的 Pixel Art XL。
 
-1. **当前 SD1.5 + 词典/机翻方案对"短语式像素素材描述"已经够用**，短句覆盖率 90-100%。
-2. **若要显著提升中文长句/复杂语义**，首选换 **Kolors**（原生中文 + SDXL 生态 + 显存可控），在 Provider 层新增适配，保留 SD1.5 兜底。
-3. Qwen-Image 中文文字渲染最强但更重、更偏海报场景，作为后续观察项。
-4. 像素风格一致性可独立用「像素 LoRA + 最近邻降采样」增强，不必依赖换底座。
+### 5.5 角色一致性设计：双底座架构（Turbo 生成 + Edit 编辑）
+
+**结论：Z-Image-Turbo 与 Qwen-Image-Edit-2511 是分工关系，不是二选一。Turbo 负责
+「从无到有」，Edit-2511 负责「从有到优」，两者都留。**
+
+IP-Adapter 路线对 Z-Image 是**关闭的**——IP-Adapter 只有 SD1.5/SDXL 版，S3-DiT 的
+`encoder_hid_dim_type` 挂载点不存在，别再尝试。
+
+#### 5.5.1 为什么 Edit 模型替代不了 Turbo（回答"能不能只留 Edit"）
+
+1. **Edit 是编辑器不是生成器**：`QwenImageEditPlusPipeline` 必须吃输入图（支持多图
+   list），无参考自由创作不是它的能力域（官方与社区口径一致）。动画工作流的第一帧
+   （一句话 → 角色）只能靠 txt2img。
+2. **成本差一个量级**：Turbo 6B/8 步/约 2.5s 每张；Edit-2511 20B/40 步/约 25s 每张
+   （Lightning 4 步蒸馏版约 3.5s，可用于迭代）。概念探索、道具/场景批量出图用 Edit
+   做纯属浪费。
+3. **显存互斥但无冲突**：两者各约 20GB，不能同时驻留 24GB；Provider 单例缓存切换时
+   自动卸载旧管线（`_load` 已实现），对用户透明。
+
+#### 5.5.2 双底座分工（推荐架构）
+
+| 阶段 | 模型 | 输入 → 输出 | 用途 |
+|---|---|---|---|
+| 帧 1 / 道具 / 场景 / 概念探索 | **Z-Image-Turbo** | 中文提示词 → 图 | 默认 txt2img，8 步 2.5s |
+| 帧 2+（保身份改姿势） | **Qwen-Image-Edit-2511** | 上一帧 + 中文指令 → 图 | 指令式编辑，2511 版专项优化了角色一致性与抗图像漂移 |
+| 低配/重 IP-Adapter 场景 | SD1.5（dreamshaper-8） | 现有链路 | 兜底，不改动 |
+
+动画工作流因此变成：**帧 1 用 Turbo 定角色 → 帧 2+ 全部走 Edit-2511**，
+指令模板：「保持角色外观、服装、配色完全不变，将姿势改为：{action}，纯色背景」。
+Turbo 在动画里只出场一次，但在道具/场景/概念探索上是主力，**不退役**。
+
+Edit-2511 的白捡能力：内置多视角生成 LoRA（角色三视图直接出）、内置光照增强 LoRA，
+对游戏素材管线直接可用。
+
+#### 5.5.3 已核实事实（2026-10-18 实测）
+
+- `Qwen/Qwen-Image-Edit-2511` 官方仓库存在，**ModelScope 有镜像**（bf16 共 53.8GB：
+  transformer 5 分片 37GB + text_encoder 4 分片 15.5GB + VAE），Apache 2.0；
+- diffusers 管线类名 `QwenImageEditPlusPipeline`（需较新 diffusers，安装脚本已装
+  git 最新版）；调用参数：`true_cfg_scale=4.0`、`guidance_scale=1.0`、40 步；
+- FP8 量化版约 20GB（`drbaph/Qwen-Image-Edit-2511-FP8`，HF only，需代理）；
+- Z-Image-Edit 官方仍是 "To be released"（ModelScope/HF 均无仓库），**不作为依赖**；
+- 2511 版核心升级正是本项目要的：角色一致性增强 + 缓解图像漂移 + 社区 LoRA 内置。
+
+#### 5.5.4 接入设计（接口已留，待模型下载后实施）
+
+- `fetch_zimage.sh` 同款脚本加 Edit-2511 仓库（bf16 走 ModelScope，或 FP8 走代理）；
+- provider 加 `qwen_edit` family 分支（`detect_family` 已支持按目录名/model_index
+  识别），复用现有 `_run` 的 ref 参数入口——动画工作流 `useRef` 步骤零改动，
+  只需把模型切到 Edit-2511；
+- 备选同家族单栈方案：Qwen-Image base（txt2img）+ Edit-2511，text_encoder 可共享
+  去重，但 base 20B FP8 更慢更紧，除非出现跨家族风格漂移问题再考虑。
+
+### 5.6 结论
+
+1. **默认底座已切 Z-Image-Turbo**：中文直喂绕过翻译链路，8 步 2.5s/张，4090 全载；
+2. SD1.5 链路保留为低配/一致性兜底（IP-Adapter 仍在 SD 族有效）；
+3. **一致性走双底座**：帧 1 生成用 Turbo，帧 2+ 编辑用 Qwen-Image-Edit-2511
+   （已核实可下载，见 §5.5.3）——Turbo 不退役，两者分工不互斥；
+4. 图内中文字样是 Qwen-Image 2.0（FP8）的活，作为第三底座观察；
+5. 像素风格靠「大图出图 + 最近邻降采样 + 调色板量化」，不必依赖换底座。
 
 ---
 
