@@ -34,6 +34,8 @@ data/*
 smoke-*.png
 .tmp/
 tmp/
+# 效果对比图（本地留档，不入库）
+compare-*.png
 
 # ---------- 环境与密钥 ----------
 .env

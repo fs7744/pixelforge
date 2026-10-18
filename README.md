@@ -69,6 +69,20 @@ SD1.5 底座（Lykon/dreamshaper-8）
 | `stabilityai/sd-turbo` | **SD2.1** | ✅ | ❌ 维度 1024 |
 | `Lykon/dreamshaper-8` | **SD1.5** | 需配 LCM LoRA | ✅ 全部兼容 |
 
+**下载卡死时走代理**（hf-mirror 晚间会被限速到 0）：
+
+```bash
+# 代理 HTTP 模式可用（SOCKS 模式在 urllib 里会被 502 拒绝）
+export HTTPS_PROXY=http://127.0.0.1:7890
+# 分块并发下载单文件，比单连接快 2-4 倍
+curl -sL -x http://127.0.0.1:7890 -r 0-0 -D - -o /dev/null URL | grep -i content-range
+```
+
+**IP-Adapter 的两个坑**（代码里已修）：
+
+1. `_CAPS` 必须在 `_load` 之后读，否则判定永远为假，导致挂了 IP 却不传参考图，UNet 报 `argument of type 'NoneType' is not iterable`
+2. IP-Adapter 要先于 LoRA 的 peft 包装挂载，否则会半途失败并留下"脏"UNet（现已做回滚）
+
 **实测参考（本机 GTX 1660 Ti，但当前装的是 CPU 版 torch）**：
 
 | 模型 | 体积 | 512² 步数 | CPU 耗时 | 质量 |

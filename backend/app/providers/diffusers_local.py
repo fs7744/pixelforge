@@ -123,6 +123,16 @@ class DiffusersProvider(BaseProvider):
         elif use_cuda:
             kwargs["variant"] = None
 
+        # 允许单独指定 VAE（缺 VAE 权重时可用同架构 VAE 顶替，先跑通再换回）
+        vae_path = (self.cfg.get("vae") or "").strip()
+        if vae_path and os.path.isdir(vae_path):
+            try:
+                from diffusers import AutoencoderKL
+
+                kwargs["vae"] = AutoencoderKL.from_pretrained(vae_path, torch_dtype=dtype)
+            except Exception:  # noqa: BLE001
+                pass
+
         pipe = AutoPipelineForText2Image.from_pretrained(model_id, **kwargs)
         if use_cuda:
             vram = torch.cuda.get_device_properties(0).total_memory / 1024**3
@@ -139,6 +149,25 @@ class DiffusersProvider(BaseProvider):
         caps: Dict[str, Any] = {"lora": None, "ipAdapter": None, "lcm": None, "notes": []}
         adapters: List[str] = []
         weights: List[float] = []
+
+        # IP-Adapter 必须先挂：它会给 UNet 加 encoder_hid_dim_type，
+        # 一旦先包了 LoRA 的 peft 包装，再挂 IP 会半途失败并留下"脏"UNet
+        # （之后每次前向都缺 image_embeds，直接报 NoneType not iterable）
+        ip_dir = self._resolve_ip_adapter()
+        if ip_dir:
+            try:
+                pipe.load_ip_adapter(ip_dir, subfolder="models",
+                                     weight_name="ip-adapter_sd15.safetensors")
+                cap_scale = float(self.cfg.get("ipAdapterScale", 0.7))
+                pipe.set_ip_adapter_scale(cap_scale)
+                caps["ipAdapter"] = {"dir": ip_dir, "scale": cap_scale}
+            except Exception as e:  # noqa: BLE001
+                caps["notes"].append(f"IP-Adapter 加载失败：{e}")
+                # 回滚：不让半个 IP-Adapter 把管线弄成不可用
+                try:
+                    pipe.unet.config.encoder_hid_dim_type = None
+                except Exception:  # noqa: BLE001
+                    pass
 
         # LCM 蒸馏 LoRA 要先挂：它决定采样器与步数策略
         lcm = self._resolve_lcm()
@@ -179,16 +208,6 @@ class DiffusersProvider(BaseProvider):
                 caps["notes"].append(f"LCM 采样器设置失败：{e}")
 
         # IP-Adapter：参考图控身份，提示词控姿势，互不抢权重
-        ip_dir = self._resolve_ip_adapter()
-        if ip_dir:
-            try:
-                pipe.load_ip_adapter(ip_dir, subfolder="models",
-                                     weight_name="ip-adapter_sd15.safetensors")
-                cap_scale = float(self.cfg.get("ipAdapterScale", 0.7))
-                pipe.set_ip_adapter_scale(cap_scale)
-                caps["ipAdapter"] = {"dir": ip_dir, "scale": cap_scale}
-            except Exception as e:  # noqa: BLE001
-                caps["notes"].append(f"IP-Adapter 加载失败：{e}")
 
         _CAPS[model_id] = caps
         _CACHE[model_id] = pipe
@@ -220,6 +239,9 @@ class DiffusersProvider(BaseProvider):
         w = int(width) // 8 * 8
         h = int(height) // 8 * 8
 
+        # 必须先加载：caps 是 _load 里写入的，先读会拿到空字典，
+        # 导致 IP-Adapter 明明挂上了却不传参考图 → UNet 报 NoneType
+        base_pipe = self._load(model_id)
         caps = _CAPS.get(model_id, {})
         is_lcm = bool(caps.get("lcm"))
         is_turbo = "turbo" in model_id.lower()
@@ -240,12 +262,19 @@ class DiffusersProvider(BaseProvider):
                   and str(self.cfg.get("refMode") or "ip") != "img2img")
         i2i = ref is not None and not use_ip
 
-        pipe = self._load_i2i(model_id) if i2i else self._load(model_id)
+        pipe = self._load_i2i(model_id) if i2i else base_pipe
         init = None
         if i2i:
             init = ref.convert("RGB").resize((w, h), _Image.LANCZOS)
             strength = float(min(max(strength, 0.2), 0.95))
         ip_image = ref.convert("RGB") if use_ip else None
+
+        # 一旦挂上 IP-Adapter，UNet 每次前向都要求 image_embeds：
+        # 没有参考图时必须传一张占位图并把强度调到 0，否则直接抛 NoneType 错误
+        if caps.get("ipAdapter"):
+            pipe.set_ip_adapter_scale(caps["ipAdapter"]["scale"] if use_ip else 0.0)
+            if ip_image is None:
+                ip_image = _Image.new("RGB", (64, 64), (127, 127, 127))
 
         images = []
         for i in range(max(1, min(n, 4))):
