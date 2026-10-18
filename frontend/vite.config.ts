@@ -8,6 +8,7 @@ export default defineConfig({
     proxy: {
       '/api': 'http://127.0.0.1:8787',
       '/files': 'http://127.0.0.1:8787',
+      '/style-samples': 'http://127.0.0.1:8787',
     },
   },
   build: { outDir: 'dist' },

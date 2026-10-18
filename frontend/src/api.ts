@@ -27,6 +27,8 @@ export type StyleInfo = {
   tags: string[]
   hint: string
   pixelize?: { block: number; colors: number }
+  /** 画风示例图 URL（gen_style_samples.py 生成过才有） */
+  sample?: string | null
 }
 
 export type ProviderInfo = {

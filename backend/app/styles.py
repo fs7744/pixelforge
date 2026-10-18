@@ -11,6 +11,11 @@ from __future__ import annotations
 
 from typing import Any, Dict, List, Optional
 
+from .config import STYLE_SAMPLES_DIR
+
+# 画风示例图 URL 前缀（main.py 挂载）；文件不存在时前端回落纯文字 tooltip
+SAMPLE_URL_PREFIX = "/style-samples"
+
 STYLES: List[Dict[str, Any]] = [
     # ---------------- 像素类 ----------------
     {
@@ -165,10 +170,25 @@ _BY_ID: Dict[str, Dict[str, Any]] = {s["id"]: s for s in STYLES}
 
 
 def list_styles() -> List[Dict[str, Any]]:
-    """画风列表（去掉大字段，给前端 chips 用）。"""
-    return [{"id": s["id"], "name": s["name"], "en": s["en"],
-             "tags": s["tags"], "hint": s["hint"],
-             "pixelize": s.get("pixelize")} for s in STYLES]
+    """画风列表（去掉大字段，给前端 chips 用）。
+
+    sample：示例图 URL（gen_style_samples.py 生成过才返回），供悬浮 tooltip 展示。
+    """
+    out = []
+    for s in STYLES:
+        sample_file = STYLE_SAMPLES_DIR / f"{s['id']}.png"
+        out.append(
+            {
+                "id": s["id"],
+                "name": s["name"],
+                "en": s["en"],
+                "tags": s["tags"],
+                "hint": s["hint"],
+                "pixelize": s.get("pixelize"),
+                "sample": f"{SAMPLE_URL_PREFIX}/{s['id']}.png" if sample_file.is_file() else None,
+            }
+        )
+    return out
 
 
 def get_style(style_id: Optional[str]) -> Optional[Dict[str, Any]]:

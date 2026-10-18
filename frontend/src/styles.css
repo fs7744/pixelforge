@@ -119,6 +119,29 @@ button, input, textarea, select { font-family: inherit; }
 .chip.on { background: var(--green); color: #0a0a0a; border-color: var(--green); font-weight: 600; }
 .chip.sm { font-family: var(--chip); font-size: 8px; }
 
+/* ---------- 画风示例 tooltip ---------- */
+.style-tip {
+  position: fixed; z-index: 200; width: 252px;
+  background: #101014; border: 1px solid var(--line);
+  box-shadow: 6px 6px 0 rgba(0, 0, 0, 0.65);
+  display: flex; flex-direction: column;
+  animation: style-tip-in 0.12s ease-out;
+}
+@keyframes style-tip-in {
+  from { opacity: 0; transform: translateY(-3px); }
+  to { opacity: 1; transform: none; }
+}
+.style-tip-img { width: 100%; aspect-ratio: 1 / 1; border-bottom: 1px solid var(--line); }
+.style-tip-img img { width: 100%; height: 100%; object-fit: cover; display: block; }
+.style-tip-none {
+  width: 100%; height: 100%; display: grid; place-items: center; text-align: center;
+  font-family: var(--chip); font-size: 8px; color: var(--muted); line-height: 2;
+}
+.style-tip-body { padding: 10px 12px; display: flex; flex-direction: column; }
+.style-tip-name { font-size: 13px; font-weight: 600; color: var(--white); }
+.style-tip-en { font-family: var(--chip); font-size: 8px; color: var(--muted); margin-top: 2px; }
+.style-tip-hint { font-size: 11px; color: var(--muted); line-height: 1.7; margin-top: 6px; }
+
 .row { display: flex; gap: 8px; align-items: center; }
 .row.between { justify-content: space-between; }
 .grow { flex: 1; }

@@ -18,7 +18,7 @@ from PIL import Image
 from pydantic import BaseModel
 
 from . import storage, styles, templates, zh2en
-from .config import ASSETS_DIR, DATA_DIR, ROOT, load_settings, save_settings
+from .config import ASSETS_DIR, DATA_DIR, ROOT, STYLE_SAMPLES_DIR, load_settings, save_settings
 from .pipelines import matte as matte_pipe
 from .pipelines import resize as resize_pipe
 from .pipelines import sheet as sheet_pipe
@@ -473,6 +473,10 @@ async def run_workflow_all(run_id: str):
 # ---------- 静态资源 ----------
 ASSETS_DIR.mkdir(parents=True, exist_ok=True)
 app.mount("/files", StaticFiles(directory=str(ASSETS_DIR)), name="files")
+
+# 画风示例图：gen_style_samples.py 生成后才挂载，避免目录不存在启动报错
+if STYLE_SAMPLES_DIR.is_dir():
+    app.mount("/style-samples", StaticFiles(directory=str(STYLE_SAMPLES_DIR)), name="style-samples")
 
 EXPORTS_DIR = DATA_DIR / "exports"
 EXPORTS_DIR.mkdir(parents=True, exist_ok=True)

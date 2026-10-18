@@ -29,6 +29,9 @@ models/
 # ---------- 运行时数据（API Key / 生成产物 / 工作流状态 / 导出包） ----------
 data/*
 !data/.gitkeep
+# 画风示例图是静态资产（gen_style_samples.py 生成，约 3MB），随仓库分发，
+# 保证新克隆画风 tooltip 开箱即有图；删除此行则需本地跑一次生成脚本
+!data/style_samples/
 
 # ---------- 冒烟测试与临时产物 ----------
 smoke-*.png

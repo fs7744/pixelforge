@@ -1,7 +1,149 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { createPortal } from 'react-dom'
 import { api, Asset, ProviderInfo, StyleInfo, Template } from '../api'
 
 type Props = { onSendToPost: (asset: Asset) => void }
+
+// 画风 chip：悬浮（120ms 延迟）/点击弹出示例图 tooltip。
+// 左侧 .panel 有 overflow-y:auto，组件内绝对定位会被裁剪，所以走 portal + fixed 定位，
+// 打开期间监听 scroll/resize 重定位；触屏没有 hover，用点击打开、点外部/Esc 关闭。
+function StyleChip({ style, active, onSelect }: { style: StyleInfo; active: boolean; onSelect: () => void }) {
+  const btnRef = useRef<HTMLButtonElement>(null)
+  const [open, setOpen] = useState(false)
+  const [pos, setPos] = useState<{ top: number; left: number } | null>(null)
+  const showTimer = useRef<number | undefined>(undefined)
+  const hideTimer = useRef<number | undefined>(undefined)
+
+  const clearTimers = useCallback(() => {
+    window.clearTimeout(showTimer.current)
+    window.clearTimeout(hideTimer.current)
+  }, [])
+
+  const place = useCallback(() => {
+    const el = btnRef.current
+    if (!el) return
+    const r = el.getBoundingClientRect()
+    const W = 252
+    const H = 400 // 预估高度：252 方图 + 文字区
+    let left = Math.min(r.left, window.innerWidth - W - 12)
+    left = Math.max(8, left)
+    let top = r.bottom + 8
+    if (top + H > window.innerHeight - 8) top = Math.max(8, r.top - H - 8) // 下方不够则翻到上方
+    setPos({ top, left })
+  }, [])
+
+  const show = useCallback(() => {
+    window.clearTimeout(hideTimer.current)
+    window.clearTimeout(showTimer.current)
+    showTimer.current = window.setTimeout(() => {
+      place()
+      setOpen(true)
+    }, 120)
+  }, [place])
+
+  const hide = useCallback(() => {
+    window.clearTimeout(showTimer.current)
+    window.clearTimeout(hideTimer.current)
+    hideTimer.current = window.setTimeout(() => setOpen(false), 160) // 留出移入 tooltip 的缓冲
+  }, [])
+
+  const cancelHide = useCallback(() => window.clearTimeout(hideTimer.current), [])
+
+  useEffect(() => clearTimers, [clearTimers])
+
+  // 打开期间：滚动/缩放跟随、Esc 关闭、点外部关闭（点 chip 由 onClick 重新打开，保证全局只有一个 tooltip）
+  useEffect(() => {
+    if (!open) return
+    const follow = () => place()
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') setOpen(false)
+    }
+    const onPointerDown = (e: PointerEvent) => {
+      const t = e.target as HTMLElement | null
+      if (t?.closest('.style-tip')) return
+      setOpen(false)
+    }
+    window.addEventListener('scroll', follow, true)
+    window.addEventListener('resize', follow)
+    window.addEventListener('keydown', onKey)
+    window.addEventListener('pointerdown', onPointerDown, true)
+    return () => {
+      window.removeEventListener('scroll', follow, true)
+      window.removeEventListener('resize', follow)
+      window.removeEventListener('keydown', onKey)
+      window.removeEventListener('pointerdown', onPointerDown, true)
+    }
+  }, [open, place])
+
+  return (
+    <>
+      <button
+        ref={btnRef}
+        type="button"
+        className={`chip ${active ? 'on' : ''}`}
+        onClick={() => {
+          onSelect()
+          place()
+          setOpen(true)
+        }}
+        onMouseEnter={show}
+        onMouseLeave={hide}
+        onFocus={show}
+        onBlur={hide}
+        aria-describedby={open ? `style-tip-${style.id}` : undefined}
+      >
+        {style.name}
+      </button>
+      {open &&
+        pos &&
+        createPortal(
+          <div
+            id={`style-tip-${style.id}`}
+            role="tooltip"
+            className="style-tip"
+            style={{ top: pos.top, left: pos.left }}
+            onMouseEnter={cancelHide}
+            onMouseLeave={hide}
+          >
+            <div className="checker style-tip-img">
+              {style.sample ? (
+                <img
+                  src={style.sample}
+                  alt={`${style.name}画风示例`}
+                  loading="lazy"
+                  style={{ imageRendering: style.pixelize ? 'pixelated' : 'auto' }}
+                />
+              ) : (
+                <div className="style-tip-none">
+                  示例图未生成
+                  <br />
+                  跑 backend/gen_style_samples.py
+                </div>
+              )}
+            </div>
+            <div className="style-tip-body">
+              <div className="style-tip-name">{style.name}</div>
+              <div className="style-tip-en">{style.en}</div>
+              <div className="chips" style={{ marginTop: 4 }}>
+                {style.tags.map((t) => (
+                  <span key={t} className="chip sm">
+                    {t}
+                  </span>
+                ))}
+              </div>
+              <div className="style-tip-hint">{style.hint}</div>
+              {style.pixelize && (
+                <span className="tag" style={{ marginTop: 6, alignSelf: 'flex-start' }}>
+                  建议像素化 {style.pixelize.block}× · {style.pixelize.colors} 色
+                </span>
+              )}
+            </div>
+          </div>,
+          document.body,
+        )}
+    </>
+  )
+}
 
 export default function Workbench({ onSendToPost }: Props) {
   const [templates, setTemplates] = useState<Template[]>([])
@@ -151,9 +293,7 @@ export default function Workbench({ onSendToPost }: Props) {
               不限定
             </button>
             {styles.map((s) => (
-              <button key={s.id} className={`chip ${styleId === s.id ? 'on' : ''}`} onClick={() => setStyleId(s.id)}>
-                {s.name}
-              </button>
+              <StyleChip key={s.id} style={s} active={styleId === s.id} onSelect={() => setStyleId(s.id)} />
             ))}
           </div>
           {styleId && (() => {
