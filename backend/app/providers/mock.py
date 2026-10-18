@@ -116,6 +116,7 @@ class MockProvider(BaseProvider):
         seed: Optional[int] = None,
         n: int = 1,
         ref: Optional[Image.Image] = None,
+        strength: float = 0.6,
     ) -> ProviderResult:
         n = max(1, min(n, 6))
         if n == 1:

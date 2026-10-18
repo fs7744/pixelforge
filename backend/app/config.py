@@ -24,8 +24,15 @@ DEFAULT_SETTINGS: Dict[str, Any] = {
             "label": "内置推理服务（diffusers）",
             "baseUrl": "",
             "apiKey": "",
-            "model": "stabilityai/sd-turbo",
+            "model": "models/dreamshaper-8",
             "negativePrompt": "blurry, low quality, watermark, text",
+            # 一致性增强（留空则自动探测 models/ 下的默认目录）
+            "ipAdapter": "",
+            "ipAdapterScale": 0.7,
+            "lora": "",
+            "loraScale": 0.85,
+            "lcmLora": "",
+            "refMode": "ip",
             "enabled": True,
         },
         "openai_compat": {

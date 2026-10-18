@@ -32,9 +32,19 @@ def normalize_frame(
     matte: bool = True,
     tolerance: int = 80,
     feather: int = 4,
+    inset: float = 0.0,
 ) -> Tuple[Image.Image, dict]:
-    """把任意帧规整成 size×size 的透明底精灵帧。"""
+    """把任意帧规整成 size×size 的透明底精灵帧。
+
+    inset：先向内裁掉一圈（按比例）。AI 出图常自带「画框 / 描边相框」，
+    不先切掉会被当成角色的一部分留下。
+    """
     work = img.convert("RGBA")
+    if inset > 0:
+        dx = int(work.width * inset)
+        dy = int(work.height * inset)
+        if dx * 2 < work.width and dy * 2 < work.height:
+            work = work.crop((dx, dy, work.width - dx, work.height - dy))
     matte_meta = {}
     if matte:
         work, matte_meta = matte_pipe.connected_matte(work, tolerance=tolerance, feather=feather)
@@ -66,6 +76,7 @@ def normalize_frame(
         "sourceBox": list(bbox),
         "scale": round(scale, 4),
         "anchor": anchor,
+        "inset": inset,
         "matte": matte_meta,
     }
     return canvas, meta

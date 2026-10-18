@@ -148,9 +148,73 @@ export default function SettingsView() {
                         onChange={(e) => update(pid, 'negativePrompt', e.target.value)}
                       />
                     </div>
+                    <div className="row">
+                      <div className="grow">
+                        <div className="label">IP-Adapter 目录（留空自动探测 models/ip-adapter-sd15）</div>
+                        <input
+                          className="input"
+                          placeholder="models/ip-adapter-sd15"
+                          value={(cfg as any).ipAdapter || ''}
+                          onChange={(e) => update(pid, 'ipAdapter', e.target.value)}
+                        />
+                      </div>
+                      <div style={{ width: 110 }}>
+                        <div className="label">参考强度</div>
+                        <input
+                          className="input"
+                          type="number"
+                          step="0.05"
+                          min="0"
+                          max="1"
+                          value={(cfg as any).ipAdapterScale ?? 0.7}
+                          onChange={(e) => update(pid, 'ipAdapterScale', Number(e.target.value))}
+                        />
+                      </div>
+                    </div>
+                    <div className="row">
+                      <div className="grow">
+                        <div className="label">像素 LoRA 文件（留空自动探测 models/lora-pixel-redmond）</div>
+                        <input
+                          className="input"
+                          placeholder="models/lora-pixel-redmond/xxx.safetensors"
+                          value={(cfg as any).lora || ''}
+                          onChange={(e) => update(pid, 'lora', e.target.value)}
+                        />
+                      </div>
+                      <div style={{ width: 110 }}>
+                        <div className="label">LoRA 权重</div>
+                        <input
+                          className="input"
+                          type="number"
+                          step="0.05"
+                          min="0"
+                          max="1.5"
+                          value={(cfg as any).loraScale ?? 0.85}
+                          onChange={(e) => update(pid, 'loraScale', Number(e.target.value))}
+                        />
+                      </div>
+                    </div>
+                    <div>
+                      <div className="label">参考图模式</div>
+                      <div className="chips">
+                        {[
+                          { v: 'ip', t: 'IP-Adapter（推荐）' },
+                          { v: 'img2img', t: 'img2img' },
+                        ].map((o) => (
+                          <button
+                            key={o.v}
+                            className={`chip ${((cfg as any).refMode || 'ip') === o.v ? 'on' : ''}`}
+                            onClick={() => update(pid, 'refMode', o.v)}
+                          >
+                            {o.t}
+                          </button>
+                        ))}
+                      </div>
+                    </div>
                     <div className="hint">
                       Turbo 模型自动使用 1-8 步 / CFG 0；6GB 显存会自动开启 attention slicing。
                       国内网络可设环境变量 HF_ENDPOINT=https://hf-mirror.com 后重启服务。
+                      权重下载：<code>python backend/fetch_support.py</code>
                     </div>
                     <div className="row">
                       <button

@@ -164,7 +164,7 @@ export default function WorkflowView() {
           {english && (
             <>
               <div className="label" style={{ marginTop: 8 }}>
-                英文描述 · 本地 SD 模型必填（CLIP 只认英文）
+                英文描述 · 可选（留空则自动翻译上面的中文）
               </div>
               <textarea
                 className="textarea"
@@ -399,10 +399,14 @@ export default function WorkflowView() {
   )
 }
 
-function promptOf(step: StepDef, input: string, action: string, run: any) {
-  return (step.prompt || '')
-    .replace('{input}', input)
-    .replace('{action}', action)
-    .replace('{layer}', (run?.steps?.[0]?.meta?.labels?.[0] as string) || '目标图层')
-    .replace('{element}', '目标元素')
+function promptOf(step: StepDef, input: string, action: string, run: any, english = false) {
+  const tpl = (english && step.promptEn ? step.promptEn : step.prompt) || ''
+  const layers = (english && step.layerNamesEn ? step.layerNamesEn : step.layerNames) || []
+  const label = run?.steps?.[0]?.meta?.labels?.[0] as string | undefined
+  const layer = layers[0] || label || (english ? 'target layer' : '目标图层')
+  return tpl
+    .replace(/\{input\}/g, input)
+    .replace(/\{action\}/g, action)
+    .replace(/\{layer\}/g, layer)
+    .replace(/\{element\}/g, english ? 'target element' : '目标元素')
 }

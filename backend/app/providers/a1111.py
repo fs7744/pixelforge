@@ -25,6 +25,7 @@ class A1111Provider(BaseProvider):
         seed: Optional[int] = None,
         n: int = 1,
         ref: Optional[Image.Image] = None,
+        strength: float = 0.6,
     ) -> ProviderResult:
         base = (self.cfg.get("baseUrl") or "http://127.0.0.1:7860").rstrip("/")
         payload = {
@@ -40,8 +41,16 @@ class A1111Provider(BaseProvider):
             "override_settings": {"sd_model_checkpoint": self.cfg.get("model")}
             if self.cfg.get("model") else {},
         }
+        endpoint = "txt2img"
+        if ref is not None:
+            # 图生图：把参考图 base64 塞进 init_images，用 denoising_strength 控制改动力度
+            buf = io.BytesIO()
+            ref.convert("RGB").resize((int(width), int(height))).save(buf, "PNG")
+            payload["init_images"] = [base64.b64encode(buf.getvalue()).decode()]
+            payload["denoising_strength"] = float(min(max(strength, 0.1), 0.95))
+            endpoint = "img2img"
         async with httpx.AsyncClient(timeout=300) as client:
-            r = await client.post(f"{base}/sdapi/v1/txt2img", json=payload)
+            r = await client.post(f"{base}/sdapi/v1/{endpoint}", json=payload)
         if r.status_code >= 400:
             raise RuntimeError(f"A1111 返回 {r.status_code}: {r.text[:300]}")
         data = r.json()

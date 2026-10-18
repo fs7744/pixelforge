@@ -16,6 +16,7 @@ export type Template = {
   name: string
   hint: string
   prompt: string
+  promptEn?: string
   params: Record<string, number>
 }
 
@@ -70,6 +71,12 @@ export const api = {
       body: JSON.stringify(payload),
     }).then(json),
   testProvider: (id: string) => fetch(`/api/providers/${id}/test`, { method: 'POST' }).then(json),
+  translate: (text: string) =>
+    fetch('/api/translate', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ text }),
+    }).then(json),
   generate: (payload: {
     prompt: string
     provider?: string

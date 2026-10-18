@@ -103,7 +103,7 @@ export default function Library() {
                   <span>{new Date(a.createdAt * 1000).toLocaleDateString()}</span>
                 </div>
                 <div className="row">
-                  <a className="btn btn-ghost" href={a.url} download={`${a.name}.png`} style={{ height: 26, fontSize: 11 }}>
+                  <a className="btn btn-ghost" href={`/api/assets/${a.id}/download?label=1`} download={`${a.name}.png`} style={{ height: 26, fontSize: 11 }}>
                     下载
                   </a>
                   <button

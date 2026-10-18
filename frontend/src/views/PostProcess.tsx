@@ -391,7 +391,7 @@ export default function PostProcess({ incoming }: Props) {
           <div className="row">
             {out && (
               <>
-                <a className="btn" href={out.url} download={`${out.name}.png`}>
+                <a className="btn" href={`/api/assets/${out.id}/download?label=1`} download={`${out.name}.png`}>
                   下载 PNG
                 </a>
                 <button className="btn" onClick={() => api.exportZip([out.id])}>

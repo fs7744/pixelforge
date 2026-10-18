@@ -22,6 +22,7 @@ export default function Workbench({ onSendToPost }: Props) {
   const [results, setResults] = useState<Asset[]>([])
   const [selected, setSelected] = useState<string>('')
   const [meta, setMeta] = useState<any>(null)
+  const [translated, setTranslated] = useState('')
 
   useEffect(() => {
     api.templates().then((d) => {
@@ -50,9 +51,24 @@ export default function Workbench({ onSendToPost }: Props) {
     [templates, cat],
   )
 
+  // 本地 SD 系模型（diffusers / A1111）用 CLIP，只认英文
+  const englishOnly = provider === 'diffusers' || provider === 'a1111'
+  const hasCjk = /[\u4e00-\u9fa5]/.test(prompt)
+
+  const promptFor = (t: Template) => (englishOnly && t.promptEn ? t.promptEn : t.prompt)
+
+  // Provider 切换时，若提示词仍是模板原文（用户没改过），自动换成对应语言版本
+  useEffect(() => {
+    const t = templates.find((x) => x.id === tplId)
+    if (!t) return
+    const alt = englishOnly ? t.prompt : t.promptEn
+    if (prompt === '' || prompt === alt) setPrompt(promptFor(t))
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [provider, templates, tplId])
+
   const pickTemplate = (t: Template) => {
     setTplId(t.id)
-    setPrompt(t.prompt)
+    setPrompt(promptFor(t))
     if (t.params?.width) setWidth(t.params.width)
     if (t.params?.height) setHeight(t.params.height)
   }
@@ -123,8 +139,44 @@ export default function Workbench({ onSendToPost }: Props) {
         </div>
 
         <div>
-          <div className="label">提示词（可编辑，花括号为占位符）</div>
+          <div className="label">
+            提示词（可编辑，花括号为占位符）
+            {englishOnly && <span style={{ color: 'var(--green)' }}> · 本地模型用英文</span>}
+          </div>
           <textarea className="textarea" value={prompt} onChange={(e) => setPrompt(e.target.value)} />
+          {englishOnly && (
+            <div className="row" style={{ marginTop: 6, alignItems: 'center', gap: 8 }}>
+              <button
+                className="btn btn-ghost"
+                style={{ height: 28 }}
+                onClick={async () => {
+                  try {
+                    const r = await api.translate(prompt)
+                    setTranslated(r.english)
+                  } catch {
+                    setTranslated('')
+                  }
+                }}
+              >
+                预览英文译法
+              </button>
+              {translated && (
+                <span className="hint" style={{ color: 'var(--green)', flex: 1 }}>
+                  {translated}
+                </span>
+              )}
+            </div>
+          )}
+          {englishOnly && hasCjk && (
+            <div className="hint" style={{ color: 'var(--yellow)', marginTop: 6 }}>
+              本地模型只认英文：中文会先用领域词典自动翻译（颜色/角色/装备/动作/画风），生僻描写建议自己补英文
+            </div>
+          )}
+          {meta?.translation?.english && (
+            <div className="hint" style={{ marginTop: 6 }}>
+              本次实际送入模型：{meta.translation.english}
+            </div>
+          )}
         </div>
 
         <div>

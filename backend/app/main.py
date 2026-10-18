@@ -17,7 +17,7 @@ from fastapi.staticfiles import StaticFiles
 from PIL import Image
 from pydantic import BaseModel
 
-from . import storage, templates
+from . import storage, templates, zh2en
 from .config import ASSETS_DIR, DATA_DIR, ROOT, load_settings, save_settings
 from .pipelines import matte as matte_pipe
 from .pipelines import resize as resize_pipe
@@ -114,6 +114,15 @@ class GeneratePayload(BaseModel):
     seed: Optional[int] = None
     n: int = 1
     templateId: Optional[str] = None
+    # 中文提示词自动译成英文（SD 系模型必需）；显式关闭可原样送模型
+    autoTranslate: bool = True
+
+
+@app.post("/api/translate")
+async def translate_prompt_endpoint(payload: Dict[str, Any]):
+    text = str(payload.get("text") or "")
+    english, meta = zh2en.translate_prompt(text)
+    return {"english": english, **meta}
 
 
 @app.post("/api/generate")
@@ -124,9 +133,15 @@ async def generate(payload: GeneratePayload):
     if cfg is None:
         raise HTTPException(400, f"未配置 Provider: {pid}")
     provider = get_provider(pid, cfg)
+    # 本地 SD 系模型只认英文：中文提示词先过领域词典翻译
+    effective_prompt = payload.prompt
+    translation = None
+    if (payload.autoTranslate and not getattr(provider, "supports_zh", False)
+            and zh2en.has_chinese(payload.prompt)):
+        effective_prompt, translation = zh2en.translate_prompt(payload.prompt)
     try:
         result = await provider.generate(
-            prompt=payload.prompt,
+            prompt=effective_prompt,
             width=payload.width,
             height=payload.height,
             steps=payload.steps,
@@ -142,10 +157,16 @@ async def generate(payload: GeneratePayload):
         items.append(storage.save_asset(
             img,
             kind="generated",
-            meta={**result.meta, "prompt": payload.prompt, "templateId": payload.templateId},
-            ai_label=bool(s.get("aiLabel", True)),
+            meta={**result.meta, "prompt": effective_prompt, "sourcePrompt": payload.prompt,
+                  "templateId": payload.templateId},
+            # 存储不烧角标：单张下载时由 /api/assets/{id}/download 补显式标识，
+            # 否则角标会被后续抠图/合成带进精灵表
+            ai_label=False,
         ))
-    return {"images": items, "meta": result.meta}
+    meta = {**result.meta, "prompt": effective_prompt, "promptSource": payload.prompt}
+    if translation:
+        meta["translation"] = translation
+    return {"images": items, "meta": meta}
 
 
 # ---------- 后处理管线 ----------
@@ -293,6 +314,27 @@ async def pipeline_watermark(
 @app.get("/api/assets")
 async def assets(kind: Optional[str] = None):
     return {"assets": storage.list_assets(kind)}
+
+
+@app.get("/api/assets/{asset_id}/download")
+async def download_asset(asset_id: str, label: int = 1):
+    """单张下载：默认在下载时补上显式 AI 角标（存储不烧标，避免污染后续合成）。"""
+    item = storage.get_asset(asset_id)
+    if not item:
+        raise HTTPException(404, "资产不存在")
+    path = storage.asset_path(item)
+    if not path.exists():
+        raise HTTPException(404, "文件缺失")
+    if not label:
+        return FileResponse(str(path), media_type="image/png", filename=f"{item['name']}.png")
+    img = Image.open(path).convert("RGBA")
+    img = storage.stamp_ai_label(img)
+    buf = io.BytesIO()
+    img.save(buf, "PNG")
+    buf.seek(0)
+    return StreamingResponse(buf, media_type="image/png",
+                             headers={"Content-Disposition":
+                                      f'attachment; filename="{asset_id}.png"'})
 
 
 @app.delete("/api/assets/{asset_id}")

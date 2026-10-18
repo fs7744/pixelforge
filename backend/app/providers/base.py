@@ -33,6 +33,7 @@ class BaseProvider:
         seed: Optional[int] = None,
         n: int = 1,
         ref: Optional[Image.Image] = None,
+        strength: float = 0.6,
     ) -> ProviderResult:
         raise NotImplementedError
 

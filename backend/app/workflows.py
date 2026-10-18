@@ -14,8 +14,9 @@ from typing import Any, Dict, List, Optional, Tuple
 import numpy as np
 from PIL import Image
 
-from . import storage
+from . import storage, zh2en
 from .config import DATA_DIR, load_settings
+from .pipelines import matte as matte_pipe
 from .pipelines import resize as resize_pipe
 from .pipelines import sheet as sheet_pipe
 from .pipelines import sprite as sprite_pipe
@@ -55,10 +56,16 @@ WORKFLOWS: List[Dict[str, Any]] = [
                           "纯绿色背景，每帧姿势明显不同。",
                 "promptEn": "one single character only, exactly one figure in the frame, full body shot, "
                             "character: {input}, {action}, camera fixed, standing on the spot, "
-                            "plain solid green background, 2D chibi japanese cartoon, thick black outline, "
-                            "flat cel shading, game sprite, centered, no text, no turnaround sheet, "
+                            "plain flat solid green background single color, no gradient, no vignette, "
+                            "no frame, no border, no background objects, "
+                            "2D chibi japanese cartoon, thick black outline, flat cel shading, "
+                            "game sprite, centered, no text, no turnaround sheet, "
                             "no multiple views, no duplicate characters",
                 "n": 4,
+                # 一致性策略：第 1 帧文生图，其余帧拿第 1 帧做 img2img 参考
+                # （三视图排版不可控，直接裁切容易裁到两个视图，改用自锚定）
+                "refChain": True,
+                "refStrength": 0.58,
             },
             {
                 "id": "dedup",
@@ -81,6 +88,10 @@ WORKFLOWS: List[Dict[str, Any]] = [
                 "size": 128,
                 "anchor": "bottom",
                 "matte": True,
+                "tolerance": 72,
+                "feather": 3,
+                # AI 出图常自带画框，向内切一圈再抠（切太多会切掉脚）
+                "inset": 0.04,
             },
             {
                 "id": "sprite_sheet",
@@ -301,10 +312,42 @@ def _save_asset(img: Image.Image, **kwargs) -> Dict[str, Any]:
     """工作流中间产物不烧 AI 角标。
 
     角标一旦画进像素就会被合成进精灵表 / Godot 贴图，整包素材作废。
-    合规标识放到「导出」环节（Godot 包内 AI_GENERATED.txt + 导出角标）。
+    合规标识放到「导出」环节（ZIP 内 AI_GENERATED.txt + 下载时补标）。
     """
     kwargs.setdefault("ai_label", False)
     return storage.save_asset(img, **kwargs)
+
+
+def _step_artifacts(run: Dict[str, Any], step_id: str) -> List[str]:
+    for s in run.get("steps", []):
+        if s["id"] == step_id:
+            return list(s.get("artifacts") or [])
+    return []
+
+
+def _ref_from_sheet(img: Image.Image, view: str = "left",
+                    size: Tuple[int, int] = (384, 384)) -> Image.Image:
+    """从三视图里裁出单个视图，等比贴到方形画布上（底色调自原图），给 img2img 当参考。
+
+    直接拉伸会让角色比例失真，所以必须「等比 + 留边」，
+    留边颜色取原图左上角，避免黑边被模型当成画面内容。
+    """
+    w, h = img.size
+    if view == "middle":
+        part = img.crop((w // 3, 0, w * 2 // 3, h))
+    elif view == "right":
+        part = img.crop((w * 2 // 3, 0, w, h))
+    else:
+        part = img.crop((0, 0, w // 3, h))
+
+    rgb = part.convert("RGB")
+    bg = rgb.getpixel((2, 2))
+    scale = min(size[0] / part.width, size[1] / part.height)
+    nw = max(1, int(part.width * scale))
+    nh = max(1, int(part.height * scale))
+    canvas = Image.new("RGB", size, bg)
+    canvas.paste(rgb.resize((nw, nh), Image.LANCZOS), ((size[0] - nw) // 2, (size[1] - nh) // 2))
+    return canvas
 
 
 def _template(step: Dict[str, Any], english: bool) -> str:
@@ -320,8 +363,13 @@ def _fill(template: str, run: Dict[str, Any], step: Dict[str, Any], idx: int,
     en = step.get("layerNamesEn") or step.get("elementNamesEn") or cn
     layers = en if english else cn
     subject = run.get("input", "")
-    if english and run.get("params", {}).get("descEn"):
-        subject = run["params"]["descEn"]
+    if english:
+        desc_en = run.get("params", {}).get("descEn")
+        if desc_en:
+            subject = desc_en
+        elif zh2en.has_chinese(subject):
+            # 用户只写了中文：先过领域词典，别让 CLIP 看一堆未知 token
+            subject, _ = zh2en.translate_prompt(subject, add_style=False)
     action = run.get("params", {}).get("action") or "挥砍"
     action_en = run.get("params", {}).get("actionEn") or {
         "挥砍": "slashing with a sword",
@@ -390,6 +438,20 @@ async def run_step(run_id: str, step_id: str, overrides: Optional[Dict[str, Any]
                 gen_kw["cfg"] = float(pcfg)
             seed = run.get("params", {}).get("seed")
 
+            # 参考图：把上游产物当 img2img 初始图，解决「同一角色」的一致性
+            ref_img = None
+            ref_step = step_def.get("useRef")
+            if ref_step:
+                ref_ids = _step_artifacts(run, ref_step)
+                if ref_ids:
+                    ref_img = _ref_from_sheet(
+                        _load(ref_ids[-1]),
+                        view=str(step_def.get("refCrop", "left")),
+                        size=(pw // 8 * 8, ph // 8 * 8),
+                    )
+                    gen_kw["ref"] = ref_img
+                    gen_kw["strength"] = float(step_def.get("refStrength", 0.55))
+
             if layers or n == 1:
                 # 分层/元素提取：每项独立提示词，受限并发并行生成
                 total = n if layers else 1
@@ -418,17 +480,56 @@ async def run_step(run_id: str, step_id: str, overrides: Optional[Dict[str, Any]
                 meta["prompt"] = prompt
                 meta["concurrency"] = conc
                 meta["promptLang"] = "en" if english else "zh"
+                if ref_img is not None:
+                    meta["refStep"] = ref_step
             else:
-                # 动作关键帧：一次请求 n 张，保证同角色不同姿态
-                result = await provider.generate(prompt, pw, ph, n=n, seed=seed, **gen_kw)
-                for i, img in enumerate(result.images):
-                    artifacts.append(_save_asset(
-                        img, kind="workflow", name=f"{run['id']}-{step_id}-{i:02d}",
-                        meta={"runId": run["id"], "step": step_id, "index": i, "label": f"frame {i}"},
-                    )["id"])
-                meta = {"prompt": prompt, "frames": len(artifacts),
-                        "provider": result.meta.get("provider"),
-                        "promptLang": "en" if english else "zh"}
+                # 动作关键帧
+                if step_def.get("refChain"):
+                    # 自锚定：先文生图定角色，再拿它当 img2img 参考生成其余帧。
+                    # 这样每帧都锚在同一张脸上，不会越跑越偏。
+                    anchor: Optional[Image.Image] = None
+                    for i in range(n):
+                        kw = dict(gen_kw)
+                        if anchor is not None:
+                            kw["ref"] = anchor
+                            kw["strength"] = float(step_def.get("refStrength", 0.5))
+                        res = await provider.generate(prompt, pw, ph, n=1,
+                                                      seed=None if seed is None else int(seed) + i, **kw)
+                        for img in res.images:
+                            artifacts.append(_save_asset(
+                                img, kind="workflow", name=f"{run['id']}-{step_id}-{i:02d}",
+                                meta={"runId": run["id"], "step": step_id, "index": i,
+                                      "label": f"frame {i}", "anchored": anchor is not None},
+                            )["id"])
+                        if anchor is None and artifacts:
+                            # 锚点先抠成透明再铺纯绿底：否则模型会把锚点里的
+                            # 画框 / 草地 / 地毯当成画面内容一路继承下去
+                            base = _load(artifacts[0])
+                            try:
+                                cut, _ = matte_pipe.connected_matte(base, tolerance=70, feather=2)
+                                flat = Image.new("RGB", cut.size, (27, 67, 50))
+                                flat.paste(cut, (0, 0), cut)
+                                anchor = flat
+                            except Exception:
+                                anchor = base.convert("RGB")
+                    meta = {"prompt": prompt, "frames": len(artifacts),
+                            "provider": "diffusers", "mode": "txt2img→img2img-chain",
+                            "refStrength": float(step_def.get("refStrength", 0.5)),
+                            "promptLang": "en" if english else "zh"}
+                else:
+                    # 一次请求 n 张（无参考图时由模型自行发散姿态）
+                    result = await provider.generate(prompt, pw, ph, n=n, seed=seed, **gen_kw)
+                    for i, img in enumerate(result.images):
+                        artifacts.append(_save_asset(
+                            img, kind="workflow", name=f"{run['id']}-{step_id}-{i:02d}",
+                            meta={"runId": run["id"], "step": step_id, "index": i, "label": f"frame {i}"},
+                        )["id"])
+                    meta = {"prompt": prompt, "frames": len(artifacts),
+                            "provider": result.meta.get("provider"),
+                            "mode": result.meta.get("mode"),
+                            **({"refStep": ref_step, "refStrength": gen_kw.get("strength")}
+                               if ref_img is not None else {}),
+                            "promptLang": "en" if english else "zh"}
 
         elif stype == "dedup":
             src = overrides.get("artifacts") or _prev_artifacts(run, index)
@@ -510,6 +611,7 @@ async def run_step(run_id: str, step_id: str, overrides: Optional[Dict[str, Any]
                 matte=bool(step_def.get("matte", True)),
                 tolerance=int(step_def.get("tolerance", 80)),
                 feather=int(step_def.get("feather", 4)),
+                inset=float(step_def.get("inset", 0.0)),
             )
             for i, out in enumerate(outs):
                 artifacts.append(_save_asset(
