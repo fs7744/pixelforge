@@ -28,7 +28,7 @@ export default function WorkflowView() {
   const [promptDraft, setPromptDraft] = useState('')
   const [english, setEnglish] = useState(false)
   const [size, setSize] = useState(512)
-  const [descEn, setDescEn] = useState('a grey and white british shorthair cat samurai with a red cape and a katana')
+  const [descEn, setDescEn] = useState('')
 
   useEffect(() => {
     api.workflows().then((d) => {
@@ -171,7 +171,7 @@ export default function WorkflowView() {
                 style={{ minHeight: 56 }}
                 value={descEn}
                 onChange={(e) => setDescEn(e.target.value)}
-                placeholder="a grey and white cat samurai with a red cape and a katana"
+                placeholder="英文描述（可留空，自动翻译上方中文；例如：灰白英短猫武士，红披风，手持武士刀）"
               />
             </>
           )}

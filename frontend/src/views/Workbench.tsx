@@ -51,11 +51,13 @@ export default function Workbench({ onSendToPost }: Props) {
     [templates, cat],
   )
 
-  // 本地 SD 系模型（diffusers / A1111）用 CLIP，只认英文
+  // 本地 SD 系模型（diffusers / A1111）用 CLIP，只认英文，但中文已由词典+机翻兜底
   const englishOnly = provider === 'diffusers' || provider === 'a1111'
   const hasCjk = /[\u4e00-\u9fa5]/.test(prompt)
 
-  const promptFor = (t: Template) => (englishOnly && t.promptEn ? t.promptEn : t.prompt)
+  // 示例提示词默认展示中文模板（更可读）；底层英文由翻译链路自动处理，
+  // 想看英文译法点「预览英文译法」即可。
+  const promptFor = (t: Template) => t.prompt
 
   // Provider 切换时，若提示词仍是模板原文（用户没改过），自动换成对应语言版本
   useEffect(() => {
