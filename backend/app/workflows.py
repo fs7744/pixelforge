@@ -41,14 +41,18 @@ WORKFLOWS: List[Dict[str, Any]] = [
                 "id": "three_view",
                 "name": "三视图生成",
                 "type": "generate",
-                "desc": "生成正/侧/背三视图作为一致性基准",
-                "prompt": "请生成一张角色三视图（正视图、侧视图、背视图横向排列）。角色设定：{input}。"
-                          "二维日系Q版卡通风格，3头身，粗黑描边，平涂上色，暗绿色纯色背景。",
-                "promptEn": "character turnaround reference sheet, exactly 3 views of the same character "
-                            "(front, side, back) in a horizontal row, character: {input}, 2D chibi japanese "
-                            "cartoon style, 3 heads tall, thick black outline, flat cel shading, "
-                            "plain solid dark green background, game asset, no text",
+                "desc": "正/侧/背三张独立生成（帧 2+ 编辑底座接力保同一角色）+ 自动拼板",
+                # 注意：这里只是「角色设定 + 画风描述」。三视图的单角色/视角
+                # 约束由 threeview 管线统一加——单图让模型一次画齐三个视角
+                # 会重叠糊团，拆成三张独立生成才是结构保证。
+                "prompt": "角色设定：{input}。二维日系Q版卡通风格，3头身，粗黑描边，平涂上色。",
+                "promptEn": "character: {input}, 2D chibi japanese cartoon style, "
+                            "3 heads tall, thick black outline, flat cel shading",
                 "n": 1,
+                "threeView": True,
+                "width": 512,
+                "height": 768,
+                "maxSide": 768,
             },
             {
                 "id": "action_frames",
@@ -466,7 +470,36 @@ async def run_step(run_id: str, step_id: str, overrides: Optional[Dict[str, Any]
                     gen_kw["ref"] = ref_img
                     gen_kw["strength"] = float(step_def.get("refStrength", 0.55))
 
-            if layers or n == 1:
+            if step_def.get("threeView"):
+                # 三视图管线：三张独立生成 + 拼板（见 pipelines/threeview.py）。
+                # prompt 此时是「角色设定+画风」文本，视角/单角色约束由管线加。
+                from .pipelines import threeview as tv_pipe
+
+                strip, views, tmeta = await tv_pipe.run_three_view(
+                    prompt,
+                    steps=psteps,
+                    cfg=pcfg,
+                    seed=seed,
+                    width=int(step_def.get("width") or pw),
+                    height=int(step_def.get("height") or ph),
+                    max_side=int(step_def.get("maxSide") or 768),
+                )
+                names = ["三视图拼板", "正视图", "侧视图", "背视图"]
+                for i, img in enumerate([strip, *views]):
+                    artifacts.append(_save_asset(
+                        img, kind="workflow", name=f"{run['id']}-{step_id}-{i:02d}",
+                        meta={"runId": run["id"], "step": step_id, "index": i,
+                              "label": names[i]},
+                    )["id"])
+                meta = {"prompt": prompt, "views": 3, "mode": tmeta.get("mode"),
+                        "cell": tmeta.get("cell"), "compose": tmeta.get("compose"),
+                        "perView": tmeta.get("views"), "editModel": tmeta.get("editModel"),
+                        "txt2imgModel": tmeta.get("txt2imgModel"),
+                        "promptLang": "en" if english else "zh",
+                        "seconds": tmeta.get("seconds")}
+                if tmeta.get("editFallback"):
+                    meta["editFallback"] = tmeta["editFallback"]
+            elif layers or n == 1:
                 # 分层/元素提取：每项独立提示词，受限并发并行生成
                 total = n if layers else 1
                 conc = int(step_def.get("concurrency", 3))

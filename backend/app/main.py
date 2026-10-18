@@ -398,6 +398,53 @@ async def pipeline_restyle(
     return {"asset": item, "meta": meta}
 
 
+# ---------- 角色三视图（正/侧/背独立生成 + 拼板） ----------
+class ThreeViewPayload(BaseModel):
+    prompt: str
+    style: Optional[str] = None
+    steps: Optional[int] = None
+    cfg: Optional[float] = None
+    seed: Optional[int] = None
+    width: int = 512
+    height: int = 768
+    maxSide: int = 768
+
+
+@app.post("/api/pipeline/threeview")
+async def pipeline_threeview(payload: ThreeViewPayload):
+    """角色三视图：正/侧/背三张独立生成（帧 2+ 编辑底座接力保一致性）后拼横向板。
+
+    单图提示词让模型「一次画三个视角」会重叠/缺视图，本端点把三视拆成
+    三次单角色生成再确定性拼板。返回与 /api/generate 同构：
+    images[0] 是拼板，其后依次是正/侧/背单视图。
+    """
+    from .pipelines import threeview as tv_pipe
+
+    strip, views, meta = await tv_pipe.run_three_view(
+        payload.prompt,
+        style=payload.style,
+        steps=payload.steps,
+        cfg=payload.cfg,
+        seed=payload.seed,
+        width=payload.width,
+        height=payload.height,
+        max_side=payload.maxSide,
+    )
+    labels = ["三视图拼板", "正视图", "侧视图", "背视图"]
+    items = []
+    for i, img in enumerate([strip, *views]):
+        items.append(storage.save_asset(
+            img,
+            kind="generated",
+            name=f"threeview-{labels[i]}",
+            meta={"pipeline": "threeview", "view": labels[i],
+                  "prompt": payload.prompt, "style": meta.get("style"),
+                  "mode": meta.get("mode"), "seed": payload.seed},
+            ai_label=False,
+        ))
+    return {"images": items, "meta": meta}
+
+
 # ---------- 资产库 ----------
 @app.get("/api/assets")
 async def assets(kind: Optional[str] = None):

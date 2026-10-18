@@ -8,15 +8,13 @@ TEMPLATES: List[Dict[str, Any]] = [
         "id": "char_three_view",
         "category": "角色",
         "name": "角色三视图",
-        "hint": "正/侧/背三视图，纯色底，用于动作生成与一致性基准",
+        "hint": "正/侧/背三张独立生成后自动拼板，同一角色不重叠（走三视图管线，非单图）",
         "prompt": (
-            "请生成一张角色立绘图，分为正视图、侧视图和背视图。暗绿色纯色背景。\n"
             "角色设定：{subject}\n"
-            "画风要求：二维日系Q版卡通动画风格，3头身萌系比例，头部明显放大，躯干短小敦实，"
-            "四肢简化圆润，粗黑色外轮廓线，色彩明亮饱和，以大面积纯色块和平涂上色为主，"
-            "阴影仅保留一至两级硬边色块。"
+            "（把花括号替换成角色描述，如：灰白英短猫武士，红披风，腰挎武士刀）\n"
+            "正/侧/背三视图由管线自动生成并拼板，无需在提示词里描述排版。"
         ),
-        "params": {"width": 768, "height": 512},
+        "params": {"width": 512, "height": 768},
     },
     {
         "id": "char_style_extract",
@@ -143,11 +141,10 @@ CATEGORIES = ["全部", "角色", "动画", "场景", "视差", "瓦片", "工�
 # 这些是同一模板的英文版，前端按当前 Provider 能力自动切换。
 PROMPT_EN: Dict[str, str] = {
     "char_three_view": (
-        "character turnaround sheet, front view side view and back view of the same character "
-        "in a horizontal row. subject: {subject}. "
-        "style: 2D japanese chibi cartoon, 3 heads tall, big head, short stocky body, simplified rounded limbs, "
-        "thick black outline, bright saturated flat colors, cel shading with 1-2 hard-edged shadow tones, "
-        "plain solid dark green background, game asset, no text"
+        "character: {subject} (replace the braces with the character description, "
+        "e.g. gray and white british shorthair cat samurai, red cape, katana). "
+        "front / side / back views are generated separately and composed into a "
+        "turnaround sheet by the pipeline, no need to describe the layout"
     ),
     "char_sprite_sheet": (
         "pixel art sprite sheet of {subject}, arranged in a {cols} columns by {rows} rows grid, "

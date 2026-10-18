@@ -106,6 +106,22 @@ export const api = {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(payload),
     }).then(json),
+  // 角色三视图：正/侧/背三张独立生成 + 拼板（images[0]=拼板，1-3=正/侧/背单视图）
+  threeview: (payload: {
+    prompt: string
+    style?: string
+    steps?: number
+    cfg?: number
+    seed?: number | null
+    width: number
+    height: number
+    maxSide?: number
+  }) =>
+    fetch('/api/pipeline/threeview', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    }).then(json),
   assets: (kind?: string) =>
     fetch(`/api/assets${kind && kind !== '全部' ? `?kind=${kind}` : ''}`).then(json),
   delAsset: (id: string) => fetch(`/api/assets/${id}`, { method: 'DELETE' }).then(json),

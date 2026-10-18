@@ -225,18 +225,32 @@ export default function Workbench({ onSendToPost }: Props) {
     setBusy(true)
     setError('')
     try {
-      const data = await api.generate({
-        prompt,
-        provider,
-        width,
-        height,
-        steps,
-        cfg,
-        n,
-        seed: seed.trim() ? Number(seed) : null,
-        templateId: tplId,
-        style: styleId || undefined,
-      })
+      // 角色三视图走独立管线：正/侧/背三张独立生成（帧 2+ 编辑底座转视角保
+      // 同一角色）后确定性拼板。单图让模型一次画三个视角会重叠/缺视图，
+      // 拆成三张是结构保证，不靠模型自觉。
+      const data =
+        tplId === 'char_three_view'
+          ? await api.threeview({
+              prompt,
+              style: styleId || undefined,
+              steps,
+              cfg,
+              seed: seed.trim() ? Number(seed) : null,
+              width,
+              height,
+            })
+          : await api.generate({
+              prompt,
+              provider,
+              width,
+              height,
+              steps,
+              cfg,
+              n,
+              seed: seed.trim() ? Number(seed) : null,
+              templateId: tplId,
+              style: styleId || undefined,
+            })
       setResults((prev) => [...data.images, ...prev])
       setMeta(data.meta)
       if (data.images[0]) setSelected(data.images[0].id)
@@ -285,6 +299,12 @@ export default function Workbench({ onSendToPost }: Props) {
               </button>
             ))}
           </div>
+          {tplId === 'char_three_view' && (
+            <div className="hint" style={{ marginTop: 8 }}>
+              三视图管线：正/侧/背三张独立生成（帧 2+ 走编辑底座转视角，保持同一角色）后自动拼板，
+              不重叠、不缺视图。宽高为单格尺寸。预计 5-8 分钟（编辑底座 40 步 × 2 + 拼板）。
+            </div>
+          )}
         </div>
 
         <div>
@@ -395,6 +415,12 @@ export default function Workbench({ onSendToPost }: Props) {
           {busy ? '生成中' : '生成'}
         </button>
         {meta?.note && <div className="hint">{meta.note}</div>}
+        {meta?.pipeline === 'threeview' && (
+          <div className="hint">
+            三视图完成（{meta.mode}）· 拼板 {meta.compose?.size?.join('×')} · 总耗时 {meta.seconds}s
+            {meta.editFallback ? ` · 编辑底座不可用，已退回同种子三连发：${meta.editFallback}` : ''}
+          </div>
+        )}
         {error && <div className="err">{error}</div>}
       </aside>
 
