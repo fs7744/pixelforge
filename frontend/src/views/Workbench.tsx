@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from 'react'
-import { api, Asset, ProviderInfo, Template } from '../api'
+import { api, Asset, ProviderInfo, StyleInfo, Template } from '../api'
 
 type Props = { onSendToPost: (asset: Asset) => void }
 
@@ -11,6 +11,8 @@ export default function Workbench({ onSendToPost }: Props) {
   const [prompt, setPrompt] = useState('')
   const [providers, setProviders] = useState<ProviderInfo[]>([])
   const [provider, setProvider] = useState('')
+  const [styles, setStyles] = useState<StyleInfo[]>([])
+  const [styleId, setStyleId] = useState('')
   const [width, setWidth] = useState(512)
   const [height, setHeight] = useState(512)
   const [steps, setSteps] = useState(28)
@@ -44,6 +46,7 @@ export default function Workbench({ onSendToPost }: Props) {
       setWidth(s.defaults.width)
       setHeight(s.defaults.height)
     })
+    api.styles().then((d) => setStyles(d.styles))
   }, [])
 
   const filtered = useMemo(
@@ -89,6 +92,7 @@ export default function Workbench({ onSendToPost }: Props) {
         n,
         seed: seed.trim() ? Number(seed) : null,
         templateId: tplId,
+        style: styleId || undefined,
       })
       setResults((prev) => [...data.images, ...prev])
       setMeta(data.meta)
@@ -138,6 +142,37 @@ export default function Workbench({ onSendToPost }: Props) {
               </button>
             ))}
           </div>
+        </div>
+
+        <div>
+          <div className="label">美术画风 · 游戏行业典型风格</div>
+          <div className="chips mt8">
+            <button className={`chip ${styleId === '' ? 'on' : ''}`} onClick={() => setStyleId('')}>
+              不限定
+            </button>
+            {styles.map((s) => (
+              <button key={s.id} className={`chip ${styleId === s.id ? 'on' : ''}`} onClick={() => setStyleId(s.id)}>
+                {s.name}
+              </button>
+            ))}
+          </div>
+          {styleId && (() => {
+            const s = styles.find((x) => x.id === styleId)
+            if (!s) return null
+            return (
+              <div className="hint" style={{ marginTop: 8 }}>
+                {s.hint}
+                {s.pixelize && (
+                  <>
+                    {' '}
+                    <span className="tag" style={{ color: 'var(--green)' }}>
+                      建议像素化 {s.pixelize.block}× · {s.pixelize.colors} 色
+                    </span>
+                  </>
+                )}
+              </div>
+            )
+          })()}
         </div>
 
         <div>
@@ -261,7 +296,8 @@ export default function Workbench({ onSendToPost }: Props) {
               >
                 <img src={r.url} alt={r.name} />
                 <div className="cap">
-                  {r.width}×{r.height} · {r.meta?.provider ?? r.kind}
+                  {r.width}×{r.height} · {r.meta?.style?.name ? `${r.meta.style.name} · ` : ''}
+                  {r.meta?.provider ?? r.kind}
                 </div>
               </div>
             ))}

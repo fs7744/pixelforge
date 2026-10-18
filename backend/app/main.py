@@ -17,7 +17,7 @@ from fastapi.staticfiles import StaticFiles
 from PIL import Image
 from pydantic import BaseModel
 
-from . import storage, templates, zh2en
+from . import storage, styles, templates, zh2en
 from .config import ASSETS_DIR, DATA_DIR, ROOT, load_settings, save_settings
 from .pipelines import matte as matte_pipe
 from .pipelines import resize as resize_pipe
@@ -116,6 +116,14 @@ class GeneratePayload(BaseModel):
     templateId: Optional[str] = None
     # 中文提示词自动译成英文（SD 系模型必需）；显式关闭可原样送模型
     autoTranslate: bool = True
+    # 美术画风 id（见 /api/styles）；空 = 不拼风格词
+    style: Optional[str] = None
+
+
+@app.get("/api/styles")
+async def styles_endpoint():
+    """美术画风库（游戏行业典型风格，生成时拼接在提示词尾部）。"""
+    return {"styles": styles.list_styles()}
 
 
 @app.post("/api/translate")
@@ -135,12 +143,36 @@ async def generate(payload: GeneratePayload):
     if cfg is None:
         raise HTTPException(400, f"未配置 Provider: {pid}")
     provider = get_provider(pid, cfg)
-    # 本地 SD 系模型只认英文：中文提示词先过领域词典翻译
-    effective_prompt = payload.prompt
+    # 画风链路（按 Provider 语言能力分流）：
+    # - 中文模型（Z-Image/Qwen-Image-Edit）：中文风格词直接拼在提示词尾部，不走翻译；
+    # - SD 系（CLIP）：先译中文（add_style=False，不让 zh2en 补它的默认风格词，
+    #   否则会和用户选的画风打架），再把英文风格词拼到译后尾部——风格词放尾部
+    #   符合 SD 注意力权重分布，也不被机翻毁掉。
+    # 注意：SD 分支不复用 apply_style 合并的 prompt（那会给英文 prompt 拼两遍），
+    # 只用它的 negative / style / suggestPost 字段。
+    chinese_model = bool(getattr(provider, "supports_zh", False))
+    styled = styles.apply_style(payload.prompt, payload.style, chinese_model)
     translation = None
-    if (payload.autoTranslate and not getattr(provider, "supports_zh", False)
-            and zh2en.has_chinese(payload.prompt)):
-        effective_prompt, translation = zh2en.translate_prompt(payload.prompt)
+    if chinese_model:
+        effective_prompt = styled["prompt"]
+    else:
+        style = styles.get_style(payload.style)
+        if payload.autoTranslate and zh2en.has_chinese(payload.prompt):
+            # 选了画风才关掉 zh2en 的默认风格兜底（否则两段风格词打架）；
+            # 没选画风时保持原行为，让它补 DEFAULT_STYLE
+            effective_prompt, translation = zh2en.translate_prompt(
+                payload.prompt, add_style=style is None)
+        else:
+            effective_prompt = payload.prompt
+        if style:
+            effective_prompt = f"{effective_prompt}, {style['promptEn']}"
+    # SD 系的画风排除项叠加进 negativePrompt（Z-Image/Qwen-Edit 蒸馏模型不吃负向，
+    # 且 BaseProvider.generate 没有 negative 参数——负向词只走 provider cfg）
+    if styled["negative"]:
+        base_neg = (cfg.get("negativePrompt") or "").strip()
+        merged_neg = ", ".join(x for x in (base_neg, styled["negative"]) if x)
+        cfg = {**cfg, "negativePrompt": merged_neg}
+        provider = get_provider(pid, cfg)
     try:
         result = await provider.generate(
             prompt=effective_prompt,
@@ -160,7 +192,8 @@ async def generate(payload: GeneratePayload):
             img,
             kind="generated",
             meta={**result.meta, "prompt": effective_prompt, "sourcePrompt": payload.prompt,
-                  "templateId": payload.templateId},
+                  "templateId": payload.templateId, "style": styled["style"],
+                  "suggestPost": styled["suggestPost"]},
             # 存储不烧角标：单张下载时由 /api/assets/{id}/download 补显式标识，
             # 否则角标会被后续抠图/合成带进精灵表
             ai_label=False,
@@ -168,6 +201,10 @@ async def generate(payload: GeneratePayload):
     meta = {**result.meta, "prompt": effective_prompt, "promptSource": payload.prompt}
     if translation:
         meta["translation"] = translation
+    if styled["style"]:
+        meta["style"] = styled["style"]
+    if styled["suggestPost"]:
+        meta["suggestPost"] = styled["suggestPost"]
     return {"images": items, "meta": meta}
 
 

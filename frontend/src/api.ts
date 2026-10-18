@@ -20,6 +20,15 @@ export type Template = {
   params: Record<string, number>
 }
 
+export type StyleInfo = {
+  id: string
+  name: string
+  en: string
+  tags: string[]
+  hint: string
+  pixelize?: { block: number; colors: number }
+}
+
 export type ProviderInfo = {
   id: string
   label: string
@@ -62,6 +71,7 @@ const json = async (res: Response) => {
 export const api = {
   health: () => fetch('/api/health').then(json),
   templates: () => fetch('/api/templates').then(json),
+  styles: () => fetch('/api/styles').then(json),
   providers: () => fetch('/api/providers').then(json),
   settings: () => fetch('/api/settings').then(json),
   saveSettings: (payload: Partial<Settings>) =>
@@ -87,6 +97,7 @@ export const api = {
     seed?: number | null
     n: number
     templateId?: string
+    style?: string
   }) =>
     fetch('/api/generate', {
       method: 'POST',

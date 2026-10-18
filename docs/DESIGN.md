@@ -293,7 +293,36 @@ Edit-2511 的白捡能力：内置多视角生成 LoRA（角色三视图直接�
 - 备选同家族单栈方案：Qwen-Image base（txt2img）+ Edit-2511，text_encoder 可共享
   去重，但 base 20B FP8 更慢更紧，除非出现跨家族风格漂移问题再考虑。
 
-### 5.6 结论
+### 5.6 美术画风库（14 种游戏行业典型风格）
+
+`backend/app/styles.py`：生成时可选画风，风格词拼接在提示词尾部。
+
+**语言分流（关键设计）**：
+
+| Provider | 拼接内容 | 原因 |
+|---|---|---|
+| 中文模型（Z-Image / Qwen-Image-Edit，`supports_zh=True`） | 中文风格词 | 直喂，无翻译损耗 |
+| SD 系（CLIP，`supports_zh=False`） | 先译中文（`add_style=style is None`）再拼 `promptEn` | 机翻会毁掉风格词；选了画风就要关掉 zh2en 的 `DEFAULT_STYLE` 兜底，否则两段风格词打架 |
+
+**踩坑记录**（2026-10-18）：最初把英文风格词拼进中文 prompt 再整体送 `zh2en`——
+`zh2en.translate()` 只处理中文 chunk，ASCII 片段被静默丢弃，译后还补了它自己的
+`DEFAULT_STYLE`，用户选的画风完全失效。且英文 prompt（无中文、passthrough 分支）
+会被 `apply_style` 和 main.py 各拼一次风格词。最终形态：SD 分支不复用
+`apply_style` 合并的 prompt，只用它的 negative/style/suggestPost 字段。
+
+**像素化联动**：`pixel_16bit`（8×/16 色）与 `pixel_hd`（4×/32 色）带
+`suggestPost` 参数，随 asset meta 落库；PostProcess 页收到该资产时自动切
+pixelize 管线并预填参数。
+
+**负向词**：SD 系把画风的 `negative`（如 blurry/3d render）追加进 provider
+cfg 的 negativePrompt；Z-Image/Qwen-Edit 蒸馏模型不吃负向，不加。
+
+**覆盖范围**：像素×2、2D 动漫/卡通×4（Q 版/赛璐璐/黑白漫画/美式）、UI×2
+（扁平矢量/粗描边图标）、写实 3D×3（厚涂/写实 3A/低多边形/体素）、手绘×2
+（水彩/概念速写）。动画工作流不挂画风——帧 2+ 的编辑指令是锁外观的，
+风格词会干扰身份保持。
+
+### 5.7 结论
 
 1. **默认底座已切 Z-Image-Turbo**：中文直喂绕过翻译链路，8 步 2.5s/张，4090 全载；
 2. SD1.5 链路保留为低配/一致性兜底（IP-Adapter 仍在 SD 族有效）；

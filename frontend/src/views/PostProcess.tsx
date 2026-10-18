@@ -61,6 +61,14 @@ export default function PostProcess({ incoming }: Props) {
       .then((r) => r.blob())
       .then((b) => accept(new File([b], `${incoming.name}.png`, { type: 'image/png' })))
       .catch(() => setError('载入生成结果失败'))
+    // 画风自带像素化建议（像素类画风）：自动切管线并预填参数
+    const sp = incoming.meta?.suggestPost
+    if (sp?.block) {
+      setPipeline('pixelize')
+      setPxSize(sp.block)
+      if (sp.colors) setPxColors(sp.colors)
+      setNote(`已按画风「${incoming.meta?.style?.name ?? '像素类'}」预填像素化参数，可直接执行`)
+    }
   }, [incoming])
 
   const active = useMemo(() => PIPELINES.find((p) => p.id === pipeline)!, [pipeline])
