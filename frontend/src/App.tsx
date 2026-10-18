@@ -5,6 +5,7 @@ import WorkflowView from './views/Workflow'
 import PostProcess from './views/PostProcess'
 import Library from './views/Library'
 import SettingsView from './views/Settings'
+import PreviewOverlay from './Preview'
 
 type Tab = 'workbench' | 'workflow' | 'post' | 'library' | 'settings'
 
@@ -74,6 +75,7 @@ export default function App() {
       {tab === 'post' && <PostProcess incoming={pending} />}
       {tab === 'library' && <Library />}
       {tab === 'settings' && <SettingsView />}
+      <PreviewOverlay />
     </div>
   )
 }

@@ -16,9 +16,9 @@ class ProviderResult:
 class BaseProvider:
     id = "base"
     label = "Base"
-    # 是否为中文原生的文本编码器。SD 系列（diffusers / A1111）用 CLIP，
-    # 只认英文，中文提示词会显著掉质量，因此引擎会为它们切换到英文模板。
-    supports_zh = False
+    # 底座的文本编码器是否原生支持中文。当前两个底座（Z-Image / Qwen-Edit）
+    # 都是中文原生，引擎不再做中文→英文翻译。
+    supports_zh = True
 
     def __init__(self, cfg: Dict[str, Any]):
         self.cfg = cfg or {}
@@ -33,7 +33,6 @@ class BaseProvider:
         seed: Optional[int] = None,
         n: int = 1,
         ref: Optional[Image.Image] = None,
-        strength: float = 0.6,
     ) -> ProviderResult:
         raise NotImplementedError
 

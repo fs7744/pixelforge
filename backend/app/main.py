@@ -17,7 +17,7 @@ from fastapi.staticfiles import StaticFiles
 from PIL import Image
 from pydantic import BaseModel
 
-from . import storage, styles, templates, zh2en
+from . import storage, styles, templates
 from .config import ASSETS_DIR, DATA_DIR, ROOT, STYLE_SAMPLES_DIR, load_settings, save_settings
 from .pipelines import matte as matte_pipe
 from .pipelines import resize as resize_pipe
@@ -86,7 +86,7 @@ async def get_providers():
             "id": pid,
             "label": cls.label,
             "active": s.get("activeProvider") == pid,
-            "configured": bool(cfg.get("baseUrl")) if pid != "mock" else True,
+            "configured": True,
             "hasKey": bool(cfg.get("apiKey")),
             "model": cfg.get("model", ""),
         })
@@ -99,7 +99,10 @@ async def test_provider(pid: str):
     cfg = s["providers"].get(pid)
     if cfg is None:
         raise HTTPException(404, "未知 Provider")
-    provider = get_provider(pid, cfg)
+    try:
+        provider = get_provider(pid, cfg)
+    except KeyError:
+        raise HTTPException(404, "未知 Provider")
     return await provider.test()
 
 
@@ -114,8 +117,6 @@ class GeneratePayload(BaseModel):
     seed: Optional[int] = None
     n: int = 1
     templateId: Optional[str] = None
-    # 中文提示词自动译成英文（SD 系模型必需）；显式关闭可原样送模型
-    autoTranslate: bool = True
     # 美术画风 id（见 /api/styles）；空 = 不拼风格词
     style: Optional[str] = None
 
@@ -126,53 +127,18 @@ async def styles_endpoint():
     return {"styles": styles.list_styles()}
 
 
-@app.post("/api/translate")
-async def translate_prompt_endpoint(payload: Dict[str, Any]):
-    text = str(payload.get("text") or "")
-    # useMt=False 时只走领域词典（毫秒级、零依赖），遇到漏译会返回 unmatched
-    use_mt = bool(payload.get("useMt", True))
-    english, meta = zh2en.translate_prompt(text, use_mt=use_mt)
-    return {"english": english, **meta}
-
-
 @app.post("/api/generate")
 async def generate(payload: GeneratePayload):
     s = load_settings()
-    pid = payload.provider or s.get("activeProvider") or "mock"
+    pid = payload.provider or s.get("activeProvider") or "diffusers"
     cfg = s["providers"].get(pid)
     if cfg is None:
         raise HTTPException(400, f"未配置 Provider: {pid}")
     provider = get_provider(pid, cfg)
-    # 画风链路（按 Provider 语言能力分流）：
-    # - 中文模型（Z-Image/Qwen-Image-Edit）：中文风格词直接拼在提示词尾部，不走翻译；
-    # - SD 系（CLIP）：先译中文（add_style=False，不让 zh2en 补它的默认风格词，
-    #   否则会和用户选的画风打架），再把英文风格词拼到译后尾部——风格词放尾部
-    #   符合 SD 注意力权重分布，也不被机翻毁掉。
-    # 注意：SD 分支不复用 apply_style 合并的 prompt（那会给英文 prompt 拼两遍），
-    # 只用它的 negative / style / suggestPost 字段。
-    chinese_model = bool(getattr(provider, "supports_zh", False))
-    styled = styles.apply_style(payload.prompt, payload.style, chinese_model)
-    translation = None
-    if chinese_model:
-        effective_prompt = styled["prompt"]
-    else:
-        style = styles.get_style(payload.style)
-        if payload.autoTranslate and zh2en.has_chinese(payload.prompt):
-            # 选了画风才关掉 zh2en 的默认风格兜底（否则两段风格词打架）；
-            # 没选画风时保持原行为，让它补 DEFAULT_STYLE
-            effective_prompt, translation = zh2en.translate_prompt(
-                payload.prompt, add_style=style is None)
-        else:
-            effective_prompt = payload.prompt
-        if style:
-            effective_prompt = f"{effective_prompt}, {style['promptEn']}"
-    # SD 系的画风排除项叠加进 negativePrompt（Z-Image/Qwen-Edit 蒸馏模型不吃负向，
-    # 且 BaseProvider.generate 没有 negative 参数——负向词只走 provider cfg）
-    if styled["negative"]:
-        base_neg = (cfg.get("negativePrompt") or "").strip()
-        merged_neg = ", ".join(x for x in (base_neg, styled["negative"]) if x)
-        cfg = {**cfg, "negativePrompt": merged_neg}
-        provider = get_provider(pid, cfg)
+    # 画风链路：中文风格词直接拼到提示词尾部（两个底座都是中文原生，
+    # 没有翻译链路，也不需要负向词合并）
+    styled = styles.apply_style(payload.prompt, payload.style)
+    effective_prompt = styled["prompt"]
     try:
         result = await provider.generate(
             prompt=effective_prompt,
@@ -194,13 +160,11 @@ async def generate(payload: GeneratePayload):
             meta={**result.meta, "prompt": effective_prompt, "sourcePrompt": payload.prompt,
                   "templateId": payload.templateId, "style": styled["style"],
                   "suggestPost": styled["suggestPost"]},
-            # 存储不烧角标：单张下载时由 /api/assets/{id}/download 补显式标识，
-            # 否则角标会被后续抠图/合成带进精灵表
+            # 存储不烧角标：角标会被后续抠图/合成带进精灵表；
+            # 需要合规标识时由 /api/assets/{id}/download?label=1 显式补
             ai_label=False,
         ))
     meta = {**result.meta, "prompt": effective_prompt, "promptSource": payload.prompt}
-    if translation:
-        meta["translation"] = translation
     if styled["style"]:
         meta["style"] = styled["style"]
     if styled["suggestPost"]:
@@ -452,8 +416,14 @@ async def assets(kind: Optional[str] = None):
 
 
 @app.get("/api/assets/{asset_id}/download")
-async def download_asset(asset_id: str, label: int = 1):
-    """单张下载：默认在下载时补上显式 AI 角标（存储不烧标，避免污染后续合成）。"""
+async def download_asset(asset_id: str, label: Optional[int] = None):
+    """单张下载。
+
+    默认不补 AI 角标（存储阶段也没烧）；需要合规标识时显式传 ?label=1。
+    AI 角标只在下载瞬间叠加，既保证合规可追溯，又不会污染后续抠图/合成。
+    """
+    if label is None:
+        label = 1 if load_settings().get("aiLabel") else 0
     item = storage.get_asset(asset_id)
     if not item:
         raise HTTPException(404, "资产不存在")

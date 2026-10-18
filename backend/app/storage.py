@@ -29,7 +29,12 @@ def _save_index(items: List[Dict[str, Any]]) -> None:
 
 
 def stamp_ai_label(img: Image.Image, text: str = "AI") -> Image.Image:
-    """显式 AI 标识：左下角小角标（合规兜底，可在设置中关闭）。"""
+    """显式 AI 标识：左下角小角标。
+
+    默认不烧进存储——角标一旦画进像素，后续抠图 / 精灵表 / 拼板会把它
+    当成画面内容一路带进最终素材。需要合规标识时走
+    GET /api/assets/{id}/download?label=1，下载时才补。
+    """
     out = img.convert("RGBA").copy()
     d = ImageDraw.Draw(out)
     pad = 4
@@ -45,7 +50,8 @@ def save_asset(
     kind: str = "generated",
     name: Optional[str] = None,
     meta: Optional[Dict[str, Any]] = None,
-    ai_label: bool = True,
+    # 默认不烧角标：存储阶段一旦烧进去，抠图/合成/拼板都会把它当内容带走。
+    ai_label: bool = False,
 ) -> Dict[str, Any]:
     ensure_dirs()
     asset_id = uuid.uuid4().hex[:12]

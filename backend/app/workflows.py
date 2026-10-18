@@ -16,7 +16,7 @@ from typing import Any, Dict, List, Optional, Tuple
 import numpy as np
 from PIL import Image
 
-from . import storage, zh2en
+from . import storage
 from .config import DATA_DIR, load_settings
 from .pipelines import matte as matte_pipe
 from .pipelines import resize as resize_pipe
@@ -46,8 +46,6 @@ WORKFLOWS: List[Dict[str, Any]] = [
                 # 约束由 threeview 管线统一加——单图让模型一次画齐三个视角
                 # 会重叠糊团，拆成三张独立生成才是结构保证。
                 "prompt": "角色设定：{input}。二维日系Q版卡通风格，3头身，粗黑描边，平涂上色。",
-                "promptEn": "character: {input}, 2D chibi japanese cartoon style, "
-                            "3 heads tall, thick black outline, flat cel shading",
                 "n": 1,
                 "threeView": True,
                 "width": 512,
@@ -61,27 +59,16 @@ WORKFLOWS: List[Dict[str, Any]] = [
                 "desc": "生成动作关键帧序列（真实模型下为视频，MVP 用关键帧模拟）",
                 "prompt": "同一个角色（{input}），{action}动作，摄像机固定、角色原地不移动、始终全身，"
                           "纯绿色背景，每帧姿势明显不同。",
-                "promptEn": "one single character only, exactly one figure in the frame, full body shot, "
-                            "character: {input}, {action}, camera fixed, standing on the spot, "
-                            "plain flat solid green background single color, no gradient, no vignette, "
-                            "no frame, no border, no background objects, "
-                            "2D chibi japanese cartoon, thick black outline, flat cel shading, "
-                            "game sprite, centered, no text, no turnaround sheet, "
-                            "no multiple views, no duplicate characters",
                 "n": 4,
                 # 一致性策略：第 1 帧文生图，其余帧拿第 1 帧做 img2img 参考
                 # （三视图排版不可控，直接裁切容易裁到两个视图，改用自锚定）
                 "refChain": True,
-                "refStrength": 0.58,
                 # 双底座接力（当前模型是 qwen_edit 编辑器时生效）：
                 # 帧 1 交给 txt2img 底座生成，帧 2+ 用编辑指令改姿势。
                 # 编辑器没有自由创作能力，必须借生成底座出第一帧。
                 "txt2imgModel": "models/z-image-turbo",
                 "editPrompt": "同一个角色，保持角色外观、服装、配色完全不变，"
                               "将姿势改为：{action}，角色原地全身，纯色背景",
-                "editPromptEn": "Same character, keep appearance, outfit and colors "
-                                "exactly unchanged, change the pose to: {actionEn}, "
-                                "full body standing on the spot, plain solid background",
             },
             {
                 "id": "dedup",
@@ -147,15 +134,8 @@ WORKFLOWS: List[Dict[str, Any]] = [
                 "type": "generate",
                 "desc": "按层次提取 4 个图层（MVP 用独立生成模拟）",
                 "prompt": "只保留{input}中的{layer}，其余元素移除，统一暗紫色纯色背景 #2A153F，同尺寸同坐标。",
-                "promptEn": "parallax layer only: {layer} of {input}, remove all other elements, "
-                            "plain flat dark purple background #2A153F, same canvas size and alignment, "
-                            "2D game background art, flat colors, no text",
                 "n": 4,
                 "layerNames": ["远景天空与雪山", "中景丘陵与城堡", "近景地面与道路", "前景植物遮挡层"],
-                "layerNamesEn": ["far background sky and snowy mountains",
-                                  "mid ground hills and castle",
-                                  "near ground terrain and road",
-                                  "foreground plants and foliage"],
             },
             {
                 "id": "normalize",
@@ -192,8 +172,6 @@ WORKFLOWS: List[Dict[str, Any]] = [
                 "type": "generate",
                 "desc": "生成 45 度俯视实机场景参考图",
                 "prompt": "{input}，正前方45度俯视视角，Q版日式RPG构图，实机场景而非概念图。",
-                "promptEn": "{input}, 45 degree top-down view from front, chibi japanese RPG composition, "
-                            "in-game scene not concept art, flat colors, game asset, no text",
                 "n": 1,
             },
             {
@@ -202,13 +180,8 @@ WORKFLOWS: List[Dict[str, Any]] = [
                 "type": "generate",
                 "desc": "串行提取 4 个元素（真实模型下可并行多 agent）",
                 "prompt": "只提取{input}中的{element}，完整补全遮挡，正视图不倾斜，统一暗紫底 #2A153F，同尺寸同坐标。",
-                "promptEn": "isolated game asset: only {element} from {input}, fully complete occluded parts, "
-                            "front view upright, plain flat dark purple background #2A153F, "
-                            "same canvas size and alignment, 2D chibi japanese RPG style, flat colors, no text",
                 "n": 4,
                 "layerNames": ["建筑主体", "树木植被", "地面平面", "道具摆件"],
-                "layerNamesEn": ["main building", "trees and vegetation",
-                                  "ground plane", "props and furniture"],
             },
             {
                 "id": "montage",
@@ -330,7 +303,7 @@ def _save_asset(img: Image.Image, **kwargs) -> Dict[str, Any]:
     """工作流中间产物不烧 AI 角标。
 
     角标一旦画进像素就会被合成进精灵表 / Godot 贴图，整包素材作废。
-    合规标识放到「导出」环节（ZIP 内 AI_GENERATED.txt + 下载时补标）。
+    标识只在「导出/下载」环节按设置开关叠加（默认关）。
     """
     kwargs.setdefault("ai_label", False)
     return storage.save_asset(img, **kwargs)
@@ -368,39 +341,14 @@ def _ref_from_sheet(img: Image.Image, view: str = "left",
     return canvas
 
 
-def _template(step: Dict[str, Any], english: bool) -> str:
-    """按 Provider 语言能力挑选提示词模板（英文模型用 promptEn）。"""
-    if english and step.get("promptEn"):
-        return step["promptEn"]
-    return step["prompt"]
-
-
-def _fill(template: str, run: Dict[str, Any], step: Dict[str, Any], idx: int,
-          english: bool = False) -> str:
-    cn = step.get("layerNames") or step.get("elementNames") or ["图层一", "图层二", "图层三", "图层四"]
-    en = step.get("layerNamesEn") or step.get("elementNamesEn") or cn
-    layers = en if english else cn
+def _fill(template: str, run: Dict[str, Any], step: Dict[str, Any], idx: int) -> str:
+    """把工作流模板里的占位符替换成中文实参（两个底座都是中文原生）。"""
+    layers = step.get("layerNames") or step.get("elementNames") or ["图层一", "图层二", "图层三", "图层四"]
     subject = run.get("input", "")
-    if english:
-        desc_en = run.get("params", {}).get("descEn")
-        if desc_en:
-            subject = desc_en
-        elif zh2en.has_chinese(subject):
-            # 用户只写了中文：先过领域词典，别让 CLIP 看一堆未知 token
-            subject, _ = zh2en.translate_prompt(subject, add_style=False)
     action = run.get("params", {}).get("action") or "挥砍"
-    action_en = run.get("params", {}).get("actionEn") or {
-        "挥砍": "slashing with a sword",
-        "奔跑": "running",
-        "待机": "idle breathing",
-        "行走": "walking",
-        "攻击": "attacking",
-        "跳跃": "jumping",
-    }.get(action, "slashing with a sword")
     return (
         template.replace("{input}", subject)
-        .replace("{action}", action_en if english else action)
-        .replace("{actionEn}", action_en)
+        .replace("{action}", action)
         .replace("{layer}", layers[idx % len(layers)])
         .replace("{element}", layers[idx % len(layers)])
     )
@@ -428,7 +376,7 @@ async def run_step(run_id: str, step_id: str, overrides: Optional[Dict[str, Any]
             raise RuntimeError("请先完成上一步")
 
     settings = load_settings()
-    pid = settings.get("activeProvider") or "mock"
+    pid = settings.get("activeProvider") or "diffusers"
     provider = get_provider(pid, settings["providers"].get(pid, {}))
 
     step_state.update({"status": "running", "error": "", "startedAt": int(time.time())})
@@ -444,9 +392,8 @@ async def run_step(run_id: str, step_id: str, overrides: Optional[Dict[str, Any]
             n = int(overrides.get("n") or step_def.get("n", 1))
             pw = int(run.get("params", {}).get("width") or 512)
             ph = int(run.get("params", {}).get("height") or 512)
-            english = not getattr(provider, "supports_zh", False)
-            tpl = _template(step_def, english)
-            prompt = overrides.get("prompt") or _fill(tpl, run, step_def, 0, english)
+            tpl = step_def["prompt"]
+            prompt = overrides.get("prompt") or _fill(tpl, run, step_def, 0)
             psteps = run.get("params", {}).get("steps")
             pcfg = run.get("params", {}).get("cfg")
             gen_kw = {}
@@ -456,7 +403,7 @@ async def run_step(run_id: str, step_id: str, overrides: Optional[Dict[str, Any]
                 gen_kw["cfg"] = float(pcfg)
             seed = run.get("params", {}).get("seed")
 
-            # 参考图：把上游产物当 img2img 初始图，解决「同一角色」的一致性
+            # 参考图：给编辑器当输入（Z-Image 没有 img2img，ref 会被忽略）
             ref_img = None
             ref_step = step_def.get("useRef")
             if ref_step:
@@ -465,10 +412,9 @@ async def run_step(run_id: str, step_id: str, overrides: Optional[Dict[str, Any]
                     ref_img = _ref_from_sheet(
                         _load(ref_ids[-1]),
                         view=str(step_def.get("refCrop", "left")),
-                        size=(pw // 8 * 8, ph // 8 * 8),
+                        size=(pw // 16 * 16, ph // 16 * 16),
                     )
                     gen_kw["ref"] = ref_img
-                    gen_kw["strength"] = float(step_def.get("refStrength", 0.55))
 
             if step_def.get("threeView"):
                 # 三视图管线：三张独立生成 + 拼板（见 pipelines/threeview.py）。
@@ -495,7 +441,7 @@ async def run_step(run_id: str, step_id: str, overrides: Optional[Dict[str, Any]
                         "cell": tmeta.get("cell"), "compose": tmeta.get("compose"),
                         "perView": tmeta.get("views"), "editModel": tmeta.get("editModel"),
                         "txt2imgModel": tmeta.get("txt2imgModel"),
-                        "promptLang": "en" if english else "zh",
+                        "promptLang": "zh",
                         "seconds": tmeta.get("seconds")}
                 if tmeta.get("editFallback"):
                     meta["editFallback"] = tmeta["editFallback"]
@@ -507,7 +453,7 @@ async def run_step(run_id: str, step_id: str, overrides: Optional[Dict[str, Any]
 
                 async def _one(i: int):
                     async with sem:
-                        p = overrides.get("prompt") or _fill(tpl, run, step_def, i, english)
+                        p = overrides.get("prompt") or _fill(tpl, run, step_def, i)
                         res = await provider.generate(p, pw, ph, n=1, **gen_kw)
                         label = layers[i] if layers else step_def["name"]
                         ids = []
@@ -526,7 +472,7 @@ async def run_step(run_id: str, step_id: str, overrides: Optional[Dict[str, Any]
                         meta.setdefault("labels", []).append(label)
                 meta["prompt"] = prompt
                 meta["concurrency"] = conc
-                meta["promptLang"] = "en" if english else "zh"
+                meta["promptLang"] = "zh"
                 if ref_img is not None:
                     meta["refStep"] = ref_step
             else:
@@ -561,15 +507,11 @@ async def run_step(run_id: str, step_id: str, overrides: Optional[Dict[str, Any]
                     for i in range(n):
                         kw = dict(gen_kw)
                         if anchor is not None:
+                            # Z-Image 没有 img2img，ref 会被忽略；编辑器拿它当参考图
                             kw["ref"] = anchor
-                            if edit_relay:
-                                kw.pop("strength", None)  # 编辑器不收 strength
-                            else:
-                                kw["strength"] = float(step_def.get("refStrength", 0.5))
                         gen = gen_provider if anchor is None else provider
                         p = prompt if anchor is None else (
-                            _fill(edit_tpl, run, step_def, i, english=False)
-                            if edit_relay else prompt)
+                            _fill(edit_tpl, run, step_def, i) if edit_relay else prompt)
                         res = await gen.generate(p, pw, ph, n=1,
                                                  seed=None if seed is None else int(seed) + i, **kw)
                         for img in res.images:
@@ -594,9 +536,8 @@ async def run_step(run_id: str, step_id: str, overrides: Optional[Dict[str, Any]
                     meta = {"prompt": prompt, "frames": len(artifacts),
                             "provider": "diffusers",
                             "mode": "txt2img→edit-chain" if edit_relay
-                                    else "txt2img→img2img-chain",
-                            "refStrength": float(step_def.get("refStrength", 0.5)),
-                            "promptLang": "en" if english else "zh"}
+                                    else "txt2img×N（提示词锚定）",
+                            "promptLang": "zh"}
                     if edit_relay:
                         meta["editModel"] = provider._resolve_model()
                         meta["txt2imgModel"] = txt_model
@@ -613,9 +554,8 @@ async def run_step(run_id: str, step_id: str, overrides: Optional[Dict[str, Any]
                     meta = {"prompt": prompt, "frames": len(artifacts),
                             "provider": result.meta.get("provider"),
                             "mode": result.meta.get("mode"),
-                            **({"refStep": ref_step, "refStrength": gen_kw.get("strength")}
-                               if ref_img is not None else {}),
-                            "promptLang": "en" if english else "zh"}
+                            **({"refStep": ref_step} if ref_img is not None else {}),
+                            "promptLang": "zh"}
 
         elif stype == "dedup":
             src = overrides.get("artifacts") or _prev_artifacts(run, index)

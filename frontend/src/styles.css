@@ -238,3 +238,29 @@ button, input, textarea, select { font-family: inherit; }
   border: 2px solid #0a0a0a; border-top-color: transparent; animation: spin 0.7s linear infinite;
 }
 @keyframes spin { to { transform: rotate(360deg); } }
+
+/* ---------- 图片放大预览 ---------- */
+.pv-mask {
+  position: fixed; inset: 0; z-index: 999; background: rgba(8, 8, 8, 0.92);
+  display: flex; flex-direction: column; user-select: none;
+}
+.pv-bar {
+  display: flex; align-items: center; gap: 10px; padding: 10px 14px;
+  border-bottom: 1px solid #1c1c1c; background: #101010; flex: 0 0 auto;
+}
+.pv-name {
+  font-family: var(--chip); font-size: 10px; color: var(--white);
+  max-width: 320px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.pv-size, .pv-zoom { font-family: var(--mono); font-size: 11px; color: var(--green); min-width: 56px; }
+.pv-zoom { text-align: center; }
+.pv-stage {
+  flex: 1 1 auto; overflow: hidden; display: grid; place-items: center; touch-action: none;
+}
+.pv-stage img {
+  max-width: 92vw; max-height: 78vh; object-fit: contain; transition: transform 0.05s linear;
+}
+.pv-tip {
+  flex: 0 0 auto; text-align: center; padding: 8px; font-family: var(--chip);
+  font-size: 8px; color: var(--muted); letter-spacing: 0.5px;
+}

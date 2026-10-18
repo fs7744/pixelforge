@@ -81,7 +81,6 @@ async def run_edit(
 
     meta 含 model/steps/seed/instruction，前端可展示、可复现。
     """
-    from ..providers import get_provider
     from ..providers.diffusers_local import DiffusersProvider
 
     model_id = resolve_edit_model(model)
@@ -221,7 +220,7 @@ async def extend_horizontal_ai(
 
 def _restyle_prompt(style: Dict[str, Any]) -> str:
     return (
-        f"将这张图片整体转换为{style['name']}（{style['en']}）风格："
+        f"将这张图片整体转换为{style['name']}风格："
         f"{style['prompt']}。保持主体内容、构图、角色外观和姿态完全不变，"
         f"只改变绘画风格、线条和上色方式，不要添加或移除画面元素。"
     )

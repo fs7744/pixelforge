@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import { api, Asset } from '../api'
+import { openPreview } from '../Preview'
 
 const KINDS: [string, string][] = [
   ['全部', '全部'],
@@ -103,7 +104,14 @@ export default function Library() {
                   <span>{new Date(a.createdAt * 1000).toLocaleDateString()}</span>
                 </div>
                 <div className="row">
-                  <a className="btn btn-ghost" href={`/api/assets/${a.id}/download?label=1`} download={`${a.name}.png`} style={{ height: 26, fontSize: 11 }}>
+                  <button
+                    className="btn btn-ghost"
+                    style={{ height: 26, fontSize: 11 }}
+                    onClick={() => openPreview(a.url, a.name)}
+                  >
+                    放大
+                  </button>
+                  <a className="btn btn-ghost" href={`/api/assets/${a.id}/download`} download={`${a.name}.png`} style={{ height: 26, fontSize: 11 }}>
                     下载
                   </a>
                   <button
@@ -128,7 +136,11 @@ export default function Library() {
         </div>
         {detail ? (
           <>
-            <div className="thumb checker" style={{ aspectRatio: '1 / 1' }}>
+            <div
+              className="thumb checker"
+              style={{ aspectRatio: '1 / 1', cursor: 'zoom-in' }}
+              onClick={() => openPreview(detail.url, detail.name)}
+            >
               <img src={detail.url} alt={detail.name} />
             </div>
             <div className="card">

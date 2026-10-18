@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 import { api, Asset, ProviderInfo, StyleInfo, Template } from '../api'
+import { openPreview } from '../Preview'
 
 type Props = { onSendToPost: (asset: Asset) => void }
 
@@ -124,7 +125,6 @@ export function StyleChip({ style, active, onSelect }: { style: StyleInfo; activ
             </div>
             <div className="style-tip-body">
               <div className="style-tip-name">{style.name}</div>
-              <div className="style-tip-en">{style.en}</div>
               <div className="chips" style={{ marginTop: 4 }}>
                 {style.tags.map((t) => (
                   <span key={t} className="chip sm">
@@ -167,7 +167,6 @@ export default function Workbench({ onSendToPost }: Props) {
   const [results, setResults] = useState<Asset[]>([])
   const [selected, setSelected] = useState<string>('')
   const [meta, setMeta] = useState<any>(null)
-  const [translated, setTranslated] = useState('')
 
   useEffect(() => {
     api.templates().then((d) => {
@@ -181,7 +180,7 @@ export default function Workbench({ onSendToPost }: Props) {
     api.providers().then((d) => {
       setProviders(d.providers)
       const act = d.providers.find((p: ProviderInfo) => p.active)
-      setProvider(act ? act.id : d.providers[0]?.id ?? 'mock')
+      setProvider(act ? act.id : d.providers[0]?.id ?? 'diffusers')
     })
     api.settings().then((s) => {
       setSteps(s.defaults.steps)
@@ -197,20 +196,15 @@ export default function Workbench({ onSendToPost }: Props) {
     [templates, cat],
   )
 
-  // 本地 SD 系模型（diffusers / A1111）用 CLIP，只认英文，但中文已由词典+机翻兜底
-  const englishOnly = provider === 'diffusers' || provider === 'a1111'
-  const hasCjk = /[\u4e00-\u9fa5]/.test(prompt)
-
-  // 示例提示词默认展示中文模板（更可读）；底层英文由翻译链路自动处理，
-  // 想看英文译法点「预览英文译法」即可。
+  // 底座是中文原生（Z-Image / Qwen-Edit），模板只有中文一版
   const promptFor = (t: Template) => t.prompt
 
-  // Provider 切换时，若提示词仍是模板原文（用户没改过），自动换成对应语言版本
+  // 切模板时若提示词没被改过，自动换成模板原文
   useEffect(() => {
     const t = templates.find((x) => x.id === tplId)
-    if (!t) return
-    const alt = englishOnly ? t.prompt : t.promptEn
-    if (prompt === '' || prompt === alt) setPrompt(promptFor(t))
+    if (t && (prompt === '' || templates.some((x) => x.prompt === prompt))) {
+      setPrompt(promptFor(t))
+    }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [provider, templates, tplId])
 
@@ -272,14 +266,14 @@ export default function Workbench({ onSendToPost }: Props) {
 
         <div>
           <div className="label">模型服务</div>
-          <select className="select" value={provider} onChange={(e) => setProvider(e.target.value)}>
-            {providers.map((p) => (
-              <option key={p.id} value={p.id}>
-                {p.label}
-                {p.active ? '（默认）' : ''}
-              </option>
-            ))}
-          </select>
+          <div className="card" style={{ padding: '8px 10px' }}>
+            <div style={{ fontSize: 12, fontWeight: 600 }}>
+              {providers.find((p) => p.active)?.label || '本地双底座'}
+            </div>
+            <div className="hint" style={{ marginTop: 4 }}>
+              {providers.find((p) => p.active)?.model || 'models/z-image-turbo'}
+            </div>
+          </div>
         </div>
 
         <div>
@@ -337,44 +331,11 @@ export default function Workbench({ onSendToPost }: Props) {
         </div>
 
         <div>
-          <div className="label">
-            提示词（可编辑，花括号为占位符）
-            {englishOnly && <span style={{ color: 'var(--green)' }}> · 本地模型用英文</span>}
-          </div>
+          <div className="label">提示词（可编辑，花括号为占位符）</div>
           <textarea className="textarea" value={prompt} onChange={(e) => setPrompt(e.target.value)} />
-          {englishOnly && (
-            <div className="row" style={{ marginTop: 6, alignItems: 'center', gap: 8 }}>
-              <button
-                className="btn btn-ghost"
-                style={{ height: 28 }}
-                onClick={async () => {
-                  try {
-                    const r = await api.translate(prompt)
-                    setTranslated(r.english)
-                  } catch {
-                    setTranslated('')
-                  }
-                }}
-              >
-                预览英文译法
-              </button>
-              {translated && (
-                <span className="hint" style={{ color: 'var(--green)', flex: 1 }}>
-                  {translated}
-                </span>
-              )}
-            </div>
-          )}
-          {englishOnly && hasCjk && (
-            <div className="hint" style={{ color: 'var(--yellow)', marginTop: 6 }}>
-              本地模型只认英文：中文会先用领域词典自动翻译（颜色/角色/装备/动作/画风），生僻描写建议自己补英文
-            </div>
-          )}
-          {meta?.translation?.english && (
-            <div className="hint" style={{ marginTop: 6 }}>
-              本次实际送入模型：{meta.translation.english}
-            </div>
-          )}
+          <div className="hint" style={{ marginTop: 6 }}>
+            中文直喂本地底座（Z-Image / Qwen-Edit），全程不做英文翻译。
+          </div>
         </div>
 
         <div>
@@ -445,11 +406,9 @@ export default function Workbench({ onSendToPost }: Props) {
           <div className="empty">
             <div>
               <span className="pixel">READY</span>
-              选择模板 → 填写提示词 → 点击生成。
+              选择模板 → 填写提示词（中文）→ 点击生成。
               <br />
-              当前 Provider 为「内置模拟引擎」时会产出 4×4 像素精灵表，
-              <br />
-              可直接送后处理验证抠图与尺寸规整管线。
+              出图后点图片可放大预览，可一键送后处理。
             </div>
           </div>
         ) : (
@@ -461,7 +420,15 @@ export default function Workbench({ onSendToPost }: Props) {
                 style={{ aspectRatio: '1 / 1' }}
                 onClick={() => setSelected(r.id)}
               >
-                <img src={r.url} alt={r.name} />
+                <img
+                  src={r.url}
+                  alt={r.name}
+                  style={{ cursor: 'zoom-in' }}
+                  onClick={(e) => {
+                    e.stopPropagation()
+                    openPreview(r.url, r.name)
+                  }}
+                />
                 <div className="cap">
                   {r.width}×{r.height} · {r.meta?.style?.name ? `${r.meta.style.name} · ` : ''}
                   {r.meta?.provider ?? r.kind}
@@ -484,7 +451,14 @@ export default function Workbench({ onSendToPost }: Props) {
               style={{ cursor: 'pointer', border: selected === r.id ? '1px solid #00FF88' : '1px solid transparent', padding: 4 }}
               onClick={() => setSelected(r.id)}
             >
-              <div className="checker" style={{ width: 40, height: 40, border: '2px solid #0a0a0a' }}>
+              <div
+                className="checker"
+                style={{ width: 40, height: 40, border: '2px solid #0a0a0a', cursor: 'zoom-in' }}
+                onClick={(e) => {
+                  e.stopPropagation()
+                  openPreview(r.url, r.name)
+                }}
+              >
                 <img src={r.url} style={{ width: '100%', height: '100%', objectFit: 'contain', imageRendering: 'pixelated' }} />
               </div>
               <div>
@@ -499,7 +473,8 @@ export default function Workbench({ onSendToPost }: Props) {
         <div className="card-white">
           <div style={{ fontFamily: 'Silkscreen, monospace', fontSize: 9, marginBottom: 4 }}>EXPORT</div>
           <div style={{ fontSize: 11, lineHeight: 1.6 }}>
-            选中结果可下载 PNG ZIP；导出自动附带 AI 生成标识。
+            选中结果可下载 PNG ZIP。默认不烧 AI 角标（角标会污染后续抠图/合成）；
+            需要合规标识时到「模型设置」打开「下载时补 AI 标识」。
           </div>
         </div>
       </aside>

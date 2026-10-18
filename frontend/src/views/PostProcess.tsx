@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { api, Asset, StyleInfo } from '../api'
 import { StyleChip } from './Workbench'
+import { openPreview } from '../Preview'
 
 type Props = { incoming?: Asset | null }
 
@@ -517,7 +518,8 @@ export default function PostProcess({ incoming }: Props) {
           <div className="row">
             {out && (
               <>
-                <a className="btn" href={`/api/assets/${out.id}/download?label=1`} download={`${out.name}.png`}>
+                {/* 是否叠 AI 角标由设置里的开关决定，前端不写死 */}
+                <a className="btn" href={`/api/assets/${out.id}/download`} download={`${out.name}.png`}>
                   下载 PNG
                 </a>
                 <button className="btn" onClick={() => api.exportZip([out.id])}>
@@ -532,7 +534,16 @@ export default function PostProcess({ incoming }: Props) {
           <div>
             <div className="hint" style={{ marginBottom: 6 }}>BEFORE</div>
             <div className="thumb checker" style={{ height: 380, borderColor: 'rgba(255,255,255,0.35)' }}>
-              {before ? <img src={before} alt="before" /> : <span className="hint">等待上传</span>}
+              {before ? (
+                <img
+                  src={before}
+                  alt="before"
+                  style={{ cursor: 'zoom-in' }}
+                  onClick={() => openPreview(before, '处理前')}
+                />
+              ) : (
+                <span className="hint">等待上传</span>
+              )}
             </div>
           </div>
           {(out || frames.length > 0) && (
@@ -542,13 +553,23 @@ export default function PostProcess({ incoming }: Props) {
                 <div className="hint" style={{ marginBottom: 6 }}>AFTER</div>
                 {out ? (
                   <div className="thumb checker" style={{ height: 380, borderColor: '#00FF88' }}>
-                    <img src={out.url} alt="after" />
+                    <img
+                      src={out.url}
+                      alt="after"
+                      style={{ cursor: 'zoom-in' }}
+                      onClick={() => openPreview(out.url, out.name || '处理后')}
+                    />
                   </div>
                 ) : (
                   <div className="grid" style={{ maxHeight: 380, overflowY: 'auto', padding: 4 }}>
                     {frames.map((f) => (
-                      <div key={f.id} className="thumb checker" style={{ aspectRatio: '1 / 1', borderColor: 'rgba(0,255,136,0.5)' }}>
-                        <img src={f.url} alt={f.name} />
+                      <div
+                        key={f.id}
+                        className="thumb checker"
+                        style={{ aspectRatio: '1 / 1', borderColor: 'rgba(0,255,136,0.5)' }}
+                        onClick={() => openPreview(f.url, f.name)}
+                      >
+                        <img src={f.url} alt={f.name} style={{ cursor: 'zoom-in' }} />
                       </div>
                     ))}
                   </div>

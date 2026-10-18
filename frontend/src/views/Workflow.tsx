@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState } from 'react'
 import { api, Asset } from '../api'
+import { openPreview } from '../Preview'
 
 type StepDef = {
   id: string
@@ -7,7 +8,6 @@ type StepDef = {
   type: string
   desc: string
   prompt?: string
-  promptEn?: string
   layerNames?: string[]
   layerNamesEn?: string[]
   n?: number
@@ -26,20 +26,13 @@ export default function WorkflowView() {
   const [error, setError] = useState('')
   const [assets, setAssets] = useState<Record<string, Asset>>({})
   const [promptDraft, setPromptDraft] = useState('')
-  const [english, setEnglish] = useState(false)
   const [size, setSize] = useState(512)
-  const [descEn, setDescEn] = useState('')
 
   useEffect(() => {
     api.workflows().then((d) => {
       setWorkflows(d.workflows)
       if (d.workflows[0]) setActive(d.workflows[0].steps[0].id)
     })
-    // SD 系（diffusers / A1111）用 CLIP，只认英文；云端多模态模型直接吃中文
-    api.providers?.().then((d: any) => {
-      const active = (d.providers || []).find((p: any) => p.active)
-      setEnglish(active ? ['diffusers', 'a1111'].includes(active.id) : false)
-    }).catch(() => void 0)
   }, [])
 
   const wf = useMemo(() => workflows.find((w) => w.id === wfId), [workflows, wfId])
@@ -51,8 +44,8 @@ export default function WorkflowView() {
 
   // 切换步骤时刷新提示词草稿
   useEffect(() => {
-    if (stepDef) setPromptDraft(promptOf(stepDef, input, action, run, english))
-  }, [stepDef?.id, wfId, run?.id, english])
+    if (stepDef) setPromptDraft(promptOf(stepDef, input, action, run))
+  }, [stepDef?.id, wfId, run?.id])
 
   // 拉取产物详情
   useEffect(() => {
@@ -78,7 +71,6 @@ export default function WorkflowView() {
         width: size,
         height: size,
         steps: 4,
-        ...(english && descEn ? { descEn } : {}),
       })
       setRun(r)
       setActive(r.steps[0].id)
@@ -161,20 +153,6 @@ export default function WorkflowView() {
         <div>
           <div className="label">输入</div>
           <textarea className="textarea" style={{ minHeight: 76 }} value={input} onChange={(e) => setInput(e.target.value)} placeholder={wf?.inputHint} />
-          {english && (
-            <>
-              <div className="label" style={{ marginTop: 8 }}>
-                英文描述 · 可选（留空则自动翻译上面的中文）
-              </div>
-              <textarea
-                className="textarea"
-                style={{ minHeight: 56 }}
-                value={descEn}
-                onChange={(e) => setDescEn(e.target.value)}
-                placeholder="英文描述（可留空，自动翻译上方中文；例如：灰白英短猫武士，红披风，手持武士刀）"
-              />
-            </>
-          )}
           <div className="row" style={{ marginTop: 6 }}>
             {wfId === 'animation' && (
               <div className="grow">
@@ -331,8 +309,16 @@ export default function WorkflowView() {
                   const a = assets[id]
                   return (
                     <div key={id} className="lib-card">
-                      <div className="thumb checker" style={{ aspectRatio: '1 / 1' }}>
-                        {a ? <img src={a.url} alt="" /> : <span className="hint">载入中</span>}
+                      <div
+                        className="thumb checker"
+                        style={{ aspectRatio: '1 / 1' }}
+                        onClick={() => a && openPreview(a.url, a.name)}
+                      >
+                        {a ? (
+                          <img src={a.url} alt={a.name} style={{ cursor: 'zoom-in' }} />
+                        ) : (
+                          <span className="hint">载入中</span>
+                        )}
                         <div className="cap">{a ? `${a.width}×${a.height}` : id}</div>
                       </div>
                       <div className="lib-meta">
@@ -399,14 +385,14 @@ export default function WorkflowView() {
   )
 }
 
-function promptOf(step: StepDef, input: string, action: string, run: any, english = false) {
-  const tpl = (english && step.promptEn ? step.promptEn : step.prompt) || ''
-  const layers = (english && step.layerNamesEn ? step.layerNamesEn : step.layerNames) || []
+function promptOf(step: StepDef, input: string, action: string, run: any) {
+  const tpl = step.prompt || ''
+  const layers = step.layerNames || []
   const label = run?.steps?.[0]?.meta?.labels?.[0] as string | undefined
-  const layer = layers[0] || label || (english ? 'target layer' : '目标图层')
+  const layer = layers[0] || label || '目标图层'
   return tpl
     .replace(/\{input\}/g, input)
     .replace(/\{action\}/g, action)
     .replace(/\{layer\}/g, layer)
-    .replace(/\{element\}/g, english ? 'target element' : '目标元素')
+    .replace(/\{element\}/g, '目标元素')
 }

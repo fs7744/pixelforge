@@ -1,11 +1,12 @@
 import { useEffect, useState } from 'react'
 import { api, Settings } from '../api'
 
+/** 只有本地双底座，配置页也从「多 Provider 卡片网格」收敛成一张卡。 */
 export default function SettingsView() {
   const [settings, setSettings] = useState<Settings | null>(null)
   const [saving, setSaving] = useState(false)
   const [msg, setMsg] = useState('')
-  const [testMsg, setTestMsg] = useState<Record<string, string>>({})
+  const [testMsg, setTestMsg] = useState('')
 
   useEffect(() => {
     api.settings().then(setSettings)
@@ -13,13 +14,12 @@ export default function SettingsView() {
 
   if (!settings) return <div className="empty">读取设置中…</div>
 
-  const update = (pid: string, key: string, value: any) => {
+  const cfg = settings.providers?.diffusers || ({} as any)
+
+  const update = (key: string, value: any) => {
     setSettings({
       ...settings,
-      providers: {
-        ...settings.providers,
-        [pid]: { ...settings.providers[pid], [key]: value },
-      },
+      providers: { ...settings.providers, diffusers: { ...cfg, [key]: value } },
     })
   }
 
@@ -38,13 +38,13 @@ export default function SettingsView() {
     }
   }
 
-  const test = async (pid: string) => {
-    setTestMsg((m) => ({ ...m, [pid]: '测试中…' }))
+  const test = async () => {
+    setTestMsg('测试中…')
     try {
-      const r = await api.testProvider(pid)
-      setTestMsg((m) => ({ ...m, [pid]: `${r.ok ? 'OK' : 'FAIL'} · ${r.message}` }))
+      const r = await api.testProvider('diffusers')
+      setTestMsg(`${r.ok ? 'OK' : 'FAIL'} · ${r.message}`)
     } catch (e: any) {
-      setTestMsg((m) => ({ ...m, [pid]: `FAIL · ${e.message}` }))
+      setTestMsg(`FAIL · ${e.message}`)
     }
   }
 
@@ -52,21 +52,17 @@ export default function SettingsView() {
     <div className="body">
       <aside className="panel">
         <div className="section-title">
-          模型服务 <span className="tag pink">PROVIDERS</span>
+          模型服务 <span className="tag pink">LOCAL</span>
         </div>
         <div className="card">
-          <div className="label">当前默认 Provider</div>
-          <select
-            className="select"
-            value={settings.activeProvider}
-            onChange={(e) => setSettings({ ...settings, activeProvider: e.target.value })}
-          >
-            {Object.entries(settings.providers).map(([pid, cfg]) => (
-              <option key={pid} value={pid}>
-                {cfg.label}
-              </option>
-            ))}
-          </select>
+          <div style={{ fontSize: 13, fontWeight: 600 }}>{cfg.label || '本地双底座'}</div>
+          <div className="hint" style={{ marginTop: 6 }}>
+            生成底座：Z-Image-Turbo（文生图）
+            <br />
+            编辑底座：Qwen-Image-Edit-2511（指令式编辑）
+            <br />
+            两个底座都是中文原生，提示词不需要翻译。
+          </div>
         </div>
         <button className="btn btn-primary btn-block" disabled={saving} onClick={save}>
           {saving ? '保存中' : '保存设置'}
@@ -75,188 +71,63 @@ export default function SettingsView() {
         <div className="card-white">
           <div style={{ fontFamily: 'Silkscreen, monospace', fontSize: 9, marginBottom: 4 }}>LOCAL FIRST</div>
           <div style={{ fontSize: 11, lineHeight: 1.7 }}>
-            内置模拟引擎无需任何模型即可跑通全链路；配置本地 A1111 或云端 API 后即可产出真实素材。
+            全部推理在本机完成，素材存在 data/assets，不上传云端。
           </div>
         </div>
       </aside>
 
       <main className="stage">
-        <div className="section-title">服务接入</div>
-        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(320px, 1fr))', gap: 16 }}>
-          {Object.entries(settings.providers).map(([pid, cfg]) => {
-            const on = settings.activeProvider === pid
-            return (
-              <div key={pid} className={`provider-card ${on ? 'on' : ''}`}>
-                <div className="row between">
-                  <div style={{ fontSize: 14, fontWeight: 600 }}>{cfg.label}</div>
-                  <div className="row">
-                    {pid === 'mock' && <span className="status ok">内置</span>}
-                    <span className={`status ${on ? 'ok' : 'off'}`}>{on ? '默认' : '待用'}</span>
-                  </div>
-                </div>
+        <div className="section-title">本地底座</div>
+        <div className="provider-card on">
+          <div className="row between">
+            <div style={{ fontSize: 14, fontWeight: 600 }}>{cfg.label || '本地双底座'}</div>
+            <span className="status ok">默认</span>
+          </div>
 
-                {pid !== 'mock' && pid !== 'diffusers' && (
-                  <>
-                    <div>
-                      <div className="label">Base URL</div>
-                      <input className="input" value={cfg.baseUrl} onChange={(e) => update(pid, 'baseUrl', e.target.value)} />
-                    </div>
-                    <div>
-                      <div className="label">API Key {pid === 'a1111' ? '（通常留空）' : ''}</div>
-                      <input
-                        className="input"
-                        type="password"
-                        placeholder={cfg.hasKey ? '已保存（留空不改）' : ''}
-                        value={cfg.apiKey?.startsWith('•') ? '' : cfg.apiKey}
-                        onChange={(e) => update(pid, 'apiKey', e.target.value)}
-                      />
-                    </div>
-                    <div>
-                      <div className="label">模型</div>
-                      <input
-                        className="input"
-                        placeholder={pid === 'a1111' ? 'checkpoint 名称（可空）' : '模型名'}
-                        value={cfg.model}
-                        onChange={(e) => update(pid, 'model', e.target.value)}
-                      />
-                    </div>
-                  </>
-                )}
-
-                {pid === 'mock' && (
-                  <div className="hint">
-                    产出 4×4 像素精灵表 + 纯色背景，用于验证抠图 / 硬缩放 / 拆帧全链路。
-                  </div>
-                )}
-
-                {pid === 'diffusers' && (
-                  <>
-                    <div>
-                      <div className="label">模型（HF 仓库名或本地路径）</div>
-                      <input
-                        className="input"
-                        placeholder="models/z-image-turbo"
-                        value={cfg.model}
-                        onChange={(e) => update(pid, 'model', e.target.value)}
-                      />
-                      <div className="hint">
-                        Z-Image 族（如 models/z-image-turbo）：中文提示词直喂，自动跳过翻译；
-                        LoRA / IP-Adapter 仅对 SD1.5 族（如 dreamshaper-8）生效。
-                        <br />
-                        Qwen-Image-Edit 族（如 models/qwen-image-edit-2511）：指令式编辑器，
-                        动画工作流会自动接力——帧 1 借 Z-Image 生成，帧 2+ 由它编辑（需传参考图）。
-                      </div>
-                    </div>
-                    <div>
-                      <div className="label">负向提示词</div>
-                      <input
-                        className="input"
-                        value={(cfg as any).negativePrompt || ''}
-                        onChange={(e) => update(pid, 'negativePrompt', e.target.value)}
-                      />
-                    </div>
-                    <div className="row">
-                      <div className="grow">
-                        <div className="label">IP-Adapter 目录（留空自动探测 models/ip-adapter-sd15）</div>
-                        <input
-                          className="input"
-                          placeholder="models/ip-adapter-sd15"
-                          value={(cfg as any).ipAdapter || ''}
-                          onChange={(e) => update(pid, 'ipAdapter', e.target.value)}
-                        />
-                      </div>
-                      <div style={{ width: 110 }}>
-                        <div className="label">参考强度</div>
-                        <input
-                          className="input"
-                          type="number"
-                          step="0.05"
-                          min="0"
-                          max="1"
-                          value={(cfg as any).ipAdapterScale ?? 0.7}
-                          onChange={(e) => update(pid, 'ipAdapterScale', Number(e.target.value))}
-                        />
-                      </div>
-                    </div>
-                    <div className="row">
-                      <div className="grow">
-                        <div className="label">像素 LoRA 文件（留空自动探测 models/lora-pixel-redmond）</div>
-                        <input
-                          className="input"
-                          placeholder="models/lora-pixel-redmond/xxx.safetensors"
-                          value={(cfg as any).lora || ''}
-                          onChange={(e) => update(pid, 'lora', e.target.value)}
-                        />
-                      </div>
-                      <div style={{ width: 110 }}>
-                        <div className="label">LoRA 权重</div>
-                        <input
-                          className="input"
-                          type="number"
-                          step="0.05"
-                          min="0"
-                          max="1.5"
-                          value={(cfg as any).loraScale ?? 0.85}
-                          onChange={(e) => update(pid, 'loraScale', Number(e.target.value))}
-                        />
-                      </div>
-                    </div>
-                    <div>
-                      <div className="label">参考图模式</div>
-                      <div className="chips">
-                        {[
-                          { v: 'ip', t: 'IP-Adapter（推荐）' },
-                          { v: 'img2img', t: 'img2img' },
-                        ].map((o) => (
-                          <button
-                            key={o.v}
-                            className={`chip ${((cfg as any).refMode || 'ip') === o.v ? 'on' : ''}`}
-                            onClick={() => update(pid, 'refMode', o.v)}
-                          >
-                            {o.t}
-                          </button>
-                        ))}
-                      </div>
-                    </div>
-                    <div className="hint">
-                      Turbo 模型自动使用 1-8 步 / CFG 0；6GB 显存会自动开启 attention slicing。
-                      国内网络可设环境变量 HF_ENDPOINT=https://hf-mirror.com 后重启服务。
-                      权重下载：<code>python backend/fetch_support.py</code>
-                    </div>
-                    <div className="row">
-                      <button
-                        className="btn"
-                        onClick={() =>
-                          fetch('/api/providers/diffusers/unload', { method: 'POST' })
-                            .then((r) => r.json())
-                            .then((d) => setTestMsg((m) => ({ ...m, diffusers: d.message })))
-                        }
-                      >
-                        卸载模型 / 释放显存
-                      </button>
-                    </div>
-                  </>
-                )}
-
-                <div className="row">
-                  <button className="btn" onClick={() => test(pid)}>
-                    测试连接
-                  </button>
-                  <button
-                    className="btn btn-ghost"
-                    onClick={() => setSettings({ ...settings, activeProvider: pid })}
-                  >
-                    设为默认
-                  </button>
-                </div>
-                {testMsg[pid] && (
-                  <div className={testMsg[pid].startsWith('OK') ? 'ok' : 'err'} style={{ fontSize: 11 }}>
-                    {testMsg[pid]}
-                  </div>
-                )}
-              </div>
-            )
-          })}
+          <div>
+            <div className="label">生成底座目录（Z-Image-Turbo）</div>
+            <input
+              className="input"
+              placeholder="models/z-image-turbo"
+              value={cfg.model || ''}
+              onChange={(e) => update('model', e.target.value)}
+            />
+            <div className="hint">
+              切到 Qwen-Image-Edit 目录会变成「编辑器」模式：它不能从零出图，
+              三视图 / 动画工作流会自动把帧 1 交给上面的生成底座。
+            </div>
+          </div>
+          <div>
+            <div className="label">负向提示词（仅编辑底座生效）</div>
+            <input
+              className="input"
+              value={cfg.negativePrompt || ''}
+              onChange={(e) => update('negativePrompt', e.target.value)}
+            />
+          </div>
+          <div className="row">
+            <button className="btn" onClick={test}>
+              测试连接
+            </button>
+            <button
+              className="btn btn-ghost"
+              onClick={() =>
+                fetch('/api/providers/diffusers/unload', { method: 'POST' })
+                  .then((r) => r.json())
+                  .then((d) => setTestMsg(d.message))
+              }
+            >
+              卸载模型 / 释放显存
+            </button>
+          </div>
+          {testMsg && (
+            <div
+              className={testMsg.startsWith('OK') ? 'ok' : 'err'}
+              style={{ fontSize: 11 }}
+            >
+              {testMsg}
+            </div>
+          )}
         </div>
 
         <div className="section-title" style={{ marginTop: 8 }}>
@@ -318,8 +189,11 @@ export default function SettingsView() {
         <div className="card">
           <div className="row between">
             <div>
-              <div style={{ fontSize: 13 }}>AI 生成内容标识</div>
-              <div className="label">导出图片左下角附加 AI 角标（合规要求，建议开启）</div>
+              <div style={{ fontSize: 13 }}>下载时补 AI 标识</div>
+              <div className="label">
+                默认关闭：角标画进像素后，后续抠图/合成会把它当画面内容带走。
+                存储与预览都不烧角标，只在下载瞬间按此开关叠加。
+              </div>
             </div>
             <div
               className={`toggle ${settings.aiLabel ? 'on' : 'off'}`}

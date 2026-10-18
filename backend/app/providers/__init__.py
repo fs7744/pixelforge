@@ -1,14 +1,10 @@
-from .a1111 import A1111Provider
 from .base import BaseProvider, ProviderResult
 from .diffusers_local import DiffusersProvider
-from .mock import MockProvider
-from .openai_compat import OpenAICompatProvider
 
+# 只保留本地双底座：Z-Image-Turbo（文生图）与 Qwen-Image-Edit-2511（指令编辑）。
+# 模拟引擎与 SD/CLIP 系（A1111、云端 OpenAI 兼容接口）已整体移除。
 REGISTRY = {
-    MockProvider.id: MockProvider,
     DiffusersProvider.id: DiffusersProvider,
-    OpenAICompatProvider.id: OpenAICompatProvider,
-    A1111Provider.id: A1111Provider,
 }
 
 

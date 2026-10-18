@@ -13,48 +13,24 @@ STYLE_SAMPLES_DIR = DATA_DIR / "style_samples"
 SETTINGS_PATH = DATA_DIR / "settings.json"
 
 DEFAULT_SETTINGS: Dict[str, Any] = {
-    "activeProvider": "mock",
+    # 只有本地双底座：Z-Image-Turbo（文生图）与 Qwen-Image-Edit-2511（指令编辑）
+    "activeProvider": "diffusers",
     "providers": {
-        "mock": {
-            "label": "内置模拟引擎",
-            "baseUrl": "",
-            "apiKey": "",
-            "model": "mock-pixel-v1",
-            "enabled": True,
-        },
         "diffusers": {
-            "label": "内置推理服务（diffusers）",
+            "label": "本地双底座（Z-Image / Qwen-Edit）",
             "baseUrl": "",
             "apiKey": "",
+            # 生成底座（文生图）；编辑底座由 ai_edit.resolve_edit_model 解析，
+            # 优先扫设置里的 qwen_edit 族模型，否则用 models/qwen-image-edit-2511
             "model": "models/z-image-turbo",
-            "negativePrompt": "blurry, low quality, watermark, text",
-            # 一致性增强（留空则自动探测 models/ 下的默认目录；仅 SD1.5 族有效，
-            # Z-Image 的 UNet 结构不同，挂了也会在 caps.notes 里说明不适用）
-            "ipAdapter": "",
-            "ipAdapterScale": 0.7,
-            "lora": "",
-            "loraScale": 0.85,
-            "lcmLora": "",
-            "refMode": "ip",
+            "negativePrompt": "模糊, 低质量, 水印, 文字",
             "enabled": True,
-        },
-        "openai_compat": {
-            "label": "云端 API（OpenAI 兼容）",
-            "baseUrl": "https://api.openai.com/v1",
-            "apiKey": "",
-            "model": "gpt-image-1",
-            "enabled": False,
-        },
-        "a1111": {
-            "label": "本地 A1111 / Forge",
-            "baseUrl": "http://127.0.0.1:7860",
-            "apiKey": "",
-            "model": "",
-            "enabled": False,
         },
     },
     "defaults": {"steps": 28, "cfg": 7.5, "width": 512, "height": 512},
-    "aiLabel": True,
+    # 默认不烧 AI 角标：角标一旦画进像素，后续抠图/合成会把它带进精灵表。
+    # 需要合规标识时，下载端点可用 ?label=1 显式补标。
+    "aiLabel": False,
 }
 
 

@@ -61,21 +61,13 @@ _VIEW_META: Dict[str, Dict[str, str]] = {
 VIEW_ORDER = ("front", "side", "back")
 
 
-def _view_prompt(subject: str, view: str, chinese: bool) -> str:
+def _view_prompt(subject: str, view: str) -> str:
     """单视角 txt2img 提示词：核心是「画面中只有一个角色」的反重叠约束。"""
     m = _VIEW_META[view]
-    if chinese:
-        return (
-            f"游戏角色{m['cn']}立绘。画面中只有一个角色，绝对不能出现两个或多个人物。"
-            f"角色设定：{subject}。"
-            f"{m['pose_cn']}。纯色暗绿色背景，无渐变、无纹理、无文字、无水印、无边框、无其他物体。"
-        )
     return (
-        f"game character {m['en']} full body illustration. "
-        f"exactly one single character in the frame, never two or more figures. "
-        f"character: {subject}. {m['pose_en']}. "
-        f"plain solid dark green background, no gradient, no texture, no text, "
-        f"no watermark, no frame, no other objects."
+        f"游戏角色{m['cn']}立绘。画面中只有一个角色，绝对不能出现两个或多个人物。"
+        f"角色设定：{subject}。"
+        f"{m['pose_cn']}。纯色暗绿色背景，无渐变、无纹理、无文字、无水印、无边框、无其他物体。"
     )
 
 
@@ -296,12 +288,11 @@ async def run_three_view(
 ) -> Tuple[Image.Image, List[Image.Image], Dict[str, Any]]:
     """生成角色三视图。返回（拼板图, [正, 侧, 背], meta）。
 
-    - subject：角色描述（中文优先；SD 系底座会自动翻译）；
+    - subject：角色描述（中文，直接送中文原生底座，不翻译）；
     - style：画风 id（见 app/styles.py），只作用于帧 1，帧 2+ 靠编辑指令继承画风；
     - 帧 2+ 优先走 Qwen-Image-Edit 指令接力（外观保持最好）；
       编辑底座缺失时退回同种子 txt2img × 3（meta.editFallback 记录原因）。
     """
-    from .. import zh2en
     from ..config import ROOT, load_settings
     from ..providers import get_provider
     from ..providers.diffusers_local import DiffusersProvider, detect_family
@@ -310,7 +301,7 @@ async def run_three_view(
 
     t0 = time.time()
     settings = load_settings()
-    pid = provider_id or settings.get("activeProvider") or "mock"
+    pid = provider_id or settings.get("activeProvider") or "diffusers"
     pcfg = provider_cfg if provider_cfg is not None else \
         (settings.get("providers") or {}).get(pid) or {}
     active = get_provider(pid, pcfg)
@@ -329,30 +320,11 @@ async def run_three_view(
             "或在设置里把默认 Provider 换成生成底座。"
         )
 
-    # 语言能力以 txt2img 底座为准（编辑器帧不吃这段提示词）。
-    # 注意 supports_zh 是 property，直接对路径判定，避免为探活临时构造 provider。
-    if is_editor:
-        chinese = detect_family(txt_model) in ("zimage", "qwen_edit")
-    else:
-        chinese = bool(getattr(active, "supports_zh", False))
+    # 两个底座都是中文原生，提示词原样送，不做任何语言转换
     subj = (subject or "").strip()
-    translation = None
-    if not chinese and zh2en.has_chinese(subj):
-        subj, translation = zh2en.translate_prompt(subj, add_style=False)
-
-    styled = apply_style(subj, style, chinese)
-
-    # 画风的 SD 负向项并入 provider cfg（Z-Image/Qwen-Edit 不吃负向，无需处理）
-    txt_cfg = dict(pcfg) if isinstance(pcfg, dict) else {}
-    if styled.get("negative"):
-        base = (txt_cfg.get("negativePrompt") or "").strip()
-        txt_cfg["negativePrompt"] = ", ".join(
-            x for x in (base, styled["negative"]) if x)
+    styled = apply_style(subj, style)
     if is_editor:
-        txt_cfg["model"] = txt_model
-        txt = DiffusersProvider(txt_cfg)
-    elif txt_cfg != pcfg:
-        txt = get_provider(pid, txt_cfg)
+        txt = DiffusersProvider({**pcfg, "model": txt_model})
     else:
         txt = active
 
@@ -362,7 +334,7 @@ async def run_three_view(
 
     # ---- 帧 1：正视图（txt2img） ----
     t1 = time.time()
-    p_front = _view_prompt(styled["prompt"], "front", chinese)
+    p_front = _view_prompt(styled["prompt"], "front")
     res = await txt.generate(prompt=p_front, width=cw, height=ch,
                              steps=steps, cfg=gen_cfg, seed=seed, n=1)
     front = res.images[0].convert("RGB")
@@ -399,7 +371,7 @@ async def run_three_view(
         # 无编辑底座：同种子 txt2img × 3。一致性弱，但三张独立、绝不重叠。
         for key in ("side", "back"):
             t1 = time.time()
-            p = _view_prompt(styled["prompt"], key, chinese)
+            p = _view_prompt(styled["prompt"], key)
             r = await txt.generate(prompt=p, width=cw, height=ch,
                                    steps=steps, cfg=gen_cfg, seed=seed, n=1)
             views.append(r.images[0].convert("RGB"))
@@ -422,11 +394,9 @@ async def run_three_view(
         "views": per_view,
         "compose": cmeta,
         "seed": seed,
-        "promptLang": "zh" if chinese else "en",
+        "promptLang": "zh",
         "seconds": round(time.time() - t0, 1),
     }
-    if translation:
-        meta["translation"] = translation
     if edit_fallback:
         meta["editFallback"] = edit_fallback
     if styled.get("suggestPost"):

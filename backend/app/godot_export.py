@@ -8,15 +8,26 @@ import io
 import json
 import time
 import zipfile
-from pathlib import Path
 from typing import Any, Dict, List, Tuple
 
 from PIL import Image
 
 from . import storage
-from .config import DATA_DIR
+from .config import DATA_DIR, load_settings
 
 EXPORTS_DIR = DATA_DIR / "exports"
+
+
+def _ai_label_enabled() -> bool:
+    """设置里的「下载时补 AI 标识」开关，同时控制导出包里的显式标记文件。
+
+    默认关：图像像素永远不烧角标，导出包也不附带说明文件；打开后单张下载
+    会叠角标，导出 ZIP 里补一份 AI_GENERATED.txt（都不改动画面像素）。
+    """
+    try:
+        return bool(load_settings().get("aiLabel"))
+    except Exception:
+        return False
 
 
 def _safe(name: str) -> str:
@@ -116,15 +127,16 @@ def build_godot_package(artifacts: List[str], run: Dict[str, Any]) -> Dict[str, 
         zf.writestr(f"scenes/{name}_player.tscn", tscn)
         zf.writestr("pixelforge_index.json", json.dumps(index_json, ensure_ascii=False, indent=2))
         zf.writestr("README.md", readme)
-        # 中间产物不带角标（会污染像素），合规标识随导出包一并投递
-        zf.writestr(
-            "AI_GENERATED.txt",
-            "本素材由 PixelForge 使用生成式人工智能模型产出。\n"
-            "依据《人工智能生成合成内容标识办法》，对外发布时请保留显式"
-            "「AI 生成」标识，并勿删除 pixelforge_index.json 中的 generator 字段（隐式标识）。\n"
-            f"生成时间：{time.strftime('%Y-%m-%d %H:%M')}\n"
-            f"帧规格：{fw}x{fh} × {total} 帧 @ {fps}fps\n",
-        )
+        # 中间产物不带角标（会污染像素）；显式标记文件跟随设置开关
+        if _ai_label_enabled():
+            zf.writestr(
+                "AI_GENERATED.txt",
+                "本素材由 PixelForge 使用生成式人工智能模型产出。\n"
+                "依据《人工智能生成合成内容标识办法》，对外发布时请保留显式"
+                "「AI 生成」标识，并勿删除 pixelforge_index.json 中的 generator 字段（隐式标识）。\n"
+                f"生成时间：{time.strftime('%Y-%m-%d %H:%M')}\n"
+                f"帧规格：{fw}x{fh} × {total} 帧 @ {fps}fps\n",
+            )
 
     out = EXPORTS_DIR / f"{name}_godot.zip"
     out.write_bytes(buf.getvalue())
@@ -136,8 +148,8 @@ def build_godot_package(artifacts: List[str], run: Dict[str, Any]) -> Dict[str, 
         "frameSize": [fw, fh],
         "fps": fps,
         "files": [f"sprites/{name}.png", f"sprites/{name}_frames.tres",
-                  f"scenes/{name}_player.tscn", "pixelforge_index.json", "README.md",
-                  "AI_GENERATED.txt"],
+                  f"scenes/{name}_player.tscn", "pixelforge_index.json", "README.md"]
+                 + (["AI_GENERATED.txt"] if _ai_label_enabled() else []),
         "note": f"ZIP 大小 {round(len(buf.getvalue()) / 1024, 1)} KB · 解压即可进 Godot",
     }
 
@@ -206,14 +218,15 @@ def build_parallax_package(artifacts: List[str], run: Dict[str, Any]) -> Dict[st
         zf.writestr("scroll_scale.json", json.dumps({"canvas": {"w": w, "h": h}, "layers": scroll},
                                                     ensure_ascii=False, indent=2))
         zf.writestr("README.md", readme)
-        zf.writestr(
-            "AI_GENERATED.txt",
-            "本素材由 PixelForge 使用生成式人工智能模型产出。\n"
-            "依据《人工智能生成合成内容标识办法》，对外发布时请保留显式"
-            "「AI 生成」标识，并勿删除 scroll_scale.json 中的 generator 字段（隐式标识）。\n"
-            f"生成时间：{time.strftime('%Y-%m-%d %H:%M')}\n"
-            f"画布：{w}x{h} · {len(layers)} 层\n",
-        )
+        if _ai_label_enabled():
+            zf.writestr(
+                "AI_GENERATED.txt",
+                "本素材由 PixelForge 使用生成式人工智能模型产出。\n"
+                "依据《人工智能生成合成内容标识办法》，对外发布时请保留显式"
+                "「AI 生成」标识，并勿删除 scroll_scale.json 中的 generator 字段（隐式标识）。\n"
+                f"生成时间：{time.strftime('%Y-%m-%d %H:%M')}\n"
+                f"画布：{w}x{h} · {len(layers)} 层\n",
+            )
 
     out = EXPORTS_DIR / f"{name}.zip"
     out.write_bytes(buf.getvalue())
