@@ -118,13 +118,16 @@ class DiffusersProvider(BaseProvider):
         prompt: str,
         width: int = 512,
         height: int = 512,
-        steps: int = 28,
+        steps: Optional[int] = None,
         cfg: float = 7.5,
         seed: Optional[int] = None,
         n: int = 1,
         ref=None,
     ) -> ProviderResult:
         model_id = self._resolve_model()
+        if steps is None:
+            # 蒸馏模型（turbo / LCM）只需极少步数，28 步纯属浪费
+            steps = 4 if "turbo" in model_id.lower() else 28
         async with _LOCK:
             images, meta = await asyncio.to_thread(
                 self._run, model_id, prompt, self.cfg.get("negativePrompt", ""),

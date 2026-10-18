@@ -7,6 +7,7 @@ const PIPELINES = [
   { id: 'matte', name: '连通域抠图', tag: 'FLOOD-FILL', desc: '只删与边缘连通的同色背景，不误删内部同色像素' },
   { id: 'resize', name: '尺寸规整', tag: 'NEAREST', desc: '最近邻硬缩放 / 等比留白 / RPGMaker 一键' },
   { id: 'sheet', name: 'Sprite Sheet 拆分', tag: 'N×M', desc: '按行列拆帧并生成引擎索引 JSON' },
+  { id: 'pixelize', name: '像素化对齐', tag: 'PALETTE', desc: '分块单色 + 限定调色板，把 AI 图变成规整像素风' },
   { id: 'seamless', name: '左右无缝延展', tag: 'SEAMLESS', desc: '镜像拼接 ×N，接缝数学连续，用于视差图层循环' },
   { id: 'tile', name: '瓦片接缝修补', tag: 'OFFSET-HEAL', desc: '偏移-修复法把贴图变成可平铺单元' },
   { id: 'watermark', name: '去水印（Beta）', tag: 'REV-ALPHA', desc: '需水印掩码；无掩码时不做破坏性处理' },
@@ -30,6 +31,10 @@ export default function PostProcess({ incoming }: Props) {
   const [seamMirror, setSeamMirror] = useState(true)
   const [tileBand, setTileBand] = useState(12)
   const [tileFeather, setTileFeather] = useState(3)
+  const [pxSize, setPxSize] = useState(4)
+  const [pxColors, setPxColors] = useState(16)
+  const [pxPalette, setPxPalette] = useState('auto')
+  const [pxDither, setPxDither] = useState(false)
   const [out, setOut] = useState<Asset | null>(null)
   const [frames, setFrames] = useState<Asset[]>([])
   const [index, setIndex] = useState<any>(null)
@@ -81,6 +86,10 @@ export default function PostProcess({ incoming }: Props) {
         setFrames(res.frames)
         setIndex(res.index)
         setNote(`拆出 ${res.frames.length} 帧 · 每帧 ${res.index.frame_size.w}×${res.index.frame_size.h}`)
+      } else if (pipeline === 'pixelize') {
+        const res = await api.pixelize(file, pxColors, pxSize, pxDither, pxPalette)
+        setOut(res.asset)
+        setNote(`${res.meta.grid[0]}×${res.meta.grid[1]} 格 · ${res.meta.colors} 色 · ${res.meta.palette}`)
       } else if (pipeline === 'seamless') {
         const res = await api.seamless(file, seamTimes, 24, seamMirror)
         setOut(res.asset)
@@ -247,6 +256,54 @@ export default function PostProcess({ incoming }: Props) {
             <div className="grow">
               <div className="label">行（动作组）</div>
               <input className="input" type="number" value={rows} onChange={(e) => setRows(+e.target.value)} />
+            </div>
+          </div>
+        )}
+
+        {pipeline === 'pixelize' && (
+          <div>
+            <div className="label">像素块 {pxSize}px · 调色板</div>
+            <input
+              type="range"
+              min={1}
+              max={16}
+              value={pxSize}
+              onChange={(e) => setPxSize(+e.target.value)}
+              style={{ width: '100%' }}
+            />
+            <div className="chips">
+              {[
+                ['auto', '自动 16 色'],
+                ['8', '自动 8 色'],
+                ['32', '自动 32 色'],
+              ].map(([v, l]) => (
+                <button
+                  key={v}
+                  className={`chip ${pxPalette === v ? 'on' : ''}`}
+                  onClick={() => {
+                    setPxPalette(v)
+                    if (v !== 'auto') setPxColors(+v)
+                  }}
+                >
+                  {l}
+                </button>
+              ))}
+            </div>
+            <div className="chips" style={{ marginTop: 6 }}>
+              {[
+                ['gameboy', 'GameBoy 4 色'],
+                ['nes', 'NES 54 色'],
+              ].map(([v, l]) => (
+                <button key={v} className={`chip sm ${pxPalette === v ? 'on' : ''}`} onClick={() => setPxPalette(v)}>
+                  {l}
+                </button>
+              ))}
+            </div>
+            <div className="row between" style={{ marginTop: 10 }}>
+              <div className="label">抖动（Floyd–Steinberg）</div>
+              <div className={`toggle ${pxDither ? 'on' : 'off'}`} onClick={() => setPxDither(!pxDither)}>
+                <span />
+              </div>
             </div>
           </div>
         )}

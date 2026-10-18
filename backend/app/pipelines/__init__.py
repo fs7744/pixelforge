@@ -1,3 +1,3 @@
-from . import matte, resize, seamless, sheet, tile, watermark
+from . import matte, pixelize, resize, seamless, sheet, sprite, tile, watermark
 
-__all__ = ["matte", "resize", "sheet", "seamless", "tile", "watermark"]
+__all__ = ["matte", "pixelize", "resize", "seamless", "sheet", "sprite", "tile", "watermark"]

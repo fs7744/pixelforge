@@ -1,7 +1,17 @@
 import { useEffect, useMemo, useState } from 'react'
 import { api, Asset } from '../api'
 
-type StepDef = { id: string; name: string; type: string; desc: string; prompt?: string; n?: number }
+type StepDef = {
+  id: string
+  name: string
+  type: string
+  desc: string
+  prompt?: string
+  promptEn?: string
+  layerNames?: string[]
+  layerNamesEn?: string[]
+  n?: number
+}
 type Workflow = { id: string; name: string; tag: string; desc: string; inputHint: string; steps: StepDef[] }
 type RunStep = { id: string; name: string; status: string; artifacts: string[]; meta: any; error?: string }
 
@@ -16,12 +26,20 @@ export default function WorkflowView() {
   const [error, setError] = useState('')
   const [assets, setAssets] = useState<Record<string, Asset>>({})
   const [promptDraft, setPromptDraft] = useState('')
+  const [english, setEnglish] = useState(false)
+  const [size, setSize] = useState(512)
+  const [descEn, setDescEn] = useState('a grey and white british shorthair cat samurai with a red cape and a katana')
 
   useEffect(() => {
     api.workflows().then((d) => {
       setWorkflows(d.workflows)
       if (d.workflows[0]) setActive(d.workflows[0].steps[0].id)
     })
+    // SD 系（diffusers / A1111）用 CLIP，只认英文；云端多模态模型直接吃中文
+    api.providers?.().then((d: any) => {
+      const active = (d.providers || []).find((p: any) => p.active)
+      setEnglish(active ? ['diffusers', 'a1111'].includes(active.id) : false)
+    }).catch(() => void 0)
   }, [])
 
   const wf = useMemo(() => workflows.find((w) => w.id === wfId), [workflows, wfId])
@@ -33,8 +51,8 @@ export default function WorkflowView() {
 
   // 切换步骤时刷新提示词草稿
   useEffect(() => {
-    if (stepDef) setPromptDraft(promptOf(stepDef, input, action, run))
-  }, [stepDef?.id, wfId, run?.id])
+    if (stepDef) setPromptDraft(promptOf(stepDef, input, action, run, english))
+  }, [stepDef?.id, wfId, run?.id, english])
 
   // 拉取产物详情
   useEffect(() => {
@@ -55,7 +73,13 @@ export default function WorkflowView() {
     setBusy('create')
     setError('')
     try {
-      const r = await api.createRun(wfId, input, { action, width: 512, height: 512 })
+      const r = await api.createRun(wfId, input, {
+        action,
+        width: size,
+        height: size,
+        steps: 4,
+        ...(english && descEn ? { descEn } : {}),
+      })
       setRun(r)
       setActive(r.steps[0].id)
       setAssets({})
@@ -137,14 +161,42 @@ export default function WorkflowView() {
         <div>
           <div className="label">输入</div>
           <textarea className="textarea" style={{ minHeight: 76 }} value={input} onChange={(e) => setInput(e.target.value)} placeholder={wf?.inputHint} />
-          {wfId === 'animation' && (
-            <div className="row" style={{ marginTop: 6 }}>
+          {english && (
+            <>
+              <div className="label" style={{ marginTop: 8 }}>
+                英文描述 · 本地 SD 模型必填（CLIP 只认英文）
+              </div>
+              <textarea
+                className="textarea"
+                style={{ minHeight: 56 }}
+                value={descEn}
+                onChange={(e) => setDescEn(e.target.value)}
+                placeholder="a grey and white cat samurai with a red cape and a katana"
+              />
+            </>
+          )}
+          <div className="row" style={{ marginTop: 6 }}>
+            {wfId === 'animation' && (
               <div className="grow">
                 <div className="label">动作</div>
                 <input className="input" value={action} onChange={(e) => setAction(e.target.value)} />
               </div>
+            )}
+            <div>
+              <div className="label">尺寸</div>
+              <div className="row" style={{ gap: 6 }}>
+                {[384, 512].map((s) => (
+                  <button
+                    key={s}
+                    className={`chip ${size === s ? 'on' : ''}`}
+                    onClick={() => setSize(s)}
+                  >
+                    {s}
+                  </button>
+                ))}
+              </div>
             </div>
-          )}
+          </div>
         </div>
 
         <button className="btn btn-primary btn-block" disabled={!!busy} onClick={create}>

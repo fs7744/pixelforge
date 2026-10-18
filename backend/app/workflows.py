@@ -18,6 +18,7 @@ from . import storage
 from .config import DATA_DIR, load_settings
 from .pipelines import resize as resize_pipe
 from .pipelines import sheet as sheet_pipe
+from .pipelines import sprite as sprite_pipe
 from .providers import get_provider
 
 RUNS_DIR = DATA_DIR / "runs"
@@ -39,6 +40,10 @@ WORKFLOWS: List[Dict[str, Any]] = [
                 "desc": "生成正/侧/背三视图作为一致性基准",
                 "prompt": "请生成一张角色三视图（正视图、侧视图、背视图横向排列）。角色设定：{input}。"
                           "二维日系Q版卡通风格，3头身，粗黑描边，平涂上色，暗绿色纯色背景。",
+                "promptEn": "character turnaround reference sheet, exactly 3 views of the same character "
+                            "(front, side, back) in a horizontal row, character: {input}, 2D chibi japanese "
+                            "cartoon style, 3 heads tall, thick black outline, flat cel shading, "
+                            "plain solid dark green background, game asset, no text",
                 "n": 1,
             },
             {
@@ -48,6 +53,11 @@ WORKFLOWS: List[Dict[str, Any]] = [
                 "desc": "生成动作关键帧序列（真实模型下为视频，MVP 用关键帧模拟）",
                 "prompt": "同一个角色（{input}），{action}动作，摄像机固定、角色原地不移动、始终全身，"
                           "纯绿色背景，每帧姿势明显不同。",
+                "promptEn": "one single character only, exactly one figure in the frame, full body shot, "
+                            "character: {input}, {action}, camera fixed, standing on the spot, "
+                            "plain solid green background, 2D chibi japanese cartoon, thick black outline, "
+                            "flat cel shading, game sprite, centered, no text, no turnaround sheet, "
+                            "no multiple views, no duplicate characters",
                 "n": 4,
             },
             {
@@ -60,8 +70,17 @@ WORKFLOWS: List[Dict[str, Any]] = [
                 "id": "inbetween",
                 "name": "插帧补帧",
                 "type": "blend",
-                "desc": "相邻两帧之间补一帧，提升动作连贯度",
-                "perGap": 1,
+                "desc": "相邻帧之间补一帧（可选）。纯像素素材建议保持 0，靠真实抽帧/视频模型补帧",
+                "perGap": 0,
+            },
+            {
+                "id": "normalize",
+                "name": "抠图与规整",
+                "type": "sprites",
+                "desc": "连通域抠图 → 裁空白 → 最近邻缩放 → 底部居中对齐，消除逐帧漂移",
+                "size": 128,
+                "anchor": "bottom",
+                "matte": True,
             },
             {
                 "id": "sprite_sheet",
@@ -99,8 +118,15 @@ WORKFLOWS: List[Dict[str, Any]] = [
                 "type": "generate",
                 "desc": "按层次提取 4 个图层（MVP 用独立生成模拟）",
                 "prompt": "只保留{input}中的{layer}，其余元素移除，统一暗紫色纯色背景 #2A153F，同尺寸同坐标。",
+                "promptEn": "parallax layer only: {layer} of {input}, remove all other elements, "
+                            "plain flat dark purple background #2A153F, same canvas size and alignment, "
+                            "2D game background art, flat colors, no text",
                 "n": 4,
                 "layerNames": ["远景天空与雪山", "中景丘陵与城堡", "近景地面与道路", "前景植物遮挡层"],
+                "layerNamesEn": ["far background sky and snowy mountains",
+                                  "mid ground hills and castle",
+                                  "near ground terrain and road",
+                                  "foreground plants and foliage"],
             },
             {
                 "id": "normalize",
@@ -137,6 +163,8 @@ WORKFLOWS: List[Dict[str, Any]] = [
                 "type": "generate",
                 "desc": "生成 45 度俯视实机场景参考图",
                 "prompt": "{input}，正前方45度俯视视角，Q版日式RPG构图，实机场景而非概念图。",
+                "promptEn": "{input}, 45 degree top-down view from front, chibi japanese RPG composition, "
+                            "in-game scene not concept art, flat colors, game asset, no text",
                 "n": 1,
             },
             {
@@ -145,8 +173,13 @@ WORKFLOWS: List[Dict[str, Any]] = [
                 "type": "generate",
                 "desc": "串行提取 4 个元素（真实模型下可并行多 agent）",
                 "prompt": "只提取{input}中的{element}，完整补全遮挡，正视图不倾斜，统一暗紫底 #2A153F，同尺寸同坐标。",
+                "promptEn": "isolated game asset: only {element} from {input}, fully complete occluded parts, "
+                            "front view upright, plain flat dark purple background #2A153F, "
+                            "same canvas size and alignment, 2D chibi japanese RPG style, flat colors, no text",
                 "n": 4,
                 "layerNames": ["建筑主体", "树木植被", "地面平面", "道具摆件"],
+                "layerNamesEn": ["main building", "trees and vegetation",
+                                  "ground plane", "props and furniture"],
             },
             {
                 "id": "montage",
@@ -264,11 +297,44 @@ def _prev_artifacts(run: Dict[str, Any], step_index: int) -> List[str]:
     return []
 
 
-def _fill(template: str, run: Dict[str, Any], step: Dict[str, Any], idx: int) -> str:
-    layers = step.get("layerNames") or step.get("elementNames") or ["图层一", "图层二", "图层三", "图层四"]
+def _save_asset(img: Image.Image, **kwargs) -> Dict[str, Any]:
+    """工作流中间产物不烧 AI 角标。
+
+    角标一旦画进像素就会被合成进精灵表 / Godot 贴图，整包素材作废。
+    合规标识放到「导出」环节（Godot 包内 AI_GENERATED.txt + 导出角标）。
+    """
+    kwargs.setdefault("ai_label", False)
+    return storage.save_asset(img, **kwargs)
+
+
+def _template(step: Dict[str, Any], english: bool) -> str:
+    """按 Provider 语言能力挑选提示词模板（英文模型用 promptEn）。"""
+    if english and step.get("promptEn"):
+        return step["promptEn"]
+    return step["prompt"]
+
+
+def _fill(template: str, run: Dict[str, Any], step: Dict[str, Any], idx: int,
+          english: bool = False) -> str:
+    cn = step.get("layerNames") or step.get("elementNames") or ["图层一", "图层二", "图层三", "图层四"]
+    en = step.get("layerNamesEn") or step.get("elementNamesEn") or cn
+    layers = en if english else cn
+    subject = run.get("input", "")
+    if english and run.get("params", {}).get("descEn"):
+        subject = run["params"]["descEn"]
+    action = run.get("params", {}).get("action") or "挥砍"
+    action_en = run.get("params", {}).get("actionEn") or {
+        "挥砍": "slashing with a sword",
+        "奔跑": "running",
+        "待机": "idle breathing",
+        "行走": "walking",
+        "攻击": "attacking",
+        "跳跃": "jumping",
+    }.get(action, "slashing with a sword")
     return (
-        template.replace("{input}", run.get("input", ""))
-        .replace("{action}", run.get("params", {}).get("action", "挥砍"))
+        template.replace("{input}", subject)
+        .replace("{action}", action_en if english else action)
+        .replace("{actionEn}", action_en)
         .replace("{layer}", layers[idx % len(layers)])
         .replace("{element}", layers[idx % len(layers)])
     )
@@ -312,7 +378,17 @@ async def run_step(run_id: str, step_id: str, overrides: Optional[Dict[str, Any]
             n = int(overrides.get("n") or step_def.get("n", 1))
             pw = int(run.get("params", {}).get("width") or 512)
             ph = int(run.get("params", {}).get("height") or 512)
-            prompt = overrides.get("prompt") or _fill(step_def["prompt"], run, step_def, 0)
+            english = not getattr(provider, "supports_zh", False)
+            tpl = _template(step_def, english)
+            prompt = overrides.get("prompt") or _fill(tpl, run, step_def, 0, english)
+            psteps = run.get("params", {}).get("steps")
+            pcfg = run.get("params", {}).get("cfg")
+            gen_kw = {}
+            if psteps:
+                gen_kw["steps"] = int(psteps)
+            if pcfg is not None:
+                gen_kw["cfg"] = float(pcfg)
+            seed = run.get("params", {}).get("seed")
 
             if layers or n == 1:
                 # 分层/元素提取：每项独立提示词，受限并发并行生成
@@ -322,12 +398,12 @@ async def run_step(run_id: str, step_id: str, overrides: Optional[Dict[str, Any]
 
                 async def _one(i: int):
                     async with sem:
-                        p = overrides.get("prompt") or _fill(step_def["prompt"], run, step_def, i)
-                        res = await provider.generate(p, pw, ph, n=1)
+                        p = overrides.get("prompt") or _fill(tpl, run, step_def, i, english)
+                        res = await provider.generate(p, pw, ph, n=1, **gen_kw)
                         label = layers[i] if layers else step_def["name"]
                         ids = []
                         for img in res.images:
-                            ids.append(storage.save_asset(
+                            ids.append(_save_asset(
                                 img, kind="workflow", name=f"{run['id']}-{step_id}-{i:02d}",
                                 meta={"runId": run["id"], "step": step_id, "index": i, "label": label},
                             )["id"])
@@ -341,16 +417,18 @@ async def run_step(run_id: str, step_id: str, overrides: Optional[Dict[str, Any]
                         meta.setdefault("labels", []).append(label)
                 meta["prompt"] = prompt
                 meta["concurrency"] = conc
+                meta["promptLang"] = "en" if english else "zh"
             else:
                 # 动作关键帧：一次请求 n 张，保证同角色不同姿态
-                result = await provider.generate(prompt, pw, ph, n=n)
+                result = await provider.generate(prompt, pw, ph, n=n, seed=seed, **gen_kw)
                 for i, img in enumerate(result.images):
-                    artifacts.append(storage.save_asset(
+                    artifacts.append(_save_asset(
                         img, kind="workflow", name=f"{run['id']}-{step_id}-{i:02d}",
                         meta={"runId": run["id"], "step": step_id, "index": i, "label": f"frame {i}"},
                     )["id"])
                 meta = {"prompt": prompt, "frames": len(artifacts),
-                        "provider": result.meta.get("provider")}
+                        "provider": result.meta.get("provider"),
+                        "promptLang": "en" if english else "zh"}
 
         elif stype == "dedup":
             src = overrides.get("artifacts") or _prev_artifacts(run, index)
@@ -375,7 +453,7 @@ async def run_step(run_id: str, step_id: str, overrides: Optional[Dict[str, Any]
             frames = [_load(a) for a in src]
             artifacts = []
             for i, f in enumerate(frames):
-                artifacts.append(storage.save_asset(f, kind="workflow", name=f"{run['id']}-f{i:02d}",
+                artifacts.append(_save_asset(f, kind="workflow", name=f"{run['id']}-f{i:02d}",
                                                     meta={"runId": run["id"], "step": step_id, "index": i})["id"])
                 if i < len(frames) - 1:
                     nxt = frames[i + 1]
@@ -384,19 +462,21 @@ async def run_step(run_id: str, step_id: str, overrides: Optional[Dict[str, Any]
                     for g in range(per_gap):
                         alpha = (g + 1) / (per_gap + 1)
                         mid = Image.blend(f, nxt, alpha)
-                        artifacts.append(storage.save_asset(
+                        artifacts.append(_save_asset(
                             mid, kind="workflow", name=f"{run['id']}-f{i:02d}m{g}",
                             meta={"runId": run["id"], "step": step_id, "index": i, "inbetween": True},
                         )["id"])
-            meta = {"generated": len(artifacts), "perGap": per_gap,
-                    "note": "MVP 用相邻帧混合模拟中间帧；接入视频/插帧模型后替换为真实生成"}
+            meta = {"generated": len(artifacts) - len(frames), "perGap": per_gap,
+                    "note": ("未补帧：像素素材建议保持原生帧数（2-4 帧），补帧请用视频模型抽帧"
+                             if per_gap == 0 else
+                             "已用相邻帧混合模拟中间帧；接入视频/插帧模型后替换为真实生成")}
 
         elif stype == "compose":
             src = overrides.get("artifacts") or _prev_artifacts(run, index)
             frames = [_load(a) for a in src]
             cols = int(step_def.get("cols", 4))
             composed, index_json = sheet_pipe.compose_sheet(frames, cols)
-            item = storage.save_asset(composed, kind="sheet", name=f"{run['id']}-sheet",
+            item = _save_asset(composed, kind="sheet", name=f"{run['id']}-sheet",
                                       meta={"runId": run["id"], "step": step_id, "index": index_json})
             artifacts = [item["id"]]
             meta = {"cols": cols, "frames": len(frames), "frameSize": index_json["frame_size"]}
@@ -412,11 +492,31 @@ async def run_step(run_id: str, step_id: str, overrides: Optional[Dict[str, Any]
                 img = _load(aid)
                 out, m = seamless_pipe.extend_horizontal(img, times=times, blend=blend)
                 size = m["size"]
-                artifacts.append(storage.save_asset(
+                artifacts.append(_save_asset(
                     out, kind="seamless", name=f"{run['id']}-seamless-{i}",
                     meta={"runId": run["id"], "step": step_id, "index": i, **m},
                 )["id"])
             meta = {"layers": len(artifacts), "times": times, "blend": blend, "size": size}
+
+        elif stype == "sprites":
+            src = overrides.get("artifacts") or _prev_artifacts(run, index)
+            if not src:
+                raise RuntimeError("没有可规整的帧")
+            imgs = [_load(a) for a in src]
+            outs, smeta = sprite_pipe.normalize_frames(
+                imgs,
+                size=int(overrides.get("size") or step_def.get("size", 128)),
+                anchor=str(overrides.get("anchor") or step_def.get("anchor", "bottom")),
+                matte=bool(step_def.get("matte", True)),
+                tolerance=int(step_def.get("tolerance", 80)),
+                feather=int(step_def.get("feather", 4)),
+            )
+            for i, out in enumerate(outs):
+                artifacts.append(_save_asset(
+                    out, kind="workflow", name=f"{run['id']}-sprite{i:02d}",
+                    meta={"runId": run["id"], "step": step_id, "index": i},
+                )["id"])
+            meta = smeta
 
         elif stype == "normalize":
             src = overrides.get("artifacts") or _prev_artifacts(run, index)
@@ -427,7 +527,7 @@ async def run_step(run_id: str, step_id: str, overrides: Optional[Dict[str, Any]
             artifacts = []
             for i, img in enumerate(imgs):
                 out = img if img.size == (w, h) else resize_pipe.fit_pad(img, (w, h))
-                artifacts.append(storage.save_asset(out, kind="workflow", name=f"{run['id']}-layer{i}",
+                artifacts.append(_save_asset(out, kind="workflow", name=f"{run['id']}-layer{i}",
                                                     meta={"runId": run["id"], "step": step_id, "index": i})["id"])
             meta = {"size": [w, h], "layers": len(artifacts)}
 
@@ -436,7 +536,7 @@ async def run_step(run_id: str, step_id: str, overrides: Optional[Dict[str, Any]
             frames = [_load(a) for a in src]
             cols = int(step_def.get("cols", 2))
             composed, index_json = sheet_pipe.compose_sheet(frames, cols)
-            item = storage.save_asset(composed, kind="montage", name=f"{run['id']}-montage",
+            item = _save_asset(composed, kind="montage", name=f"{run['id']}-montage",
                                       meta={"runId": run["id"], "step": step_id})
             artifacts = [item["id"]]
             meta = {"cols": cols, "elements": len(frames)}

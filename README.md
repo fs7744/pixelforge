@@ -34,9 +34,19 @@ pip install diffusers transformers accelerate safetensors
 python backend/fetch_model.py segmind/tiny-sd        # ~1.1GB，CPU 可跑
 python backend/fetch_model.py stabilityai/sd-turbo   # ~2.5GB，1-4 步，6GB 显存友好
 
-# 3. 在「模型设置 → 内置推理服务」把模型填成本地路径，如 models/tiny-sd
+# 3. 在「模型设置 → 内置推理服务」把模型填成本地路径，如 models/sd-turbo
 #    然后点「测试连接」→「设为默认」
 ```
+
+**实测参考（本机 GTX 1660 Ti，但当前装的是 CPU 版 torch）**：
+
+| 模型 | 体积 | 512² 步数 | CPU 耗时 | 质量 |
+|---|---|---|---|---|
+| `segmind/tiny-sd` | 1.0GB | 4 步 | 35-49s | 粗糙，仅用于跑通链路 |
+| `stabilityai/sd-turbo` | 5.1GB | 2 步 | ~34s | 可用，像素风精灵效果良好 |
+
+装 GPU 版 torch 后同样参数通常 **1-3 秒**。sd-turbo 仓库有 12GB（含 fp16 变体与单文件），
+`fetch_model.py` 只取 fp32 组件（约 5GB）；GPU 用户可自行加 `*.fp16.safetensors` 提速。
 
 Turbo 系列自动使用 1-8 步 / CFG 0；显存 < 8GB 自动开启 attention slicing / vae tiling。
 设置页提供「卸载模型 / 释放显存」。
@@ -57,6 +67,7 @@ Turbo 系列自动使用 1-8 步 / CFG 0；显存 < 8GB 自动开启 attention s
 | **本地 diffusers 推理** | ✅ | 懒加载 · 单例缓存 · 6GB 显存自适应 · 国内走 hf-mirror |
 | **无缝延展** | ✅ | 镜像拼接，接缝差值实测 0.0，循环播放无痕 |
 | **瓦片接缝修补** | ✅ | 偏移-修复法，保留图案结构只修接缝 |
+| **像素化对齐** | ✅ | 分块单色 + 调色板量化（自动 8/16/32、GameBoy 4 色、NES 54 色）+ 可选抖动 |
 | 连通域抠图 | ✅ | 边缘连通 flood fill + 容差/羽化 |
 | 尺寸规整 | ✅ | 最近邻硬缩放 / 等比留白 / RPGMaker V1·V2 三档 |
 | Sprite Sheet 拆分 | ✅ | N×M 拆帧 + 引擎索引 JSON |

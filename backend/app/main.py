@@ -219,6 +219,23 @@ async def pipeline_sheet_compose(
     return {"asset": item, "index": meta}
 
 
+@app.post("/api/pipeline/pixelize")
+async def pipeline_pixelize(
+    file: UploadFile = File(...),
+    colors: int = Form(16),
+    pixel_size: int = Form(4),
+    dither: bool = Form(False),
+    palette: str = Form("auto"),
+):
+    from .pipelines import pixelize as pixelize_pipe
+
+    img = await _read_image(file)
+    out, meta = pixelize_pipe.pixelize(img, colors=colors, pixel_size=pixel_size,
+                                       dither=dither, palette=palette)
+    item = storage.save_asset(out, kind="pixelized", meta={"pipeline": "pixelize", **meta})
+    return {"asset": item, "meta": meta}
+
+
 @app.post("/api/pipeline/seamless")
 async def pipeline_seamless(
     file: UploadFile = File(...),

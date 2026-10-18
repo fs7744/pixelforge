@@ -112,8 +112,16 @@ export const api = {
     fd.append('rows', String(rows))
     return fetch('/api/pipeline/sheet/split', { method: 'POST', body: fd }).then(json)
   },
-  seamless: (file: File, times: number, blend: number, mirror: boolean) => {
+  pixelize: (file: File, colors: number, pixelSize: number, dither: boolean, palette: string) => {
     const fd = new FormData()
+    fd.append('file', file)
+    fd.append('colors', String(colors))
+    fd.append('pixel_size', String(pixelSize))
+    fd.append('dither', String(dither))
+    fd.append('palette', palette)
+    return fetch('/api/pipeline/pixelize', { method: 'POST', body: fd }).then(json)
+  },
+  seamless: (file: File, times: number, blend: number, mirror: boolean) => {    const fd = new FormData()
     fd.append('file', file)
     fd.append('times', String(times))
     fd.append('blend', String(blend))

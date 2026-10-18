@@ -16,6 +16,9 @@ class ProviderResult:
 class BaseProvider:
     id = "base"
     label = "Base"
+    # 是否为中文原生的文本编码器。SD 系列（diffusers / A1111）用 CLIP，
+    # 只认英文，中文提示词会显著掉质量，因此引擎会为它们切换到英文模板。
+    supports_zh = False
 
     def __init__(self, cfg: Dict[str, Any]):
         self.cfg = cfg or {}

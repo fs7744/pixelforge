@@ -14,6 +14,8 @@ from .base import BaseProvider, ProviderResult
 class OpenAICompatProvider(BaseProvider):
     id = "openai_compat"
     label = "云端 API（OpenAI 兼容）"
+    # 云端多模态模型（Gemini / 即梦等）中文理解良好，直接吃中文模板
+    supports_zh = True
 
     async def generate(
         self,
