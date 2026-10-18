@@ -193,22 +193,25 @@ Elo 1025，超过 GPT-Image-1 / Seedream 3.0）。
 代码已落地，新增/改动：
 
 1. `providers/diffusers_local.py`：新增模型族识别 `detect_family()`（读 `model_index.json`
-   的 `_class_name`，目录名兜底）；`_load_zimage()` 走 `ZImagePipeline`（bf16、
-   `low_cpu_mem_usage=False` 官方要求）；`_run_zimage()` 固定 `guidance_scale=0.0`、
+   的 `_class_name`，目录名兜底，支持 zimage/sd/qwen_edit 三族）；`_load_zimage()` 走
+   `ZImagePipeline`（bf16；`low_cpu_mem_usage` 保持默认 True——实测 False 会让推理慢
+   10 倍以上且加载完整性无差异）；`_run_zimage()` 固定 `guidance_scale=0.0`、
    `num_inference_steps=9`（调度器把 step 0 当热身，实际 8 次 DiT 前向）、分辨率按 16 对齐；
    `supports_zh` 属性为真时，`main.py` / `workflows.py` 自动跳过翻译链路。
 2. `config.py`：默认模型改为 `models/z-image-turbo`。
 3. 新增脚本：`backend/install_gpu_deps.sh`（一键装 torch cu124 + diffusers）、
-   `backend/fetch_zimage.sh`（ModelScope 下载，断点续传）、
-   `backend/smoke_zimage.py`（中文提示词冒烟测试）。
+   `backend/fetch_zimage.sh` / `backend/fetch_qwen_edit.sh`（ModelScope 下载，断点续传）、
+   `backend/smoke_zimage.py` / `backend/smoke_qwen_edit.py`（冒烟测试）、
+   `backend/bench_zimage.py`（稳态测速）。
 4. `fetch_model.py` 的 ALLOW 增加 Z-Image 布局（`transformer/` 分片 + `text_encoder/` 分片）。
 
 **接入注意点（代码已处理）**：
 
 - Z-Image 是 bf16 单流 DiT，**CPU 推理不可行**，无 GPU 时需切回 SD 族；
 - SD1.5 的像素 LoRA / IP-Adapter / LCM 均不适用（UNet 结构不同），caps.notes 会说明；
-- 参考图（ref）当前版本在 Z-Image 分支被忽略：一致性改走双底座——动画帧 2+ 切
-  Qwen-Image-Edit-2511 指令式编辑（见 §5.5），或短期用 SD 族 `refMode=ip/img2img`；
+- 参考图（ref）在 Z-Image 分支被忽略（txt2img 无编辑管线）：一致性走双底座——动画帧 2+
+  切 Qwen-Image-Edit-2511 指令式编辑（`qwen_edit` 分支已落地，见 §5.5），或短期用 SD 族
+  `refMode=ip/img2img`；
 - diffusers 需较新版本（含 `ZImagePipeline`），`install_gpu_deps.sh` 装的是最新 stable。
 
 ### 5.4 像素风专精：不换底座的轻量路线（对 Z-Image 同样适用）
@@ -269,12 +272,18 @@ Edit-2511 的白捡能力：内置多视角生成 LoRA（角色三视图直接�
 - Z-Image-Edit 官方仍是 "To be released"（ModelScope/HF 均无仓库），**不作为依赖**；
 - 2511 版核心升级正是本项目要的：角色一致性增强 + 缓解图像漂移 + 社区 LoRA 内置。
 
-#### 5.5.4 接入设计（接口已留，待模型下载后实施）
+#### 5.5.4 接入落地（2026-10-18 已完成代码，模型下载中）
 
-- `fetch_zimage.sh` 同款脚本加 Edit-2511 仓库（bf16 走 ModelScope，或 FP8 走代理）；
-- provider 加 `qwen_edit` family 分支（`detect_family` 已支持按目录名/model_index
-  识别），复用现有 `_run` 的 ref 参数入口——动画工作流 `useRef` 步骤零改动，
-  只需把模型切到 Edit-2511；
+- `backend/fetch_qwen_edit.sh`：ModelScope 下载 Edit-2511（bf16 53.8GB，断点续传）；
+- provider 已加 `qwen_edit` family 分支：`detect_family` 按 `model_index.json`
+  （`QwenImageEditPlusPipeline`）或目录名（`qwen-image-edit`）识别；
+  `_load_qwen_edit()` 走 `QwenImageEditPlusPipeline`（bf16 + cpu offload，
+  42GB 全量超 24GB，按层换入换出慢约 30% 但可跑；有 FP8 量化版可去 offload）；
+  `_run_qwen_edit()` 必传 ref、40 步、`true_cfg_scale=4.0`、`guidance_scale=1.0`；
+- **动画工作流零改动**：`useRef` 步骤本来就在传 ref，把模型切到 Edit-2511 即接力；
+- `supports_zh` 对 qwen_edit 同为真——中文指令直喂不过翻译；
+- 冒烟脚本 `backend/smoke_qwen_edit.py`：以 Z-Image 首图为参考图，验证
+  「同角色换姿势」并拼对比图；
 - 备选同家族单栈方案：Qwen-Image base（txt2img）+ Edit-2511，text_encoder 可共享
   去重，但 base 20B FP8 更慢更紧，除非出现跨家族风格漂移问题再考虑。
 
@@ -283,7 +292,8 @@ Edit-2511 的白捡能力：内置多视角生成 LoRA（角色三视图直接�
 1. **默认底座已切 Z-Image-Turbo**：中文直喂绕过翻译链路，8 步 2.5s/张，4090 全载；
 2. SD1.5 链路保留为低配/一致性兜底（IP-Adapter 仍在 SD 族有效）；
 3. **一致性走双底座**：帧 1 生成用 Turbo，帧 2+ 编辑用 Qwen-Image-Edit-2511
-   （已核实可下载，见 §5.5.3）——Turbo 不退役，两者分工不互斥；
+   （provider `qwen_edit` 分支已落地，模型下载中，见 §5.5.4）——Turbo 不退役，
+   两者分工不互斥；
 4. 图内中文字样是 Qwen-Image 2.0（FP8）的活，作为第三底座观察；
 5. 像素风格靠「大图出图 + 最近邻降采样 + 调色板量化」，不必依赖换底座。
 

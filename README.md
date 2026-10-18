@@ -44,9 +44,9 @@ bash backend/fetch_zimage.sh
 Z-Image 模式下中文提示词**自动跳过** zh2en 翻译链路（provider 的 `supports_zh` 为真）。
 
 > 注意：Z-Image 是 bf16 单流 DiT，**没有 CPU 推理可行路径**；SD1.5 的像素 LoRA /
-> IP-Adapter / LCM 对其不适用（UNet 结构不同）。角色一致性暂用参考图 img2img 切回
-> SD 族，或后续接 Z-Image-Editor。出图后接项目已有的 `pixelize`（最近邻降采样 +
-> 调色板量化）即得像素素材——**1024² 出图再降采样，比 512² 直出细腻一个量级**。
+> IP-Adapter / LCM 对其不适用（UNet 结构不同）。出图后接项目已有的 `pixelize`
+> （最近邻降采样 + 调色板量化）即得像素素材——**1024² 出图再降采样，比 512² 直出
+> 细腻一个量级**。角色一致性走双底座接力，见下方「方案三」。
 
 ### 方案二：SD1.5 系（低配兜底，6GB 显存可跑）
 
@@ -110,6 +110,33 @@ curl -sL -x http://127.0.0.1:7890 -r 0-0 -D - -o /dev/null URL | grep -i content
 
 1. `_CAPS` 必须在 `_load` 之后读，否则判定永远为假，导致挂了 IP 却不传参考图，UNet 报 `argument of type 'NoneType' is not iterable`
 2. IP-Adapter 要先于 LoRA 的 peft 包装挂载，否则会半途失败并留下"脏"UNet（现已做回滚）
+
+### 方案三：Qwen-Image-Edit-2511（角色一致性编辑底座，叠加在方案一上）
+
+Z-Image 是 txt2img，改不了已生成角色的姿势（无 img2img 管线，且 IP-Adapter 只有
+SD1.5 版、挂不上 S3-DiT）。动画帧 2+ 的「同角色换姿势」由此模型接力：
+
+```bash
+# 1. 下载模型（走 ModelScope，bf16 约 54GB，断点续传）
+bash backend/fetch_qwen_edit.sh
+
+# 2. 冒烟测试（以 Z-Image 首图为参考图，验证「锁外观改姿势」）
+"%USERPROFILE%\.workbuddy\binaries\python\envs\pixelforge\Scripts\python.exe" backend/smoke_qwen_edit.py
+```
+
+阿里 2025-11 开源，20B MMDiT + Qwen2.5-VL 中文编码器，Apache 2.0。**中文编辑指令
+直喂**，如「保持角色外观、服装、配色完全不变，将姿势改为：蹲下戒备姿态，纯色背景」。
+2511 版专项优化角色一致性与抗图像漂移，还内置多视角/光照 LoRA。
+
+| | Z-Image-Turbo | Qwen-Image-Edit-2511 |
+|---|---|---|
+| 分工 | 帧 1 生成（一句话 → 角色） | 帧 2+ 编辑（参考图 + 指令 → 新姿势） |
+| 规模/步数 | 6B · 9 步 · 约 2.5s/张 | 20B · 40 步 · 约 25s/张 |
+| 显存 | bf16 全载约 21GB | bf16 42GB 超 24GB，cpu offload 可跑 |
+| 切换 | 设置页改模型路径即可，Provider 自动卸载旧管线 | 同左 |
+
+两者各约 20GB 不能同时驻留，但设置页切模型时单例缓存自动换出，对用户透明。
+详见 DESIGN.md §5.5（双底座架构）。
 
 **实测参考（本机 GTX 1660 Ti，但当前装的是 CPU 版 torch）**：
 

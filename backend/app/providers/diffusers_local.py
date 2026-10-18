@@ -6,7 +6,7 @@
 - 显存自适应：<8GB 自动开启 attention slicing + vae slicing，必要时 cpu offload。
 - 异步：阻塞推理放到线程池，不卡事件循环。
 
-模型族（2026-10 新增 Z-Image）：
+模型族（2026-10 新增 Z-Image / Qwen-Image-Edit）：
 - sd：SD1.5/SDXL/turbo 系（CLIP 编码器，中文须走 zh2en 翻译链路；
       可挂 LCM/像素 LoRA + IP-Adapter）
 - zimage：阿里 Z-Image-Turbo（S3-DiT 单流 + Qwen3-4B 中文编码器）：
@@ -14,6 +14,11 @@
       * bf16 · 8 步蒸馏 · guidance_scale 固定 0.0 · 1024² 原生分辨率
       * SD1.5 的 LoRA/IP-Adapter/LCM 均不适用（UNet 结构不同），
         一致性请用参考图 img2img 切回 SD 族，或后续接 Z-Image-Editor
+- qwen_edit：阿里 Qwen-Image-Edit-2511（20B MMDiT + Qwen2.5-VL 编码器）：
+      * 指令式图像编辑（必须传参考图），中文指令直喂
+      * 角色一致性第二底座：帧 1 用 Z-Image 生成，帧 2+ 用它改姿势
+      * 40 步 · true_cfg_scale=4.0 · guidance_scale=1.0 · FP8/bf16
+      * 2511 版专项优化角色一致性与抗漂移，内置多视角/光照 LoRA
 """
 from __future__ import annotations
 
@@ -40,7 +45,7 @@ def _read_json(path: str) -> Dict[str, Any]:
 
 
 def detect_family(model_id: str) -> str:
-    """模型族识别：zimage（S3-DiT + Qwen3 编码器）或 sd（CLIP 编码器）。
+    """模型族识别：zimage / qwen_edit / sd。
 
     先读 model_index.json 的 _class_name（最可靠），再看目录名兜底。
     """
@@ -52,12 +57,16 @@ def detect_family(model_id: str) -> str:
         cls = str(idx.get("_class_name") or "")
         if "ZImage" in cls:
             family = "zimage"
+        elif "QwenImageEdit" in cls:
+            family = "qwen_edit"
         elif cls:
             family = "sd"
     if family == "sd":
         name = os.path.basename(model_id.rstrip("/\\")).lower()
         if "z-image" in name or "zimage" in name:
             family = "zimage"
+        elif "qwen-image-edit" in name or "qwen_image_edit" in name:
+            family = "qwen_edit"
     _FAMILY[model_id] = family
     return family
 
@@ -85,9 +94,9 @@ class DiffusersProvider(BaseProvider):
 
     @property
     def supports_zh(self) -> bool:
-        """Z-Image 的 Qwen3-4B 编码器原生吃中文；SD 系（CLIP）仍走翻译链路。"""
+        """Z-Image / Qwen-Image-Edit 的中文编码器原生吃中文；SD 系（CLIP）仍走翻译链路。"""
         try:
-            return detect_family(self._resolve_model()) == "zimage"
+            return detect_family(self._resolve_model()) in ("zimage", "qwen_edit")
         except Exception:
             return False
 
@@ -142,8 +151,11 @@ class DiffusersProvider(BaseProvider):
     def _load(self, model_id: str):
         if model_id in _CACHE:
             return _CACHE[model_id]
-        if detect_family(model_id) == "zimage":
+        family = detect_family(model_id)
+        if family == "zimage":
             return self._load_zimage(model_id)
+        if family == "qwen_edit":
+            return self._load_qwen_edit(model_id)
         return self._load_sd(model_id)
 
     def _load_zimage(self, model_id: str):
@@ -175,6 +187,42 @@ class DiffusersProvider(BaseProvider):
         caps: Dict[str, Any] = {
             "family": "zimage", "lora": None, "ipAdapter": None, "lcm": None,
             "notes": ["Z-Image：中文提示词直喂无需翻译；SD1.5 LoRA/IP-Adapter 不适用"],
+        }
+        _CAPS[model_id] = caps
+        _CACHE[model_id] = pipe
+        return pipe
+
+    def _load_qwen_edit(self, model_id: str):
+        """Qwen-Image-Edit-2511：bf16 20B MMDiT + Qwen2.5-VL 编码器，指令式编辑。
+
+        与 Z-Image 同为阿里系，但分工不同：它只做「参考图 + 中文指令 → 编辑图」，
+        是角色一致性（帧 2+ 换姿势）的主力底座。bf16 全量约 42GB，超出 24GB，
+        因此开 enable_model_cpu_offload：transformer/text_encoder 按层换入换出，
+        速度比全载慢约 30%，但 24GB 卡可跑；有 FP8 量化版（约 20GB）可去掉 offload。
+        """
+        try:
+            import torch
+            from diffusers import QwenImageEditPlusPipeline
+        except Exception as e:  # pragma: no cover
+            raise RuntimeError(
+                "Qwen-Image-Edit 需要较新版本的 diffusers（含 QwenImageEditPlusPipeline）。请执行：\n"
+                "  pip install -U diffusers\n"
+                f"原始错误：{e}"
+            )
+        # 同 _load_zimage：防止 cuDNN 选中慢速卷积路径劣化 VAE 解码
+        torch.backends.cudnn.benchmark = True
+        if not torch.cuda.is_available():
+            raise RuntimeError(
+                "Qwen-Image-Edit 是 20B DiT，需要 CUDA GPU（如 RTX 4090）；CPU 推理不可行。"
+                "无 GPU 请切回 SD1.5 系模型。"
+            )
+        pipe = QwenImageEditPlusPipeline.from_pretrained(
+            model_id, torch_dtype=torch.bfloat16)
+        pipe.enable_model_cpu_offload()
+        pipe.set_progress_bar_config(disable=True)
+        caps: Dict[str, Any] = {
+            "family": "qwen_edit", "lora": None, "ipAdapter": None, "lcm": None,
+            "notes": ["Qwen-Image-Edit：中文指令直喂无需翻译；需传参考图；cpu offload 模式"],
         }
         _CAPS[model_id] = caps
         _CACHE[model_id] = pipe
@@ -349,6 +397,52 @@ class DiffusersProvider(BaseProvider):
         return images, {"steps": use_steps, "cfg": 0.0, "family": "zimage",
                         "mode": "txt2img", "turbo": True}
 
+    def _run_qwen_edit(self, model_id: str, prompt: str, negative: str,
+                       width: int, height: int, steps: Optional[int],
+                       seed: Optional[int], generator: Any, n: int, ref: Any):
+        """Qwen-Image-Edit 指令式编辑：参考图 + 中文指令 → 编辑图。
+
+        与 txt2img 的本质区别：prompt 是「编辑指令」而非「画面描述」。
+        角色一致性指令模板：
+          「保持角色外观、服装、配色完全不变，将姿势改为：{action}，纯色背景」
+        - 必须传 ref（没有参考图时编辑器无输入，直接报错而不是静默出图）；
+        - 输出尺寸跟随参考图（对齐 16），不另外传 width/height；
+        - true_cfg_scale=4.0 是官方推荐（正负提示词对比强度）；
+          guidance_scale=1.0 关掉二次 CFG（蒸馏已内化）。
+        """
+        import torch
+
+        if ref is None:
+            raise ValueError(
+                "Qwen-Image-Edit 是指令式编辑器，必须传参考图（ref）。"
+                "请通过工作流的 useRef 步骤或生成接口传入 ref。"
+            )
+
+        pipe = self._load(model_id)
+        use_steps = 40 if not steps else max(20, min(int(steps), 50))
+        from PIL import Image as _Image
+
+        src = ref.convert("RGB")
+        w = int(width or src.width) // 16 * 16
+        h = int(height or src.height) // 16 * 16
+        src = src.resize((w, h), _Image.LANCZOS)
+        images = []
+        for i in range(max(1, min(n, 4))):
+            out = pipe(
+                image=src,
+                prompt=prompt,
+                negative_prompt=negative or " ",
+                num_inference_steps=use_steps,
+                true_cfg_scale=4.0,
+                guidance_scale=1.0,
+                generator=generator,
+            )
+            images.append(out.images[0].convert("RGBA"))
+            if generator is not None and seed is not None:
+                generator = torch.Generator(device=generator.device).manual_seed(int(seed) + i + 1)
+        return images, {"steps": use_steps, "cfg": 1.0, "trueCfg": 4.0,
+                        "family": "qwen_edit", "mode": "edit"}
+
     def _run(self, model_id: str, prompt: str, negative: str, width: int, height: int,
              steps: int, cfg: float, seed: Optional[int], n: int,
              ref: Optional[Any] = None, strength: float = 0.6):
@@ -362,6 +456,9 @@ class DiffusersProvider(BaseProvider):
         family = _CAPS.get(model_id, {}).get("family") or detect_family(model_id)
         if family == "zimage":
             return self._run_zimage(model_id, prompt, width, height, steps, seed, generator, n)
+        if family == "qwen_edit":
+            return self._run_qwen_edit(model_id, prompt, negative, width, height,
+                                       steps, seed, generator, n, ref)
         # SD 族：必须先加载——caps 是 _load 里写入的，先读会拿到空字典，
         # 导致 IP-Adapter 明明挂上了却不传参考图 → UNet 报 NoneType
         base_pipe = self._load(model_id)
@@ -442,10 +539,13 @@ class DiffusersProvider(BaseProvider):
         model_id = self._resolve_model()
         family = detect_family(model_id)
         if steps is None:
-            # 蒸馏模型只需极少步数：Z-Image 9 步（8 次前向）、turbo 4 步，
+            # 蒸馏模型只需极少步数：Z-Image 9 步（8 次前向）、turbo 4 步、
+            # Qwen-Image-Edit 40 步（非蒸馏，2511 有 Lightning 4 步变体可后续换）、
             # 普通 SD 28 步；28 步纯属浪费
             if family == "zimage":
                 steps = 9
+            elif family == "qwen_edit":
+                steps = 40
             elif "turbo" in model_id.lower():
                 steps = 4
             else:
@@ -479,10 +579,11 @@ class DiffusersProvider(BaseProvider):
         if caps.get("ipAdapter"):
             extra.append(f"IP-Adapter@{caps['ipAdapter']['scale']}")
         family = detect_family(model)
+        zh_tag = "（中文直喂）" if family in ("zimage", "qwen_edit") else ""
         return {
             "ok": True,
             "message": f"{st['device']} · {st['vramGB']}GB 显存 · 模型 {model} · 族 {family}"
-                       + ("（中文直喂）" if family == "zimage" else "")
+                       + zh_tag
                        + ("" if model not in _CACHE else " · 已加载")
                        + (f" · {' · '.join(extra)}" if extra else ""),
             "caps": caps,
