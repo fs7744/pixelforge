@@ -193,12 +193,19 @@ class DiffusersProvider(BaseProvider):
         return pipe
 
     def _load_qwen_edit(self, model_id: str):
-        """Qwen-Image-Edit-2511：bf16 20B MMDiT + Qwen2.5-VL 编码器，指令式编辑。
+        """Qwen-Image-Edit-2511：20B MMDiT + Qwen2.5-VL 编码器，指令式编辑。
 
         与 Z-Image 同为阿里系，但分工不同：它只做「参考图 + 中文指令 → 编辑图」，
-        是角色一致性（帧 2+ 换姿势）的主力底座。bf16 全量约 42GB，超出 24GB，
-        因此开 enable_model_cpu_offload：transformer/text_encoder 按层换入换出，
-        速度比全载慢约 30%，但 24GB 卡可跑；有 FP8 量化版（约 20GB）可去掉 offload。
+        是角色一致性（帧 2+ 换姿势）的主力底座。
+
+        显存策略（实测踩坑）：bf16 全量约 54GB（transformer 单独 39GB），
+        远超 24GB。原设想「bf16 + enable_model_cpu_offload」不可行——
+        offload 钩子在前向时要把整个 transformer 搬上 GPU，39GB 必爆 OOM
+        （torch.OutOfMemoryError: tried to allocate ... 23.99GiB total）。
+        解决：transformer 做 torchao fp8 权重量化（39GB → 约 20GB），
+        再开 cpu offload 让 text_encoder(14GB)/VAE 按阶段换入换出。
+        fp8 权重量化只省显存不改结构（matmul 前即时反量化），4090 Ada
+        架构上开销可忽略；可用环境变量 PIXELFORGE_QWEN_FP8=0 关闭退回 bf16。
         """
         try:
             import torch
@@ -218,15 +225,44 @@ class DiffusersProvider(BaseProvider):
             )
         pipe = QwenImageEditPlusPipeline.from_pretrained(
             model_id, torch_dtype=torch.bfloat16)
+        # fp8 权重量化必须在 offload 之前（量化在 CPU 上做，省一次 GPU 往返）
+        if os.environ.get("PIXELFORGE_QWEN_FP8", "1") != "0":
+            self._quantize_fp8(pipe.transformer, "qwen_edit.transformer")
         pipe.enable_model_cpu_offload()
         pipe.set_progress_bar_config(disable=True)
         caps: Dict[str, Any] = {
             "family": "qwen_edit", "lora": None, "ipAdapter": None, "lcm": None,
-            "notes": ["Qwen-Image-Edit：中文指令直喂无需翻译；需传参考图；cpu offload 模式"],
+            "notes": ["Qwen-Image-Edit：中文指令直喂无需翻译；需传参考图；transformer fp8 + cpu offload"],
         }
         _CAPS[model_id] = caps
         _CACHE[model_id] = pipe
         return pipe
+
+    @staticmethod
+    def _quantize_fp8(module: Any, tag: str) -> Any:
+        """torchao fp8 权重量化：bf16 → fp8（显存减半，权重误差 <4%）。
+
+        用于把 39GB 的 Qwen-Image-Edit transformer 压进 24GB 卡。
+        失败时静默退回 bf16（打印警告），保证功能可用。
+        """
+        import time
+
+        import torch
+
+        try:
+            from torchao.quantization import Float8WeightOnlyConfig, quantize_
+        except Exception as e:
+            print(f"[pixelforge] torchao 不可用（{e}），{tag} 保持 bf16", flush=True)
+            return module
+        try:
+            n_lin = sum(1 for m in module.modules() if isinstance(m, torch.nn.Linear))
+            t0 = time.time()
+            quantize_(module, Float8WeightOnlyConfig())
+            print(f"[pixelforge] {tag} fp8 权重量化完成（{n_lin} 个 Linear，"
+                  f"{time.time() - t0:.0f}s，显存约减半）", flush=True)
+        except Exception as e:
+            print(f"[pixelforge] {tag} fp8 量化失败（{e}），保持 bf16", flush=True)
+        return module
 
     def _load_sd(self, model_id: str):
         try:
