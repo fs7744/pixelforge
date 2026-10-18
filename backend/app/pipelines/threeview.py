@@ -15,16 +15,22 @@
 没有编辑底座时退回「同种子 txt2img × 3」：一致性弱一些，但仍满足
 三张独立不重叠（总比糊成一团强）。
 
-抠图边缘实测审计（u2net，512×768 三张真实出图）：
+抠图边缘实测审计（u2net，512×768 真实出图，两轮）：
 - 角色被咬：0.05% / 0% / 0.14%（可忽略）；细结构（武士刀）保留 99.9%；
-- 外圈绿边：单底色参考下 0~584px，且集中在「头顶色带」这类内部区域，
-  轮廓外并没有 halo——黑描边吸收掉了 mask 的 1~2px 误差，
-  connected_matte 自带 despill 还会把最外圈重绘成角色色；
-- 那一圈「46%~95% 近底色」是把脚下阴影/内侧深绿误算成背景色的度量伪影，
-  不是可见绿边。
-结论：不做 mask 膨胀/收缩/毛边剥离——实测无收益，反而可能啃掉细结构
-（胡须/触角）。真正的坑是三个，且都已处理：踩边肢体、mask 背景岛、
-深色配件被颜色键当背景。
+- 第一轮审计（底色接近 #1B4332）看不到外圈绿边，据此判定"不做膨胀/收缩"；
+- **第二轮真实出图推翻了一半结论**：模型这次给的底色是亮绿 #24A455，
+  描边外圈全是「黑+亮绿」的抗锯齿混色（正视图边缘环 2696px 里 1183px 偏绿，
+  占比 44%）。connected_matte 自带的 despill 按「与底色距离」判定，亮绿底
+  与边框取样色差 197，一格都洗不掉——所以肉眼能看到一圈绿线。
+- 背视图白色脚掌又被 u2net 判成背景：mask 在脚上只剩一圈黑描边，
+  两片脚掌成为 1760/1744px 的**封闭孔洞**，脚白保留 0.2%。
+修法（都不动 alpha 形状，所以不会啃掉胡须/触角）：
+1. `_fill_enclosed_holes`：补回被描边围死的封闭孔洞（≤2% 画布），RGB 原样；
+2. `_clean_edges`：外圈 2px 里「比离自身内侧颜色更接近底色」的像素，取内侧
+   颜色重绘——纯黑描边离内侧为 0 永远不会被洗掉，抗锯齿混色则必然命中；
+   细结构上残留的偏底色像素再从最近的干净邻居取色。
+仍**不做** mask 膨胀/收缩：那会改轮廓并啃掉细结构，而这两类问题的根因
+分别是 mask 孔洞和边缘颜色，与轮廓形状无关。
 """
 from __future__ import annotations
 
@@ -126,12 +132,174 @@ def _matte_padded(img: Image.Image, pad_frac: float, tolerance: int
     """
     w, h = img.size
     p = max(8, int(min(w, h) * pad_frac))
-    canvas = Image.new("RGB", (w + 2 * p, h + 2 * p), _border_bg(img))
+    bg = _border_bg(img)
+    canvas = Image.new("RGB", (w + 2 * p, h + 2 * p), bg)
     canvas.paste(img.convert("RGB"), (p, p))
     cut, meta = matte_pipe.connected_matte(
         canvas, tolerance=tolerance, feather=0, method="auto")
     cut = cut.crop((p, p, p + w, p + h))
-    return _drop_bg_islands(cut), meta
+    cut = _drop_bg_islands(cut)
+    cut, filled = _fill_enclosed_holes(cut)
+    cut, recolored = _clean_edges(cut, bg)
+    meta = dict(meta, holesRestored=filled, edgePixelsRecolored=recolored)
+    return cut, meta
+
+
+# 8 邻域偏移（先正交后对角：正上方/左方的内侧像素优先，重绘更稳）
+_NEIGHBOURS = ((0, 1), (0, -1), (1, 0), (-1, 0), (1, 1), (1, -1), (-1, 1), (-1, -1))
+
+
+def _shift(m, dy: int, dx: int):
+    """按 (dy,dx) 平移数组，空出来的边填 0（不用 np.roll，避免环绕串色）。"""
+    import numpy as np
+
+    out = np.zeros_like(m)
+    h, w = m.shape[:2]
+    out[max(0, dy):h + min(0, dy), max(0, dx):w + min(0, dx)] = \
+        m[max(0, -dy):h + min(0, -dy), max(0, -dx):w + min(0, -dx)]
+    return out
+
+
+def _erode(kept, times: int = 1):
+    """二值腐蚀 times 圈（纯 numpy，不依赖 cv2）。"""
+    import numpy as np
+
+    cur = kept
+    for _ in range(max(1, times)):
+        nxt = cur.copy()
+        for dy, dx in _NEIGHBOURS:
+            nxt &= _shift(cur, dy, dx).astype(bool)
+        if not nxt.any():
+            return cur
+        cur = nxt
+    return cur
+
+
+def _fill_enclosed_holes(cut: Image.Image, max_ratio: float = 0.02
+                         ) -> Tuple[Image.Image, int]:
+    """补回被角色完全围住的透明孔洞（只改 alpha，RGB 原样）。
+
+    实测背视图两片白色脚掌被 u2net 判成背景：mask 在脚上只剩黑描边，
+    脚掌内部成了 1760/1744px 的封闭孔洞，拼板上看就是"脚的白色被抠没了"。
+    孔洞边界完全在画面内部（不接边）即可判定为角色内部——补回不透明后
+    露出的就是原图的白脚掌，不需要任何颜色猜测。
+
+    上限 2% 画布：更大的封闭区域（如身侧空隙）保留透明，避免糊成一块。
+    """
+    import numpy as np
+
+    a = np.asarray(cut).copy()
+    kept = a[:, :, 3] > 8
+    holes = (~kept).astype(np.uint8)
+    try:
+        import cv2
+        n, lab = cv2.connectedComponents(holes, connectivity=4)
+    except Exception:
+        # 无 cv2：scipy 的 4 邻域连通域兜底（标签从 1 开始，与 cv2 对齐）
+        try:
+            from scipy import ndimage
+        except Exception:
+            return cut, 0  # 两个都没有就放弃补洞，别把整条拼板链路带崩
+        lab, count = ndimage.label(holes, structure=np.array([[0, 1, 0], [1, 1, 1], [0, 1, 0]]))
+        n = int(count) + 1
+    h, w = kept.shape
+    limit = int(max_ratio * h * w)
+    filled = 0
+    for i in range(1, n):
+        comp = lab == i
+        ys, xs = np.nonzero(comp)
+        if not len(ys):
+            continue
+        if ys.min() == 0 or xs.min() == 0 or ys.max() == h - 1 or xs.max() == w - 1:
+            continue  # 触边 = 外部背景
+        area = int(comp.sum())
+        if area > limit:
+            continue
+        a[comp, 3] = 255
+        filled += area
+    if not filled:
+        return cut, 0
+    return Image.fromarray(a, "RGBA"), filled
+
+
+def _clean_edges(cut: Image.Image, bg: Tuple[int, int, int], depth: int = 2
+                 ) -> Tuple[Image.Image, int]:
+    """把外圈「底色混出来的」像素换成内侧角色色（只改 RGB，alpha 一个都不动）。
+
+    硬 alpha 抠图会把模型抗锯齿边整颗保留：底色若是亮绿，描边外圈就是一圈
+    「黑+亮绿」的混色，肉眼看到的就是绿边。matte 自带的 despill 用固定容差
+    比对底色，亮绿底与边框取样色差 197，洗不掉。
+
+    判定不靠色相（角色本身可能是绿的），而是比较「离底色近还是离内侧颜色近」：
+    边界像素本来是内侧色的抗锯齿混色，离底色更近就说明它被背景污染了，
+    直接取内侧（再腐蚀一圈）的颜色重绘；纯黑描边离内部为 0，永远不会被洗掉。
+
+    不动 alpha 是刻意的：不吃掉轮廓、不会把胡须/触角啃细。细结构（胡须、
+    刀尖）腐蚀后没有内侧邻居，首轮跳过，最后再用"最近的非污染邻居"扫一遍。
+    """
+    import numpy as np
+
+    a = np.asarray(cut).copy()
+    kept = a[:, :, 3] > 8
+    if not kept.any():
+        return cut, 0
+    rgb = a[:, :, :3].astype(np.int32)
+    changed = 0
+
+    bg_arr = np.array(bg, dtype=np.int32)
+    dist_bg = np.abs(rgb - bg_arr).sum(axis=2)
+    # 底色本身也得算「离底色近」：边界像素是内侧色与底色按比例混合，
+    # 只要比内侧色更接近底色，就说明这一颗被背景污染了。
+    band = kept
+    for _ in range(max(1, depth)):
+        inner = _erode(band, 1)
+        if not inner.any():
+            break
+        ring = band & ~inner
+        if not ring.any():
+            break
+        out = rgb.copy()
+        used = np.zeros_like(ring)
+        for dy, dx in _NEIGHBOURS:
+            src_ok = _shift(inner, dy, dx).astype(bool)
+            src_rgb = _shift(rgb, dy, dx)
+            dist_src = np.abs(rgb - src_rgb).sum(axis=2)
+            # 只洗「离底色比离自身内侧颜色更近」的像素（放宽到 2 倍，含深色混边）：
+            # 纯黑描边 dist_src=0，永远不会被洗掉；背景混色则必然满足
+            contaminated = ring & (dist_bg < dist_src * 2) & (dist_bg < 150)
+            take = contaminated & src_ok & ~used
+            if take.any():
+                out[take] = src_rgb[take]
+                used |= take
+        rgb = out
+        dist_bg = np.abs(rgb - bg_arr).sum(axis=2)
+        changed += int(used.sum())
+        band = inner  # 下一轮处理更内一圈
+
+    # 细结构兜底：仍与透明区相邻、且明显偏底色相的像素，从最近的干净同伴取色
+    near_trans = np.zeros_like(kept)
+    for dy, dx in _NEIGHBOURS:
+        near_trans |= _shift(~kept, dy, dx).astype(bool)
+    # "偏底色"= 绿系底色时 G 明显高于 R/B；换底色也不影响判定（逐通道比较）
+    tinted = (rgb[:, :, 1] - rgb[:, :, 0] > 18) & (rgb[:, :, 1] - rgb[:, :, 2] > 18)
+    greenish = kept & near_trans & tinted
+    done = np.zeros_like(greenish)
+    for _ in range(2):  # 3x3 → 再一圈，给 2px 宽的细结构留机会
+        for dy, dx in _NEIGHBOURS:
+            src_ok = _shift(kept & ~greenish, dy, dx).astype(bool)
+            src_rgb = _shift(rgb, dy, dx)
+            take = greenish & ~done & src_ok
+            if take.any():
+                rgb[take] = src_rgb[take]
+                done |= take
+        if done.all() or not done.any():
+            break
+    changed += int(done.sum())
+
+    if not changed:
+        return cut, 0
+    a[:, :, :3] = np.clip(rgb, 0, 255).astype(np.uint8)
+    return Image.fromarray(a, "RGBA"), changed
 
 
 def _drop_bg_islands(cut: Image.Image, tol: float = 70.0) -> Image.Image:
