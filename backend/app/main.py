@@ -121,7 +121,9 @@ class GeneratePayload(BaseModel):
 @app.post("/api/translate")
 async def translate_prompt_endpoint(payload: Dict[str, Any]):
     text = str(payload.get("text") or "")
-    english, meta = zh2en.translate_prompt(text)
+    # useMt=False 时只走领域词典（毫秒级、零依赖），遇到漏译会返回 unmatched
+    use_mt = bool(payload.get("useMt", True))
+    english, meta = zh2en.translate_prompt(text, use_mt=use_mt)
     return {"english": english, **meta}
 
 

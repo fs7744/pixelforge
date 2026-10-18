@@ -16,6 +16,13 @@ from __future__ import annotations
 import re
 from typing import Dict, List, Tuple
 
+from . import mt  # 神经机翻兜底（整句翻译，覆盖词典漏译的长描述 / 生僻词）
+
+# 词典覆盖率低于此值才整句交给机翻兜底。游戏素材提示词多为「关键词 + 修饰」结构，
+# 词典在覆盖率中高时比小模型机翻更准（机翻常把 像素风/ Q版 译成 Pixir Fist / Q-editor）。
+# 只有当词典丢了过半语义（长描述、生僻角色）时才值得切机翻。
+MT_COVERAGE_FALLBACK = 0.70
+
 # 词表按「长度优先」匹配，长词必须放前面由算法自行保证（按长度排序）
 TERMS: Dict[str, str] = {
     # ---- 颜色 ----
@@ -215,14 +222,58 @@ def translate(text: str) -> Tuple[str, dict]:
     return english, meta
 
 
-def translate_prompt(text: str, add_style: bool = True) -> Tuple[str, dict]:
-    """翻译并补上游戏素材通用风格后缀（缺风格词时才补）。"""
-    english, meta = translate(text)
-    if add_style and english:
-        low = english.lower()
-        if "outline" not in low and "pixel art" not in low:
-            english = f"{english}, {DEFAULT_STYLE}"
-            meta["styleAppended"] = True
-    meta["source"] = text
-    meta["english"] = english
-    return english, meta
+def _ensure_style(english: str) -> bool:
+    """缺通用风格词时补上游戏素材风格后缀，返回是否补了。"""
+    low = english.lower()
+    if "outline" not in low and "pixel art" not in low:
+        return True
+    return False
+
+
+def translate_prompt(text: str, add_style: bool = True,
+                     use_mt: bool = True) -> Tuple[str, dict]:
+    """中文提示词 → 英文。优先词典（快、领域准），漏译/长描述时整句机翻兜底。
+
+    返回 (英文, 统计)；meta.engine 标记最终走的是哪条链路。
+    """
+    src = (text or "").strip()
+    # 纯英文直接原样返回，不走任何翻译
+    if not has_chinese(src):
+        return src, {"auto": True, "engine": "passthrough", "source": src,
+                     "english": src, "coverage": 1.0, "unmatched": []}
+
+    dict_en, dict_meta = translate(src)
+    coverage = dict_meta.get("coverage", 0.0)
+    unmatched = dict_meta.get("unmatched", [])
+
+    # 决策：词典覆盖率显著偏低（丢过半语义）→ 整句机翻兜底；
+    # 高覆盖短句即便漏一两个字也走词典（机翻反而易把像素风/Q版译成错词）
+    if use_mt and mt.available() and coverage < MT_COVERAGE_FALLBACK:
+        r = mt.translate(src)
+        if r.get("ok"):
+            mt_en = r["english"]
+            style_appended = False
+            if add_style and _ensure_style(mt_en):
+                mt_en = f"{mt_en}, {DEFAULT_STYLE}"
+                style_appended = True
+            meta = {
+                "auto": True,
+                "engine": "mt-zh2en",
+                "source": src,
+                "english": mt_en,
+                "dictCoverage": coverage,
+                "dictUnmatched": unmatched,
+                "mtRaw": r.get("raw", ""),
+                "styleAppended": style_appended,
+            }
+            return mt_en, meta
+
+    # 词典路径（保持原行为：小写逗号分隔 + 自动补风格后缀）
+    english = dict_en
+    if add_style and english and _ensure_style(english):
+        english = f"{english}, {DEFAULT_STYLE}"
+        dict_meta["styleAppended"] = True
+    dict_meta["source"] = src
+    dict_meta["english"] = english
+    dict_meta["engine"] = "dict-zh2en"
+    return english, dict_meta
