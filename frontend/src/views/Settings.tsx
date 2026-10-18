@@ -142,6 +142,9 @@ export default function SettingsView() {
                       <div className="hint">
                         Z-Image 族（如 models/z-image-turbo）：中文提示词直喂，自动跳过翻译；
                         LoRA / IP-Adapter 仅对 SD1.5 族（如 dreamshaper-8）生效。
+                        <br />
+                        Qwen-Image-Edit 族（如 models/qwen-image-edit-2511）：指令式编辑器，
+                        动画工作流会自动接力——帧 1 借 Z-Image 生成，帧 2+ 由它编辑（需传参考图）。
                       </div>
                     </div>
                     <div>

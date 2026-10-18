@@ -7,8 +7,10 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import time
 import uuid
+from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
@@ -21,6 +23,7 @@ from .pipelines import resize as resize_pipe
 from .pipelines import sheet as sheet_pipe
 from .pipelines import sprite as sprite_pipe
 from .providers import get_provider
+from .providers.diffusers_local import DiffusersProvider, detect_family
 
 RUNS_DIR = DATA_DIR / "runs"
 
@@ -66,6 +69,15 @@ WORKFLOWS: List[Dict[str, Any]] = [
                 # （三视图排版不可控，直接裁切容易裁到两个视图，改用自锚定）
                 "refChain": True,
                 "refStrength": 0.58,
+                # 双底座接力（当前模型是 qwen_edit 编辑器时生效）：
+                # 帧 1 交给 txt2img 底座生成，帧 2+ 用编辑指令改姿势。
+                # 编辑器没有自由创作能力，必须借生成底座出第一帧。
+                "txt2imgModel": "models/z-image-turbo",
+                "editPrompt": "同一个角色，保持角色外观、服装、配色完全不变，"
+                              "将姿势改为：{action}，角色原地全身，纯色背景",
+                "editPromptEn": "Same character, keep appearance, outfit and colors "
+                                "exactly unchanged, change the pose to: {actionEn}, "
+                                "full body standing on the spot, plain solid background",
             },
             {
                 "id": "dedup",
@@ -489,14 +501,44 @@ async def run_step(run_id: str, step_id: str, overrides: Optional[Dict[str, Any]
                 if step_def.get("refChain"):
                     # 自锚定：先文生图定角色，再拿它当 img2img 参考生成其余帧。
                     # 这样每帧都锚在同一张脸上，不会越跑越偏。
+                    #
+                    # 双底座接力：当前模型是编辑器（qwen_edit）时，它没有自由
+                    # 创作能力——帧 1 借 txt2img 底座生成，帧 2+ 回到编辑器用
+                    # 编辑指令改姿势。整条链对用户透明，不用手动切模型。
+                    gen_provider = provider
+                    edit_relay = (
+                        getattr(provider, "id", "") == "diffusers"
+                        and detect_family(provider._resolve_model()) == "qwen_edit"
+                    )
+                    if edit_relay:
+                        txt_model = step_def.get("txt2imgModel") or str(
+                            Path(__file__).resolve().parents[2] / "models" / "z-image-turbo")
+                        if not os.path.isdir(txt_model):
+                            # 没装生成底座：退回单模型链（提示词锚定），
+                            # 并把原因写进 meta，别让用户以为是 Bug
+                            edit_relay = False
+                            relay_note = f"txt2img 底座不存在：{txt_model}"
+                        else:
+                            relay_note = None
+                            gen_provider = DiffusersProvider({**provider.cfg, "model": txt_model})
+                    else:
+                        relay_note = None
+                    edit_tpl = step_def.get("editPrompt") or step_def.get("prompt")
                     anchor: Optional[Image.Image] = None
                     for i in range(n):
                         kw = dict(gen_kw)
                         if anchor is not None:
                             kw["ref"] = anchor
-                            kw["strength"] = float(step_def.get("refStrength", 0.5))
-                        res = await provider.generate(prompt, pw, ph, n=1,
-                                                      seed=None if seed is None else int(seed) + i, **kw)
+                            if edit_relay:
+                                kw.pop("strength", None)  # 编辑器不收 strength
+                            else:
+                                kw["strength"] = float(step_def.get("refStrength", 0.5))
+                        gen = gen_provider if anchor is None else provider
+                        p = prompt if anchor is None else (
+                            _fill(edit_tpl, run, step_def, i, english=False)
+                            if edit_relay else prompt)
+                        res = await gen.generate(p, pw, ph, n=1,
+                                                 seed=None if seed is None else int(seed) + i, **kw)
                         for img in res.images:
                             artifacts.append(_save_asset(
                                 img, kind="workflow", name=f"{run['id']}-{step_id}-{i:02d}",
@@ -517,9 +559,16 @@ async def run_step(run_id: str, step_id: str, overrides: Optional[Dict[str, Any]
                             except Exception:
                                 anchor = base.convert("RGB")
                     meta = {"prompt": prompt, "frames": len(artifacts),
-                            "provider": "diffusers", "mode": "txt2img→img2img-chain",
+                            "provider": "diffusers",
+                            "mode": "txt2img→edit-chain" if edit_relay
+                                    else "txt2img→img2img-chain",
                             "refStrength": float(step_def.get("refStrength", 0.5)),
                             "promptLang": "en" if english else "zh"}
+                    if edit_relay:
+                        meta["editModel"] = provider._resolve_model()
+                        meta["txt2imgModel"] = txt_model
+                    if relay_note:
+                        meta["relayNote"] = relay_note
                 else:
                     # 一次请求 n 张（无参考图时由模型自行发散姿态）
                     result = await provider.generate(prompt, pw, ph, n=n, seed=seed, **gen_kw)

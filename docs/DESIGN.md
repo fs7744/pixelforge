@@ -281,6 +281,12 @@ Edit-2511 的白捡能力：内置多视角生成 LoRA（角色三视图直接�
   42GB 全量超 24GB，按层换入换出慢约 30% 但可跑；有 FP8 量化版可去 offload）；
   `_run_qwen_edit()` 必传 ref、40 步、`true_cfg_scale=4.0`、`guidance_scale=1.0`；
 - **动画工作流零改动**：`useRef` 步骤本来就在传 ref，把模型切到 Edit-2511 即接力；
+- **自动接力已内置**（2026-10-18）：`workflows.py` 的 `action_frames` 步骤检测到当前
+  模型族为 `qwen_edit` 时，帧 1 自动借 txt2img 底座（`txt2imgModel`，默认
+  `models/z-image-turbo`）生成，帧 2+ 回到编辑器走 `editPrompt` 指令模板
+  （「保持角色外观、服装、配色完全不变，将姿势改为：{action}…」——**刻意不带角色描述**，
+  外观由参考图承载，带文字描述反而会让模型重释外观）；meta 记录
+  `mode=txt2img→edit-chain`；底座缺失时退回单模型链并在 meta.relayNote 说明；
 - `supports_zh` 对 qwen_edit 同为真——中文指令直喂不过翻译；
 - 冒烟脚本 `backend/smoke_qwen_edit.py`：以 Z-Image 首图为参考图，验证
   「同角色换姿势」并拼对比图；
