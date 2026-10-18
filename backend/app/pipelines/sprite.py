@@ -31,7 +31,9 @@ def normalize_frame(
     pad: int = 2,
     matte: bool = True,
     tolerance: int = 80,
-    feather: int = 4,
+    feather: int = 0,
+    hard: bool = True,
+    matte_method: str = "auto",
     inset: float = 0.0,
 ) -> Tuple[Image.Image, dict]:
     """把任意帧规整成 size×size 的透明底精灵帧。
@@ -47,7 +49,9 @@ def normalize_frame(
             work = work.crop((dx, dy, work.width - dx, work.height - dy))
     matte_meta = {}
     if matte:
-        work, matte_meta = matte_pipe.connected_matte(work, tolerance=tolerance, feather=feather)
+        work, matte_meta = matte_pipe.connected_matte(
+            work, tolerance=tolerance, feather=feather, hard=hard, method=matte_method
+        )
 
     trimmed, bbox = trim_alpha(work)
     if trimmed.width < 1 or trimmed.height < 1:

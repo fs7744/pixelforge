@@ -5,3 +5,10 @@ numpy>=1.26
 python-multipart>=0.0.9
 aiofiles>=23.2
 httpx>=0.27
+
+# 抠图管线依赖（matte.py 三级降级：u2net → GrabCut → 颜色键）
+# - opencv-python-headless：GrabCut 图割（无 GUI 依赖，适配服务器）
+# - rembg + onnxruntime：u2net 深度抠图（可选，权重需自行放置到 ~/.u2net/u2net.onnx）
+opencv-python-headless>=4.9
+rembg>=2.0
+onnxruntime>=1.16

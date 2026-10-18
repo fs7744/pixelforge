@@ -89,7 +89,9 @@ WORKFLOWS: List[Dict[str, Any]] = [
                 "anchor": "bottom",
                 "matte": True,
                 "tolerance": 72,
-                "feather": 3,
+                # 像素素材必须硬边：feather>0 会在浅色底显出白晕，还会啃掉细肢
+                "feather": 0,
+                "hard": True,
                 # AI 出图常自带画框，向内切一圈再抠（切太多会切掉脚）
                 "inset": 0.04,
             },
@@ -506,7 +508,9 @@ async def run_step(run_id: str, step_id: str, overrides: Optional[Dict[str, Any]
                             # 画框 / 草地 / 地毯当成画面内容一路继承下去
                             base = _load(artifacts[0])
                             try:
-                                cut, _ = matte_pipe.connected_matte(base, tolerance=70, feather=2)
+                                cut, _ = matte_pipe.connected_matte(
+                                    base, tolerance=70, feather=0, method="key"
+                                )
                                 flat = Image.new("RGB", cut.size, (27, 67, 50))
                                 flat.paste(cut, (0, 0), cut)
                                 anchor = flat
@@ -610,7 +614,9 @@ async def run_step(run_id: str, step_id: str, overrides: Optional[Dict[str, Any]
                 anchor=str(overrides.get("anchor") or step_def.get("anchor", "bottom")),
                 matte=bool(step_def.get("matte", True)),
                 tolerance=int(step_def.get("tolerance", 80)),
-                feather=int(step_def.get("feather", 4)),
+                feather=int(step_def.get("feather", 0)),
+                hard=bool(step_def.get("hard", True)),
+                matte_method=str(step_def.get("matteMethod", "auto")),
                 inset=float(step_def.get("inset", 0.0)),
             )
             for i, out in enumerate(outs):
