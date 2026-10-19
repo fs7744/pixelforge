@@ -240,8 +240,8 @@ export default function Workbench({ onSendToPost }: Props) {
     if (t.params?.width) setWidth(t.params.width)
     if (t.params?.height) setHeight(t.params.height)
     // 画风不写在提示词里（写死就会和选择器打架），模板自带默认画风，这里点亮它；
-    // 文本任务不出图，画风不会生效，留空免得界面状态和实际不一致
-    setStyleId(t.kind === 'text' ? '' : t.defaultStyle || '')
+    // 文本任务不出图、编辑提取类模板画风跟随原图，都留空
+    setStyleId(t.kind === 'text' || t.styleLocked ? '' : t.defaultStyle || '')
   }
 
   // 参考图最多 4 张：再多也分不清主次，编码时间还线性上涨
@@ -344,9 +344,11 @@ export default function Workbench({ onSendToPost }: Props) {
   // 文本任务本地做不了（底座只出图），整块操作面板换成「去别的 AI 做」指引
   const isTextTask = currentTpl?.kind === 'text'
   // 当前模板适用的画风：后端按分类给出推荐集（tags 太粗，按它过滤等于没过滤）。
-  // 文本任务不出图，整块画风区不渲染。
+  // 文本任务不出图、编辑/提取类模板画风跟随原图——这两种都不显示画风区，
+  // 摆一个选了也不起作用的选择器，比不显示更糟。
   const recStyleIds = styleRecs[currentTpl?.category || '角色'] || []
-  const showStyleBlock = currentTpl?.kind !== 'text' && recStyleIds.length > 0
+  const showStyleBlock =
+    currentTpl?.kind !== 'text' && !currentTpl?.styleLocked && recStyleIds.length > 0
   const visibleStyles = showAllStyles
     ? styles
     : styles.filter((s) => recStyleIds.includes(s.id) || s.id === styleId)
@@ -354,6 +356,10 @@ export default function Workbench({ onSendToPost }: Props) {
   const styleOutOfRec = !!styleId && !recStyleIds.includes(styleId)
   // 当前画风实际会拼到提示词里的那句话；给「最终提示词」预览用
   const styleWords = styles.find((s) => s.id === styleId)?.words || ''
+  // 后端 apply_style 是幂等的（已含就不再拼），预览也要一致，否则手动粘过会显示两遍
+  const finalPrompt = styleWords && !prompt.startsWith(styleWords)
+    ? `${styleWords}。${prompt}`
+    : prompt
 
   return (
     <div className="body">
@@ -467,9 +473,7 @@ export default function Workbench({ onSendToPost }: Props) {
             {styleWords && (
               <details className="sent-preview">
                 <summary>最终提示词（画风已加在最前面）</summary>
-                <pre>
-                  {styleWords}。{prompt}
-                </pre>
+                <pre>{finalPrompt}</pre>
               </details>
             )}
             {currentTpl?.notes?.length ? (
@@ -480,7 +484,9 @@ export default function Workbench({ onSendToPost }: Props) {
               </ul>
             ) : null}
             <div className="hint" style={{ marginTop: 6 }}>
-              中文直喂本地底座（Z-Image / Qwen-Edit），全程不做英文翻译。
+              {currentTpl?.styleLocked
+                ? '这类任务是对参考图做编辑/提取，画风跟随原图，不参与画风切换。'
+                : '中文直喂本地底座（Z-Image / Qwen-Edit），全程不做英文翻译。'}
             </div>
           </div>
         )}
@@ -630,6 +636,7 @@ export default function Workbench({ onSendToPost }: Props) {
             不满意就单独重跑那一步，不用整套重来。
           </div>
         )}
+        {meta?.vramWarning && <div className="warn">{meta.vramWarning}</div>}
         {meta?.note && <div className="hint">{meta.note}</div>}
         {meta?.mode === 'ref2img' && (
           <div className="hint">

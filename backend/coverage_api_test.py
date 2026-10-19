@@ -406,6 +406,15 @@ no_ds = [t["id"] for t in tpl_mod.TEMPLATES
          and t["id"] not in NO_DEFAULT_STYLE]
 check("生成类模板都带默认画风", not no_ds, str(no_ds))
 
+# 编辑/提取类模板（画风跟随原图）要在接口里显式标 styleLocked，前端据此隐藏画风区——
+# 摆一个选了也不生效的选择器，就是「文本任务假面板」的翻版。
+locked = {t["id"] for t in tpl_mod.TEMPLATES if t.get("styleLocked")}
+check("styleLocked 覆盖全部编辑/提取类模板", locked == NO_DEFAULT_STYLE,
+      f"locked={sorted(locked)}")
+check("styleLocked 模板不带默认画风",
+      not [t["id"] for t in tpl_mod.TEMPLATES
+           if t.get("styleLocked") and t.get("defaultStyle")])
+
 print("== 三视图提示词 ==")
 # 背视图指令曾经把示例角色（灰白英短猫武士）的造型写死：后脑纯灰、灰耳廓、
 # 红披风、手中兵器。结果任何角色转背面都会长出红披风。这里守住两条底线：

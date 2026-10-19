@@ -174,6 +174,13 @@ def _torch_status() -> Dict[str, Any]:
 
     import torch
 
+    free_gb = 0.0
+    if torch.cuda.is_available():
+        try:
+            free, _ = torch.cuda.mem_get_info()
+            free_gb = round(free / 1024**3, 1)
+        except Exception:
+            pass
     return {
         "installed": True,
         "version": torch.__version__,
@@ -181,7 +188,42 @@ def _torch_status() -> Dict[str, Any]:
         "device": torch.cuda.get_device_name(0) if torch.cuda.is_available() else "cpu",
         "vramGB": round(torch.cuda.get_device_properties(0).total_memory / 1024**3, 1)
         if torch.cuda.is_available() else 0,
+        "freeGB": free_gb,
     }
+
+
+# 两个大族在 24GB 卡上的实测占用（bf16 / fp8+offload）：
+# Z-Image 19.3GB、Qwen-Edit fp8 前向峰值 20.3GB。留 1GB 余量给 CUDA context。
+_NEED_GB = {"zimage": 20.5, "qwen_edit": 21.0}
+
+
+def _vram_note(family: str) -> Optional[str]:
+    """可用显存不够时返回一句人话告警，够了返回 None。
+
+    为什么值得单独查一次：Windows(WDDM) 显存打满**不会 OOM**，而是把超出部分
+    放到系统内存（共享显存），DiT 每一步都从 PCIe 拉权重。实测同一张 512²：
+    桌面占 1GB 时 2.1s（0.1s/步），桌面占 6GB 时 203s（20s/步）——差 100 倍，
+    而报错信息一个字都没有，用户只会以为「模型很慢」。
+    这里不拒绝请求（慢总比不能跑好），只把原因和处置写进日志与 meta。
+    """
+    try:
+        import torch
+
+        if not torch.cuda.is_available():
+            return None
+        free, total = torch.cuda.mem_get_info()
+        free_gb = free / 1024**3
+        need = _NEED_GB.get(family, 20.5)
+        if free_gb >= need:
+            return None
+        return (
+            f"可用显存只剩 {free_gb:.1f}GB（{family} 需要约 {need:.0f}GB，"
+            f"总共 {total / 1024**3:.0f}GB）。超出部分会被 Windows 放进共享内存，"
+            "推理会慢 50-100 倍（实测 2s → 200s+）。"
+            "请关闭占显卡的程序（浏览器硬件加速、游戏、视频播放、其他 AI 工具）后重试。"
+        )
+    except Exception:  # pragma: no cover
+        return None
 
 
 class DiffusersProvider(BaseProvider):
@@ -594,6 +636,13 @@ class DiffusersProvider(BaseProvider):
              ref: Optional[Any] = None, refs: Optional[Any] = None):
         torch = _require_torch()
 
+        # 先看显存够不够，再决定要不要让用户干等：桌面程序占着显存时，模型会被
+        # Windows 挤到共享内存，同一张图从 2s 变 200s，而界面只会显示「生成中」。
+        family_hint = _CAPS.get(model_id, {}).get("family") or detect_family(model_id)
+        vram_note = _vram_note(family_hint)
+        if vram_note:
+            print(f"[pixelforge] 警告：{vram_note}", flush=True)
+
         generator = None
         if seed is not None:
             generator = torch.Generator(device="cuda" if torch.cuda.is_available() else "cpu").manual_seed(int(seed))
@@ -609,14 +658,19 @@ class DiffusersProvider(BaseProvider):
                     "Z-Image 是纯文生图底座，不支持参考图。请用 /api/generate/ref "
                     "（会自动改用 Qwen-Image-Edit）或下载编辑底座。"
                 )
-            return self._run_zimage(model_id, prompt, width, height, steps, seed, generator, n)
-        if family == "qwen_edit":
-            return self._run_qwen_edit(model_id, prompt, negative, width, height,
-                                       steps, seed, generator, n,
-                                       refs=_normalize_refs(ref, refs))
-        raise RuntimeError(
-            f"不支持的模型族：{model_id}。只支持 Z-Image-Turbo 与 Qwen-Image-Edit-2511。"
-        )
+            images, meta = self._run_zimage(model_id, prompt, width, height,
+                                            steps, seed, generator, n)
+        elif family == "qwen_edit":
+            images, meta = self._run_qwen_edit(model_id, prompt, negative, width, height,
+                                               steps, seed, generator, n,
+                                               refs=_normalize_refs(ref, refs))
+        else:
+            raise RuntimeError(
+                f"不支持的模型族：{model_id}。只支持 Z-Image-Turbo 与 Qwen-Image-Edit-2511。"
+            )
+        if vram_note:
+            meta["vramWarning"] = vram_note
+        return images, meta
 
     async def generate(
         self,
@@ -688,7 +742,8 @@ class DiffusersProvider(BaseProvider):
         zh_tag = "（中文直喂）" if family in ("zimage", "qwen_edit") else "（不支持）"
         return {
             "ok": True,
-            "message": f"{st['device']} · {st['vramGB']}GB 显存 · 模型 {model} · 族 {family}"
+            "message": f"{st['device']} · {st['vramGB']}GB 显存（当前可用 "
+                       f"{st.get('freeGB', 0)}GB） · 模型 {model} · 族 {family}"
                        + zh_tag
                        + ("" if model not in _CACHE else " · 已加载"),
             "caps": caps,

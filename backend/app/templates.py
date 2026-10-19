@@ -15,6 +15,9 @@
   **画风不许写进 prompt**：模板里写死「Q版日系卡通」，用户再选「写实 3A」时
   提示词里就有两个画风，模型只认前一个——线上表现就是「选画风没反应」。
   所以画风只放这个字段，前端选中模板时自动点亮对应 chip，用户随时能换。
+- `styleLocked`（仅 image，可选）：这类模板是「参考原图做编辑/提取」，指令本身
+  要求「画风与原图一致」，选画风不会生效（编辑底座只改要求改的部分），所以
+  前端不显示画风区——摆一个不起作用的选择器，就是第二个「文本任务假面板」坑。
 - `guide`（仅 kind=text 需要）：
     needsImage  是否要连参考图一起发给对方（决定文案里提不提「附上图片」）
     targets     推荐哪些对话式 AI（只作文字罗列，不做按钮）
@@ -99,6 +102,7 @@ TEMPLATES: List[Dict[str, Any]] = [
         "category": "动画",
         "name": "动作视频描述",
         "kind": "image",
+        "styleLocked": True,
         "hint": "摄像机固定、角色原地、纯色底，供视频生成或抽帧",
         "prompt": (
             "摄像机固定不动。保持角色正面。保持原图 2d 卡通画风。始终展现角色全身。\n"
@@ -116,6 +120,7 @@ TEMPLATES: List[Dict[str, Any]] = [
         "category": "动画",
         "name": "插帧中间帧",
         "kind": "image",
+        "styleLocked": True,
         "hint": "在两张关键帧之间生成指定中间状态，带防近似帧约束",
         "prompt": (
             "这是一组游戏角色精灵图动画的两帧，生成这两帧的中间状态，也就是【收拳到出拳之间的过渡姿势】。\n"
@@ -153,6 +158,7 @@ TEMPLATES: List[Dict[str, Any]] = [
         "category": "场景",
         "name": "场景元素提取",
         "kind": "image",
+        "styleLocked": True,
         "hint": "单元素独立提取：遮挡补全、正视图、纯色底、同尺寸坐标",
         "prompt": (
             "严格参考上传原图，只提取画面中的【建筑主体】。\n"
@@ -173,6 +179,7 @@ TEMPLATES: List[Dict[str, Any]] = [
         "category": "视差",
         "name": "视差单层提取",
         "kind": "image",
+        "styleLocked": True,
         "hint": "9+1 图层拆分中的单层，保持同尺寸同坐标便于引擎重合",
         "prompt": (
             "严格参考上传原图，只提取【第 2 层：中景丘陵与城堡】。\n"
@@ -194,6 +201,7 @@ TEMPLATES: List[Dict[str, Any]] = [
         "category": "瓦片",
         "name": "瓦片接缝修补",
         "kind": "image",
+        "styleLocked": True,
         "hint": "保持结构只修接缝，输出可平铺的无缝单元",
         "prompt": (
             "这是一个游戏瓦片贴图，瓦片数为 4×4。\n"

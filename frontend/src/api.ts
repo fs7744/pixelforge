@@ -22,6 +22,8 @@ export type Template = {
   kind?: 'image' | 'text'
   /** 模板默认画风 id；画风不写进 prompt，避免和选择器打架 */
   defaultStyle?: string
+  /** 参考原图的编辑/提取类模板：画风跟随原图，选画风无效，前端不显示画风区 */
+  styleLocked?: boolean
   /** 仅 text：引导用户去别的对话式 AI 完成，不在本页做操作面板 */
   guide?: {
     needsImage: boolean
