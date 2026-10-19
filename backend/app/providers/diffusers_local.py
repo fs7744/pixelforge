@@ -99,9 +99,10 @@ def detect_family(model_id: str) -> str:
     return family
 
 
-# 单卡 24GB 的现实：Z-Image bf16 约 21GB、Qwen-Image-Edit fp8 前向峰值 20.3GB，
-# 两个模型族在同进程共存必 OOM（实测 37.6GiB > 23.99GiB），必须互斥驻留。
-_BIG_FAMILIES = {"zimage", "qwen_edit"}
+# 单卡 24GB 的现实：Z-Image bf16 约 21GB、Qwen-Image-Edit fp8 前向峰值 20.3GB、
+# Wan2.2 TI2V-5B（transformer fp8 + umT5 fp8 + VAE）常驻约 17GB，
+# 任两个模型族在同进程共存都可能 OOM 或被 WDDM 挤到共享内存，必须互斥驻留。
+_BIG_FAMILIES = {"zimage", "qwen_edit", "wan"}
 
 
 def _evict_other_families(incoming: str) -> None:
@@ -249,14 +250,16 @@ class DiffusersProvider(BaseProvider):
         family = detect_family(model_id)
         if family == "unknown":
             raise RuntimeError(
-                f"不支持的模型：{model_id}。目前只支持 Z-Image-Turbo 与 "
-                "Qwen-Image-Edit-2511（两个底座都是中文原生）。"
+                f"不支持的模型：{model_id}。目前只支持 Z-Image-Turbo / "
+                "Qwen-Image-Edit-2511 / Wan2.2 TI2V-5B（都是中文原生）。"
             )
         # 单卡 24GB 只容一个大家族：切换前先把另一大族卸了，
         # 否则 Z-Image(21GB) 与 Qwen-Edit fp8(峰值20.3GB) 同进程共存必 OOM
         _evict_other_families(family)
         if family == "zimage":
             return self._load_zimage(model_id)
+        if family == "wan":
+            return self._load_wan(model_id)
         return self._load_qwen_edit(model_id)
 
     def _load_zimage(self, model_id: str):

@@ -997,6 +997,7 @@ check("白底不走色相判定（不当成溢色乱洗）",
 
 print("== 视频生成工作流（Wan2.2 TI2V-5B） ==")
 from backend.app import workflows as wf_mod  # noqa: E402
+from backend.app.providers import diffusers_local  # noqa: E402
 from backend.app.providers.diffusers_local import DiffusersProvider, detect_family  # noqa: E402
 
 r = client.get("/api/workflows")
@@ -1014,6 +1015,17 @@ check("视频步骤默认 81 帧 / 24fps / 480×832",
       str({k: _vstep.get(k) for k in ("numFrames", "fps", "width", "height")}))
 check("模型族识别：wan 目录名",
       detect_family("models/wan2.2-ti2v-5b") == "wan", detect_family("models/wan2.2-ti2v-5b"))
+# _load 的分发：少了 wan 分支会在真机上报「不支持的模型」，这里用替身锁住路由
+_sentinel = object()
+_orig_load_wan = DiffusersProvider._load_wan
+DiffusersProvider._load_wan = lambda self, model_id: _sentinel
+try:
+    _got = DiffusersProvider({"model": "models/wan2.2-ti2v-5b"})._load("models/wan2.2-ti2v-5b")
+finally:
+    DiffusersProvider._load_wan = _orig_load_wan
+check("_load 把 wan 分到 _load_wan（不是报不支持的模型）", _got is _sentinel, str(type(_got)))
+check("wan 与其他大族互斥驻留",
+      "wan" in diffusers_local._BIG_FAMILIES, str(diffusers_local._BIG_FAMILIES))
 
 # 视频步骤的依赖与底座校验（都不碰 GPU）
 _run = wf_mod.create_run("animation_video", "灰白英短猫武士")
