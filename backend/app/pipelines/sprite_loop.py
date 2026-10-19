@@ -161,7 +161,7 @@ def compose(
     hard: bool = True,
     matte_method: str = "auto",
     colors: int = 0,
-) -> Tuple[Image.Image, List[Image.Image], Dict[str, Any], Dict[str, Any]]:
+) -> Tuple[Image.Image, List[Image.Image], Dict[str, Any], Dict[str, Any], Image.Image]:
     """把逐帧结果规整（共享缩放）后拼成精灵表。
 
     shared_scale：下蹲/抬腿的帧包围盒更小，逐帧各自撑满画布会让角色在
@@ -174,9 +174,13 @@ def compose(
     最后算一遍一致性指标（首尾衔接 / 帧间差 / 色板外颜色 / 半透明占比），
     把「稳不稳」变成数字——AI 逐帧生成最常见的就是某一帧姿势跑飞，肉眼看
     不出来，指标能直接指到第几帧。
+
+    同时生成一张审查图（移植自 h3 的 extraction.review）：帧网格 + 逐帧
+    差异标注 + 接缝描边。指标是数字，验收靠眼睛，两个都要。
     """
     from . import metrics as metrics_pipe
     from . import palette as palette_pipe
+    from . import review as review_pipe
 
     if not images:
         raise ValueError("没有可合成的帧")
@@ -230,4 +234,5 @@ def compose(
     }
     if pal:
         meta["palette"] = {"colors": len(pal), "swatches": [list(c) for c in pal[:32]]}
-    return sheet, frames, index, meta
+    review = review_pipe.contact_sheet(frames, cols=max(1, int(cols)))
+    return sheet, frames, index, meta, review

@@ -234,10 +234,60 @@ if r.status_code == 200:
     check("去背后主体保留", _px.getpixel((16, 16))[3] == 255 and
           _px.getpixel((16, 16))[:3] == (30, 30, 30), str(_px.getpixel((16, 16))))
 
+# 视频/GIF 导入拆帧（移植自 FrameBaker 的 extract 流程）
+_vg = io.BytesIO()
+_vfs = []
+for _i in range(3):
+    _f = Image.new("RGB", (32, 32), (20, 20, 28))
+    ImageDraw.Draw(_f).rectangle((4 + _i * 8, 8, 20 + _i * 8, 24), fill=(0, 255, 136))
+    _vfs.append(_f)
+_vfs[0].save(_vg, format="GIF", save_all=True, append_images=_vfs[1:], duration=100, loop=0)
+r = client.post("/api/pipeline/video/frames",
+                files={"file": ("a.gif", _vg.getvalue(), "image/gif")},
+                data={"fps": "0", "max_frames": "64", "matte": "false"})
+check("video/frames GIF 200", r.status_code == 200, str(r.json())[:100])
+if r.status_code == 200:
+    vf = r.json()
+    for f in vf["frames"]:
+        remember(f)
+    check("GIF 拆出 3 帧", len(vf["frames"]) == 3, str(len(vf["frames"])))
+    check("meta 记录来源与帧数",
+          vf["meta"].get("source") == "gif" and vf["meta"].get("frames") == 3, str(vf["meta"])[:80])
+
+# 绿幕 GIF + matte=true：逐帧抠图后应记录移除率
+_vg2 = io.BytesIO()
+_g1 = Image.new("RGB", (32, 32), (0, 255, 0))
+ImageDraw.Draw(_g1).rectangle((8, 8, 24, 24), fill=(30, 30, 30))
+_g1.save(_vg2, format="GIF", save_all=True, append_images=[_g1.copy()], duration=100, loop=0)
+r = client.post("/api/pipeline/video/frames",
+                files={"file": ("g.gif", _vg2.getvalue(), "image/gif")},
+                data={"fps": "0", "matte": "true", "tolerance": "80"})
+check("video/frames matte 200", r.status_code == 200, str(r.json())[:100])
+if r.status_code == 200:
+    _mp = r.json()["meta"].get("matte") or {}
+    check("逐帧抠图 meta 记录移除率", "avgRemoved" in _mp, str(_mp))
+
+# 非媒体文件 → 400（按文件头判断，扩展名不算数）
+r = client.post("/api/pipeline/video/frames",
+                files={"file": ("x.mp4", b"definitely not a video", "video/mp4")},
+                data={"fps": "0"})
+check("video/frames 非媒体 → 400", r.status_code == 400, f"{r.status_code} {r.text[:60]}")
+
+# MP4 且本机没有 ffmpeg → 明确错误 + 安装提示（有 ffmpeg 时跳过：
+# 造不出一段合法 MP4，不值得为测试引依赖）
+import shutil as _shutil  # noqa: E402
+if not _shutil.which("ffmpeg"):
+    _mp4 = b"\x00\x00\x00\x18ftypmp42\x00\x00\x00\x00mp42isom" + b"\x00" * 64
+    r = client.post("/api/pipeline/video/frames",
+                    files={"file": ("a.mp4", _mp4, "video/mp4")},
+                    data={"fps": "0"})
+    check("MP4 无 ffmpeg → 400 带安装指引",
+          r.status_code == 400 and "ffmpeg" in str(r.json().get("detail", "")),
+          f"{r.status_code} {r.text[:80]}")
+
 # 硬 alpha 保留「描边 + 键色」的抗锯齿混色：绿幕底实测边缘环 51% 偏绿。
 # clean_edge_spill 只改 RGB 不动 alpha，把它洗成内侧颜色。
 from backend.app.pipelines import matte as matte_pipe  # noqa: E402
-
 _edge = Image.new("RGB", (40, 40), (0, 255, 0))
 _ed = ImageDraw.Draw(_edge)
 _ed.rectangle((10, 10, 29, 29), fill=(20, 20, 20))
@@ -449,6 +499,16 @@ if _r.status_code == 200:
           _j["meta"]["normalize"]["sharedScale"] and _sr and abs(_sr[0] - _sr[1]) < 1e-6, str(_sr))
     check("精灵表按帧数铺满", _j["asset"]["width"] == 128 and _j["asset"]["height"] == 128,
           f'{_j["asset"]["width"]}x{_j["asset"]["height"]}')
+    # 审查图（移植自 h3 的 extraction.review）：4 帧 2 列 → 宽 2*(64+6)+6
+    if _j.get("review"):
+        remember(_j["review"])
+        check("附带帧审查图", _j["review"]["width"] == 2 * (64 + 6) + 6 and _j["review"]["height"] == 2 * (64 + 26 + 6) + 6,
+              f'{_j["review"]["width"]}x{_j["review"]["height"]}')
+    else:
+        check("附带帧审查图", False, "响应里没有 review")
+    check("compose 报告含警告清单与自检",
+          isinstance(_j["meta"].get("warnings"), list) and _j["meta"].get("checks", {}).get("cellsMatchFrames"),
+          str(_j["meta"].get("checks")))
 
 check("sprite/compose 空帧 → 400",
       client.post("/api/pipeline/sprite/compose", json={"frameAssetIds": []}).status_code == 400)
@@ -999,7 +1059,7 @@ for _i, _col in enumerate([(200, 100, 50), (210, 110, 60), (190, 90, 40)]):
     _d = ImageDraw.Draw(_im)
     _d.ellipse([24 + _i * 6, 20, 72 + _i * 6, 80], fill=_col)
     _cp_frames.append(_im)
-_sheet, _frames, _index, _cmeta = sl_pipe.compose(
+_sheet, _frames, _index, _cmeta, _review = sl_pipe.compose(
     _cp_frames, cols=3, size=64, matte=False, colors=8)
 check("compose 锁色后无调色板外颜色",
       _cmeta["metrics"]["off_palette_colors_max"] == 0,

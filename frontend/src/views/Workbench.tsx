@@ -541,16 +541,21 @@ export default function Workbench({ onSendToPost }: Props) {
         colors: spriteColors,
       })
       if (!d.asset) throw new Error(d.detail || '合成失败')
-      setResults((prev) => [d.asset, ...prev])
+      // review = 帧审查图（移植自 h3 的 extraction.review）：和精灵表一起
+      // 进结果区，验收时先看它——哪帧跑飞、接缝跳不跳一眼可见
+      setResults((prev) => [d.asset, ...(d.review ? [d.review] : []), ...prev])
       setSelected(d.asset.id)
       const g = d.index?.grid
       const verdict = (d.meta?.metricsVerdict || []) as string[]
       const pal = d.meta?.palette?.colors
+      const warns = (d.meta?.warnings || []) as string[]
       setMeta({
         ...d.meta,
         note: `精灵表 ${g?.cols}×${g?.rows} · 单帧 ${d.index?.frame_size?.w}×${d.index?.frame_size?.h} · 已共享缩放并对齐基线`
           + (pal ? ` · 全局锁色 ${pal} 色` : '')
-          + (verdict.length ? ` · ${verdict.join('；')}` : ''),
+          + (verdict.length ? ` · ${verdict.join('；')}` : '')
+          + (warns.length ? ` · 警告：${warns.join('；')}` : '')
+          + (d.review ? ` · 附帧审查图（序号+逐帧差+接缝标色）` : ''),
       })
     } catch (e: any) {
       setError(e.message || String(e))

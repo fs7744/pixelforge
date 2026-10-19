@@ -458,6 +458,20 @@ export const api = {
     fd.append('feather', String(feather))
     return fetch('/api/pipeline/tile', { method: 'POST', body: fd }).then(json)
   },
+  // 视频/GIF 导入拆帧（移植自 FrameBaker 的 extract 流程）：fps<=0 原样全取，
+  // matte=true 逐帧抠图（绿幕录像直接得到透明帧，可接精灵表管线）
+  videoFrames: (
+    payload: { fps?: number; maxFrames?: number; matte?: boolean; tolerance?: number },
+    file: File,
+  ) => {
+    const fd = new FormData()
+    fd.append('file', file)
+    fd.append('fps', String(payload.fps ?? 0))
+    fd.append('max_frames', String(payload.maxFrames ?? 64))
+    fd.append('matte', String(payload.matte ?? false))
+    fd.append('tolerance', String(payload.tolerance ?? 80))
+    return fetch('/api/pipeline/video/frames', { method: 'POST', body: fd }).then(json)
+  },
   exportZip: (ids: string[]) =>
     fetch('/api/export/zip', {
       method: 'POST',

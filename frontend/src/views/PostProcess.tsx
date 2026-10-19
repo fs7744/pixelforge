@@ -9,6 +9,7 @@ type Props = { incoming?: Asset | null }
 
 const PIPELINES = [
   { id: 'matte', name: '连通域抠图', tag: 'FLOOD-FILL', desc: '只删与边缘连通的同色背景，不误删内部同色像素' },
+  { id: 'video', name: '视频/GIF 导入', tag: 'EXTRACT', desc: '录像/GIF 拆成帧资产，可选逐帧抠图（绿幕直接可用）' },
   { id: 'resize', name: '尺寸规整', tag: 'NEAREST', desc: '最近邻硬缩放 / 等比留白 / RPGMaker 一键' },
   { id: 'sheet', name: 'Sprite Sheet 拆分', tag: 'N×M', desc: '按行列拆帧并生成引擎索引 JSON' },
   { id: 'pixelize', name: '像素化对齐', tag: 'PALETTE', desc: '分块单色 + 限定调色板，把 AI 图变成规整像素风' },
@@ -48,6 +49,10 @@ export default function PostProcess({ incoming }: Props) {
   const [pxColors, setPxColors] = useState(16)
   const [pxPalette, setPxPalette] = useState('auto')
   const [pxDither, setPxDither] = useState(false)
+  // 视频/GIF 导入：fps<=0 原样全取，maxFrames 封顶，matte 逐帧抠图
+  const [vidFps, setVidFps] = useState(0)
+  const [vidMax, setVidMax] = useState(64)
+  const [vidMatte, setVidMatte] = useState(false)
   const [styles, setStyles] = useState<StyleInfo[]>([])
   const [restyleId, setRestyleId] = useState('')
   const [aiSeed, setAiSeed] = useState('')
@@ -137,6 +142,18 @@ export default function PostProcess({ incoming }: Props) {
         const res = await api.matte(file, tolerance, feather)
         setOut(res.asset)
         setNote(`背景色 ${res.meta.background} · 移除 ${(res.meta.removedRatio * 100).toFixed(1)}% 像素`)
+      } else if (pipeline === 'video') {
+        const res = await api.videoFrames(
+          { fps: vidFps, maxFrames: vidMax, matte: vidMatte, tolerance },
+          file,
+        )
+        if (!res.frames?.length) throw new Error(res.meta?.reason || res.detail || '没有拆出帧')
+        setFrames(res.frames)
+        setIndex(null)
+        const m = res.meta
+        const trunc = m.truncated ? ` · ${m.truncated}` : ''
+        const matted = m.matte ? ` · 已逐帧抠图（平均移除 ${(m.matte.avgRemoved * 100).toFixed(0)}%）` : ''
+        setNote(`${m.source.toUpperCase()} 拆出 ${m.frames} 帧${m.totalFrames ? `（源 ${m.totalFrames} 帧）` : ''}${trunc}${matted}`)
       } else if (pipeline === 'resize') {
         const res = await api.resize(file, rw, rh, mode, variant)
         setOut(res.asset)
@@ -355,6 +372,50 @@ export default function PostProcess({ incoming }: Props) {
               </div>
             )}
           </div>
+        )}
+
+        {pipeline === 'video' && (
+          <>
+            <div className="row">
+              <div className="grow">
+                <div className="label">抽帧帧率 {vidFps > 0 ? `${vidFps} fps` : '（原样全取）'}</div>
+                <input
+                  type="range"
+                  min={0}
+                  max={30}
+                  value={vidFps}
+                  onChange={(e) => setVidFps(+e.target.value)}
+                  style={{ width: '100%' }}
+                />
+                <div className="hint">0 = 每一帧都取；调大用于压缩长视频的帧数</div>
+              </div>
+              <div className="grow">
+                <div className="label">最多帧数</div>
+                <input
+                  className="input"
+                  type="number"
+                  min={1}
+                  max={256}
+                  value={vidMax}
+                  onChange={(e) => setVidMax(Math.max(1, Math.min(256, +e.target.value)))}
+                />
+                <div className="hint">封顶 256，超出截断并提示</div>
+              </div>
+            </div>
+            <label className="hint" style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+              <input
+                type="checkbox"
+                checked={vidMatte}
+                onChange={(e) => setVidMatte(e.target.checked)}
+              />
+              逐帧抠图（绿幕 / 纯色底录像直接得到透明帧，可接精灵表管线）
+            </label>
+            <div className="hint">
+              支持 GIF / WebP / MP4（按文件头判断，不看扩展名）。GIF 走 PIL 原生拆帧；
+              MP4 需要本机安装 ffmpeg（未装会给出安装提示）。拆出的帧进素材库，
+              可在「Sprite Sheet 拆分」或生成工作台的逐帧合成里继续用。
+            </div>
+          </>
         )}
 
         {pipeline === 'sheet' && (
@@ -602,12 +663,16 @@ export default function PostProcess({ incoming }: Props) {
             <div className="hint" style={{ marginBottom: 6 }}>BEFORE</div>
             <div className="thumb checker" style={{ height: 380, borderColor: 'rgba(255,255,255,0.35)' }}>
               {before ? (
-                <img
-                  src={before}
-                  alt="before"
-                  style={{ cursor: 'zoom-in' }}
-                  onClick={() => openPreview(before, '处理前')}
-                />
+                pipeline === 'video' && file?.type.startsWith('video/') ? (
+                  <video src={before} controls muted loop style={{ maxWidth: '100%', maxHeight: '100%' }} />
+                ) : (
+                  <img
+                    src={before}
+                    alt="before"
+                    style={{ cursor: 'zoom-in' }}
+                    onClick={() => openPreview(before, '处理前')}
+                  />
+                )
               ) : (
                 <span className="hint">等待上传</span>
               )}

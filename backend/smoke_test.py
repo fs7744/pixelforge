@@ -119,6 +119,41 @@ async def main() -> None:
     (godot_export.EXPORTS_DIR / info["zip"].rsplit("/", 1)[-1]).unlink(missing_ok=True)
     print(f"[7b] godot   → {len(sums['files'])} 个文件摘要全部校验通过 OK")
 
+    # 视频/GIF 导入拆帧 + 审查图（移植自 FrameBaker extract / h3 review）
+    from backend.app.pipelines import review as review_pipe
+    from backend.app.pipelines import videoio
+
+    assert videoio.sniff_media(b"GIF89a" + b"x" * 20) == "gif"
+    assert videoio.sniff_media(b"RIFF\x00\x00\x00\x00WEBPVP8 ") == "webp"
+    assert videoio.sniff_media(b"\x00\x00\x00\x18ftypmp42" + b"x" * 20) == "mp4"
+    assert videoio.sniff_media(b"not a media file at all") == ""
+    print("[7c] sniff   → gif/webp/mp4/未知 全部识别正确 OK")
+
+    # 造一个 4 帧动画 GIF（每帧一个色块），拆出来必须 4 帧、尺寸一致
+    gif_buf = io.BytesIO()
+    gframes = []
+    for i in range(4):
+        f = Image.new("RGB", (48, 48), (30, 30, 40))
+        d = ImageDraw.Draw(f)
+        d.rectangle([6 + i * 8, 12, 26 + i * 8, 36], fill=(0, 255, 136))
+        gframes.append(f)
+    gframes[0].save(gif_buf, format="GIF", save_all=True, append_images=gframes[1:],
+                    duration=100, loop=0)
+    vframes, vmeta = videoio.extract(gif_buf.getvalue(), "x.gif", fps=0, max_frames=64)
+    assert len(vframes) == 4, f"GIF 拆帧数不对: {len(vframes)}"
+    assert vmeta["source"] == "gif" and vmeta["frames"] == 4
+    assert all(fr.size == (48, 48) for fr in vframes)
+    # 抽帧步长：100ms/帧（10fps 源）要 2fps → 每 5 帧取 1 → 只剩 1 帧。
+    # 这条断言锁 _sample_step 的公式（曾经把倒数写反，抽稀变全取）
+    vframes2, vmeta2 = videoio.extract(gif_buf.getvalue(), "x.gif", fps=2, max_frames=64)
+    assert vmeta2["sampleStep"] == 5 and len(vframes2) == 1, (vmeta2, len(vframes2))
+    print(f"[7d] gif     → 4 帧全取 / 2fps 抽成 {len(vframes2)} 帧（步长 {vmeta2['sampleStep']}）OK")
+
+    # 审查图：网格 + 标签，尺寸 = 列*(宽+pad)+pad
+    cs = review_pipe.contact_sheet(vframes, cols=2)
+    assert cs.width == 2 * (48 + 6) + 6 and cs.height == 2 * (48 + 26 + 6) + 6, cs.size
+    print(f"[7e] review  → 审查图 {cs.size} OK")
+
     png = io.BytesIO()
     rpg.save(png, "PNG")
     print(f"[8] export   → rpgmaker png {len(png.getvalue())} bytes")

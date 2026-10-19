@@ -316,6 +316,24 @@ async def generate_with_refs(
 MAX_UPLOAD_BYTES = 64 * 1024 * 1024
 
 
+async def _read_upload_bytes(file: UploadFile) -> bytes:
+    """读整个上传（分块 + 上限），给视频/GIF 这类非图片载体用。"""
+    declared = getattr(file, "size", None)
+    if declared and declared > MAX_UPLOAD_BYTES:
+        raise HTTPException(400, f"文件过大（上限 {MAX_UPLOAD_BYTES // (1024 * 1024)}MB）")
+    chunks: List[bytes] = []
+    total = 0
+    while True:
+        chunk = await file.read(1024 * 1024)
+        if not chunk:
+            break
+        total += len(chunk)
+        if total > MAX_UPLOAD_BYTES:
+            raise HTTPException(400, f"文件过大（上限 {MAX_UPLOAD_BYTES // (1024 * 1024)}MB）")
+        chunks.append(chunk)
+    return b"".join(chunks)
+
+
 async def _read_image(file: UploadFile) -> Image.Image:
     declared = getattr(file, "size", None)
     if declared and declared > MAX_UPLOAD_BYTES:
@@ -510,7 +528,7 @@ async def pipeline_sprite_compose(payload: SpriteComposePayload):
         raise HTTPException(400, f"一次最多合成 64 帧，收到 {len(ids)} 帧")
 
     imgs = [_load_asset_image(i) for i in ids]
-    sheet, frames, index, meta = await run_in_threadpool(
+    sheet, frames, index, meta, review = await run_in_threadpool(
         sprite_loop.compose, imgs, cols=payload.cols, size=payload.size, anchor=payload.anchor,
         matte=payload.matte, tolerance=payload.tolerance, feather=payload.feather,
         colors=payload.colors,
@@ -526,7 +544,15 @@ async def pipeline_sprite_compose(payload: SpriteComposePayload):
         sheet, kind="sheet", name="sprite-sheet",
         meta={"pipeline": "sprite-compose", **meta, "index": index},
     )
+    # 审查图（移植自 h3 的 extraction.review）：帧网格 + 逐帧差异 + 接缝描边，
+    # 和指标数字配成一套——数字定位问题，眼睛验收效果
+    review_item = storage.save_asset(
+        review, kind="sheet", name="contact-sheet",
+        meta={"pipeline": "sprite-compose-review", "frames": len(frames),
+              "cols": max(1, int(payload.cols))},
+    )
     return {"asset": sheet_item, "frames": frame_items, "index": index,
+            "review": review_item,
             "meta": {"pipeline": "sprite-compose", **meta}}
 
 
@@ -576,6 +602,40 @@ async def pipeline_tile(
     out, meta = await run_in_threadpool(tile_pipe.make_seamless, img, band=band, feather=feather)
     item = storage.save_asset(out, kind="tile", meta={"pipeline": "tile", **meta})
     return {"asset": item, "meta": meta}
+
+
+# ---------- 视频 / GIF 导入拆帧（移植自 FrameBaker 的 extract 流程） ----------
+@app.post("/api/pipeline/video/frames")
+async def pipeline_video_frames(
+    file: UploadFile = File(...),
+    fps: float = Form(0),
+    max_frames: int = Form(64),
+    matte: bool = Form(False),
+    tolerance: int = Form(80),
+):
+    """视频 / GIF → 帧资产（GIF/WebP 走 PIL 原生，MP4 走 ffmpeg）。
+
+    fps<=0 原样全取；matte=True 逐帧抠图（绿幕录像直接得到透明帧，
+    接着就能进精灵表管线——FrameBaker autoMatting 的对应场景）。
+    """
+    from .pipelines import videoio
+
+    data = await _read_upload_bytes(file)
+    try:
+        frames, meta = await run_in_threadpool(
+            videoio.extract, data, file.filename or "",
+            fps=fps, max_frames=max_frames, matte=matte, tolerance=tolerance)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    except RuntimeError as e:
+        raise HTTPException(400, str(e))
+
+    items = [
+        storage.save_asset(f, kind="frame", name=f"vid-{i:03d}",
+                           meta={"pipeline": "video-frames", "index": i, **meta})
+        for i, f in enumerate(frames)
+    ]
+    return {"frames": items, "meta": meta}
 
 
 @app.post("/api/providers/diffusers/unload")
