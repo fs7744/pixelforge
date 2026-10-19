@@ -126,11 +126,29 @@ def _evict_other_families(incoming: str) -> None:
           flush=True)
 
 
+MAX_REFS = 4
+
+
+def _normalize_refs(ref=None, refs=None) -> List[Any]:
+    """把 ref（单张）与 refs（多张）合并成统一的参考图列表。
+
+    上限 4 张：Qwen-Image-Edit-2511 官方支持多图输入，但再多既拉长编码时间，
+    也很难让模型分清主次。顺序有意义——第一张决定输出宽高。
+    """
+    out: List[Any] = []
+    if ref is not None:
+        out.append(ref)
+    if refs:
+        out.extend([r for r in refs if r is not None])
+    return out[:MAX_REFS]
+
+
 def _torch_status() -> Dict[str, Any]:
     try:
         import torch  # noqa: F401
     except Exception as e:  # pragma: no cover
         return {"installed": False, "error": str(e)}
+
     import torch
 
     return {
@@ -454,8 +472,8 @@ class DiffusersProvider(BaseProvider):
         注意：
         - 调度器把 step 0 当热身，num_inference_steps=9 才对应 8 次前向；
         - Turbo 蒸馏已内化 CFG，guidance_scale 给正值反而掉画质；
-        - 参考图（ref）被忽略：Z-Image 没有 img2img 管线，角色一致性
-          走 Qwen-Image-Edit 指令接力（先出帧 1，再用指令改视角/姿势）。
+        - 它是纯文生图，没有 img2img / 参考图输入。传了参考图会在 generate()
+          里改走 Qwen-Image-Edit（autoRouted），或在这里抛错，不再静默忽略。
         """
         import torch
 
@@ -481,39 +499,51 @@ class DiffusersProvider(BaseProvider):
 
     def _run_qwen_edit(self, model_id: str, prompt: str, negative: str,
                        width: int, height: int, steps: Optional[int],
-                       seed: Optional[int], generator: Any, n: int, ref: Any):
-        """Qwen-Image-Edit 指令式编辑：参考图 + 中文指令 → 编辑图。
+                       seed: Optional[int], generator: Any, n: int,
+                       refs: Optional[Any] = None):
+        """Qwen-Image-Edit 指令式编辑：参考图（可多张）+ 中文指令 → 编辑图。
 
         与 txt2img 的本质区别：prompt 是「编辑指令」而非「画面描述」。
         角色一致性指令模板：
           「保持角色外观、服装、配色完全不变，将姿势改为：{action}，纯色背景」
-        - 必须传 ref（没有参考图时编辑器无输入，直接报错而不是静默出图）；
-        - 输出尺寸跟随参考图（对齐 16），不另外传 width/height；
+
+        - 必须传参考图（没有输入时直接报错，而不是静默出图）；
+        - **多图**：Qwen-Image-Edit-2511 的 Plus 管线原生支持多张输入，用于
+          「角色正面 + 侧面」「角色 + 场景」这类组合参考；所有参考图统一缩放到
+          目标尺寸后再送编码器；
+        - 输出尺寸：显式 width/height 生效（16 对齐）；缺省时跟随第一张参考图。
+          注意管线自己的默认是「按最后一张参考图的长宽比算 1024² 面积」，
+          所以必须显式传参，否则用户设的宽高会被忽略；
         - true_cfg_scale=4.0 是官方推荐（正负提示词对比强度）；
           guidance_scale=1.0 关掉二次 CFG（蒸馏已内化）。
         """
         import torch
 
-        if ref is None:
+        refs = [r for r in (refs or []) if r is not None]
+        if not refs:
             raise ValueError(
-                "Qwen-Image-Edit 是指令式编辑器，必须传参考图（ref）。"
-                "请通过工作流的 useRef 步骤或生成接口传入 ref。"
+                "Qwen-Image-Edit 是指令式编辑器，必须传参考图（ref/refs）。"
+                "请通过 /api/generate/ref 或工作流的 useRef 步骤传入。"
             )
 
         pipe = self._load(model_id)
         use_steps = 40 if not steps else max(20, min(int(steps), 50))
         from PIL import Image as _Image
 
-        src = ref.convert("RGB")
-        w = int(width or src.width) // 16 * 16
-        h = int(height or src.height) // 16 * 16
-        src = src.resize((w, h), _Image.LANCZOS)
+        srcs = [r.convert("RGB") for r in refs]
+        w = int(width or srcs[0].width) // 16 * 16
+        h = int(height or srcs[0].height) // 16 * 16
+        srcs = [s.resize((w, h), _Image.LANCZOS) for s in srcs]
+        # 单图传 Image，多图传 list（Plus 管线两者都吃）
+        image_arg = srcs[0] if len(srcs) == 1 else srcs
         images = []
         for i in range(max(1, min(n, 4))):
             out = pipe(
-                image=src,
+                image=image_arg,
                 prompt=prompt,
                 negative_prompt=negative or " ",
+                height=h,
+                width=w,
                 num_inference_steps=use_steps,
                 true_cfg_scale=4.0,
                 guidance_scale=1.0,
@@ -523,11 +553,13 @@ class DiffusersProvider(BaseProvider):
             if generator is not None and seed is not None:
                 generator = torch.Generator(device=generator.device).manual_seed(int(seed) + i + 1)
         return images, {"steps": use_steps, "cfg": 1.0, "trueCfg": 4.0,
-                        "family": "qwen_edit", "mode": "edit"}
+                        "family": "qwen_edit",
+                        "mode": "edit" if len(srcs) == 1 else "ref2img",
+                        "refCount": len(srcs), "size": [w, h]}
 
     def _run(self, model_id: str, prompt: str, negative: str, width: int, height: int,
              steps: int, cfg: float, seed: Optional[int], n: int,
-             ref: Optional[Any] = None):
+             ref: Optional[Any] = None, refs: Optional[Any] = None):
         import torch
 
         generator = None
@@ -538,12 +570,18 @@ class DiffusersProvider(BaseProvider):
         self._load(model_id)
         family = _CAPS.get(model_id, {}).get("family") or detect_family(model_id)
         if family == "zimage":
-            # Z-Image 蒸馏模型不吃负向、guidance 固定 0、无 img2img 管线，
-            # 角色一致性交给 Qwen-Edit 指令接力（见 threeview / 动画工作流）
+            # 参考图在 generate() 里已经改走编辑底座；走到这里说明调用方绕过了
+            # 那层判断，明确报错比静默出图更容易排查
+            if ref is not None or refs:
+                raise RuntimeError(
+                    "Z-Image 是纯文生图底座，不支持参考图。请用 /api/generate/ref "
+                    "（会自动改用 Qwen-Image-Edit）或下载编辑底座。"
+                )
             return self._run_zimage(model_id, prompt, width, height, steps, seed, generator, n)
         if family == "qwen_edit":
             return self._run_qwen_edit(model_id, prompt, negative, width, height,
-                                       steps, seed, generator, n, ref)
+                                       steps, seed, generator, n,
+                                       refs=_normalize_refs(ref, refs))
         raise RuntimeError(
             f"不支持的模型族：{model_id}。只支持 Z-Image-Turbo 与 Qwen-Image-Edit-2511。"
         )
@@ -558,9 +596,29 @@ class DiffusersProvider(BaseProvider):
         seed: Optional[int] = None,
         n: int = 1,
         ref=None,
+        refs: Optional[Any] = None,
     ) -> ProviderResult:
-        model_id = self._resolve_model()
-        family = detect_family(model_id)
+        requested = self._resolve_model()
+        family = detect_family(requested)
+        all_refs = _normalize_refs(ref, refs)
+        model_id = requested
+        auto_routed = False
+
+        # 带参考图 = 图生图/参考图生成；Z-Image 没有这条管线，自动改走编辑底座，
+        # 而不是把参考图悄悄丢掉（历史上就是这样静默忽略的）。
+        if all_refs and family == "zimage":
+            try:
+                from ..pipelines.ai_edit import resolve_edit_model
+
+                model_id = resolve_edit_model()
+                family = "qwen_edit"
+                auto_routed = True
+            except Exception as e:
+                raise RuntimeError(
+                    "Z-Image 是纯文生图底座，不支持参考图。要按参考图生成，"
+                    "请先下载编辑底座：bash backend/fetch_qwen_edit.sh"
+                ) from e
+
         if steps is None:
             # 蒸馏模型只需极少步数：Z-Image 9 步（8 次前向）、
             # Qwen-Image-Edit 40 步（非蒸馏）；给 28 步纯属浪费
@@ -568,14 +626,15 @@ class DiffusersProvider(BaseProvider):
         async with _LOCK:
             images, meta = await asyncio.to_thread(
                 self._run, model_id, prompt, self.cfg.get("negativePrompt", ""),
-                width, height, steps, cfg, seed, n, ref,
+                width, height, steps, cfg, seed, n, ref, all_refs or None,
             )
         status = _torch_status()
-        return ProviderResult(
-            images=images,
-            meta={"provider": "diffusers", "model": model_id, "device": status.get("device"),
-                  **meta, "caps": _CAPS.get(model_id)},
-        )
+        out_meta = {"provider": "diffusers", "model": model_id, "device": status.get("device"),
+                    **meta, "caps": _CAPS.get(model_id)}
+        if auto_routed:
+            out_meta["autoRouted"] = True
+            out_meta["requestedModel"] = requested
+        return ProviderResult(images=images, meta=out_meta)
 
     async def test(self) -> Dict[str, Any]:
         st = _torch_status()

@@ -30,7 +30,14 @@ class BaseProvider:
         seed: Optional[int] = None,
         n: int = 1,
         ref: Optional[Image.Image] = None,
+        refs: Optional[List[Image.Image]] = None,
     ) -> ProviderResult:
+        """ref / refs 都是参考图入参：
+
+        - Z-Image 是纯文生图，喂参考图会抛错（不会静默忽略）；
+        - Qwen-Image-Edit 走指令式编辑，refs 支持多张（最多 4 张）语义组合，
+          例如「角色正面 + 侧面」「角色 + 场景」。
+        """
         raise NotImplementedError
 
     async def test(self) -> Dict[str, Any]:

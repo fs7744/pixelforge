@@ -167,6 +167,12 @@ export default function Workbench({ onSendToPost }: Props) {
   const [results, setResults] = useState<Asset[]>([])
   const [selected, setSelected] = useState<string>('')
   const [meta, setMeta] = useState<any>(null)
+  // 参考图（图生图）：本地文件 + objectURL 缩略图，移除时立即释放
+  const [refItems, setRefItems] = useState<{ file: File; url: string }[]>([])
+  // 参考图另一种来源：直接从资产库挑（不用先下载再上传）
+  const [refAssetIds, setRefAssetIds] = useState<string[]>([])
+  const [pickerOpen, setPickerOpen] = useState(false)
+  const [library, setLibrary] = useState<Asset[]>([])
 
   useEffect(() => {
     api.templates().then((d) => {
@@ -215,15 +221,70 @@ export default function Workbench({ onSendToPost }: Props) {
     if (t.params?.height) setHeight(t.params.height)
   }
 
+  // 参考图最多 4 张：再多也分不清主次，编码时间还线性上涨
+  const MAX_REFS = 4
+  const totalRefs = refItems.length + refAssetIds.length
+
+  const addRefs = (files: FileList | null) => {
+    if (!files || !files.length) return
+    const picked = Array.from(files).filter((f) => f.type.startsWith('image/'))
+    setRefItems((prev) => {
+      const room = Math.max(0, MAX_REFS - prev.length - refAssetIds.length)
+      const next = picked.slice(0, room).map((f) => ({ file: f, url: URL.createObjectURL(f) }))
+      return [...prev, ...next]
+    })
+  }
+
+  const removeRef = (idx: number) => {
+    setRefItems((prev) => {
+      const item = prev[idx]
+      if (item) URL.revokeObjectURL(item.url)
+      return prev.filter((_, i) => i !== idx)
+    })
+  }
+
+  const openPicker = () => {
+    const next = !pickerOpen
+    setPickerOpen(next)
+    if (next && !library.length) {
+      api
+        .assets()
+        .then((d) => setLibrary(d.assets.slice(0, 24)))
+        .catch(() => setLibrary([]))
+    }
+  }
+
+  const toggleAsset = (id: string) => {
+    setRefAssetIds((prev) => {
+      if (prev.includes(id)) return prev.filter((x) => x !== id)
+      if (prev.length + refItems.length >= MAX_REFS) return prev
+      return [...prev, id]
+    })
+  }
+
   const run = async () => {
     setBusy(true)
     setError('')
     try {
-      // 角色三视图走独立管线：正/侧/背三张独立生成（帧 2+ 编辑底座转视角保
-      // 同一角色）后确定性拼板。单图让模型一次画三个视角会重叠/缺视图，
-      // 拆成三张是结构保证，不靠模型自觉。
-      const data =
-        tplId === 'char_three_view'
+      // 有参考图 = 参考图生成（图生图）：Z-Image 没有参考图输入，后端会自动改走
+      // Qwen-Image-Edit。这条路径优先于三视图模板——三视图是「三张独立文生图」，
+      // 与参考图语义冲突。
+      const data = refItems.length || refAssetIds.length
+        ? await api.generateRef(
+            {
+              prompt,
+              style: styleId || undefined,
+              width,
+              height,
+              steps,
+              cfg,
+              n,
+              seed: seed.trim() ? Number(seed) : null,
+              refAssetIds,
+            },
+            refItems.map((r) => r.file),
+          )
+        : tplId === 'char_three_view'
           ? await api.threeview({
               prompt,
               style: styleId || undefined,
@@ -339,6 +400,88 @@ export default function Workbench({ onSendToPost }: Props) {
         </div>
 
         <div>
+          <div className="row between" style={{ alignItems: 'center' }}>
+            <div className="label" style={{ marginBottom: 0 }}>
+              参考图 · 图生图（可选，最多 {MAX_REFS} 张）
+            </div>
+            <button className="btn btn-ghost" style={{ padding: '2px 8px', fontSize: 11 }} onClick={openPicker}>
+              {pickerOpen ? '收起资产库' : '从资产库选'}
+            </button>
+          </div>
+          <div className="ref-grid">
+            {refItems.map((r, i) => (
+              <div className="ref-thumb" key={r.url}>
+                <img src={r.url} alt={`参考图 ${i + 1}`} />
+                <span className="ref-idx">{i + 1}</span>
+                <button className="ref-del" title="移除" onClick={() => removeRef(i)}>
+                  ×
+                </button>
+              </div>
+            ))}
+            {refAssetIds.map((id, i) => {
+              const a = library.find((x) => x.id === id)
+              return (
+                <div className="ref-thumb" key={id}>
+                  {a ? <img src={a.url} alt={a.name} /> : <div className="ref-miss">?</div>}
+                  <span className="ref-idx">{refItems.length + i + 1}</span>
+                  <button className="ref-del" title="移除" onClick={() => toggleAsset(id)}>
+                    ×
+                  </button>
+                </div>
+              )
+            })}
+            {totalRefs < MAX_REFS && (
+              <label className="ref-add" title="上传参考图">
+                <span>+</span>
+                <input
+                  type="file"
+                  accept="image/*"
+                  multiple
+                  hidden
+                  onChange={(e) => {
+                    addRefs(e.target.files)
+                    e.currentTarget.value = ''
+                  }}
+                />
+              </label>
+            )}
+          </div>
+
+          {pickerOpen && (
+            <div className="ref-picker">
+              {library.length === 0 && <div className="hint">资产库还是空的</div>}
+              {library.map((a) => {
+                const on = refAssetIds.includes(a.id)
+                const full = !on && totalRefs >= MAX_REFS
+                return (
+                  <button
+                    key={a.id}
+                    className={`ref-pick ${on ? 'on' : ''}`}
+                    disabled={full}
+                    title={a.name}
+                    onClick={() => toggleAsset(a.id)}
+                  >
+                    <img src={a.url} alt={a.name} />
+                    {on && <span className="ref-idx">{refAssetIds.indexOf(a.id) + 1}</span>}
+                  </button>
+                )
+              })}
+            </div>
+          )}
+
+          <div className="hint" style={{ marginTop: 6 }}>
+            {totalRefs
+              ? `已选 ${totalRefs} 张：走 Qwen-Image-Edit 指令式生成，输出尺寸用上方「宽/高」。第一张是主参考，其余作补充（如正面+侧面、角色+场景）。`
+              : '不选 = 文生图（Z-Image）。需要按参考图生成时加图，会自动改用编辑底座；首图是主参考。'}
+          </div>
+          {totalRefs > 0 && tplId === 'char_three_view' && (
+            <div className="hint" style={{ marginTop: 4, color: 'var(--yellow)' }}>
+              当前模板是三视图（三张独立文生图），已选参考图时按单张参考图生成处理。
+            </div>
+          )}
+        </div>
+
+        <div>
           <div className="label">高级参数</div>
           <div className="row" style={{ marginTop: 6 }}>
             <div className="grow">
@@ -376,6 +519,12 @@ export default function Workbench({ onSendToPost }: Props) {
           {busy ? '生成中' : '生成'}
         </button>
         {meta?.note && <div className="hint">{meta.note}</div>}
+        {meta?.mode === 'ref2img' && (
+          <div className="hint">
+            参考图生成 · {meta.refCount} 张参考图 · {(meta.model || '').split('/').pop()}
+            {meta.autoRouted ? '（已自动改用编辑底座）' : ''}
+          </div>
+        )}
         {meta?.pipeline === 'threeview' && (
           <div className="hint">
             三视图完成（{meta.mode}）· 拼板 {meta.compose?.size?.join('×')} · 总耗时 {meta.seconds}s

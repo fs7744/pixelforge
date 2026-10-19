@@ -141,5 +141,40 @@ if r.status_code == 200:
     check("meta 记录 sourceSize", m.get("sourceSize") == [scene.width, scene.height],
           str(m.get("sourceSize")))
 
+print("== 5. generate/ref（参考图生成：2 张参考图）==", flush=True)
+# 两张内容不同的参考图：角色帧 + 场景，模拟「角色 + 场景」的组合参考
+ref1 = base.resize((512, 512), Image.LANCZOS)
+ref2 = scene.resize((512, 512), Image.LANCZOS)
+
+
+def _png(img):
+    b = io.BytesIO()
+    img.save(b, "PNG")
+    return b.getvalue()
+
+
+t0 = time.time()
+r = client.post("/api/generate/ref",
+                files=[("refs", ("r1.png", _png(ref1), "image/png")),
+                       ("refs", ("r2.png", _png(ref2), "image/png"))],
+                data={"prompt": "以第一张图的角色为主角，保持造型与配色不变；"
+                                "参考第二张图的场景色调，生成该角色的正面半身像，纯色背景",
+                      "steps": "20", "seed": "42", "width": "512", "height": "512"})
+print(f"  elapsed {time.time() - t0:.1f}s", flush=True)
+check("generate/ref 200", r.status_code == 200,
+      str(r.json())[:200] if r.status_code != 200 else "")
+if r.status_code == 200:
+    j = r.json()
+    m = j["meta"]
+    check("meta 标记 ref2img", m.get("mode") == "ref2img", str(m.get("mode")))
+    check("meta 记录 2 张参考图", m.get("refCount") == 2, str(m.get("refCount")))
+    check("自动改走编辑底座", m.get("autoRouted") is True, str(m.get("autoRouted")))
+    check("使用了 qwen_edit 族", "qwen" in str(m.get("model", "")).lower(), str(m.get("model")))
+    check("返回资产", bool(j.get("images")), str(len(j.get("images") or [])))
+    if j.get("images"):
+        a = j["images"][0]
+        check("输出尺寸 512x512", (a["width"], a["height"]) == (512, 512), f"{a['width']}x{a['height']}")
+        check("输出文件已落盘", storage.asset_path(a).exists(), storage.asset_path(a).name)
+
 print(f"\n结果：{ok} 通过 / {fail} 失败", flush=True)
 raise SystemExit(1 if fail else 0)

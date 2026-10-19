@@ -181,6 +181,80 @@ async def generate(payload: GeneratePayload):
     return {"images": items, "meta": meta}
 
 
+@app.post("/api/generate/ref")
+async def generate_with_refs(
+    prompt: str = Form(...),
+    style: str = Form(""),
+    width: int = Form(0),
+    height: int = Form(0),
+    steps: int = Form(0),
+    cfg: float = Form(0.0),
+    seed: Optional[int] = Form(None),
+    n: int = Form(1),
+    refAssetIds: str = Form(""),
+    refs: Optional[List[UploadFile]] = File(None),
+):
+    """参考图生成（图生图）：1–4 张参考图 + 指令 → Qwen-Image-Edit。
+
+    - 参考图两种来源可混用：直接上传（refs）、资产库 id（refAssetIds，逗号分隔）；
+    - 宽度/高度缺省（0）时跟随第一张参考图，按 16 对齐；
+    - 底座固定走编辑底座：Z-Image 是纯文生图，没有参考图输入，传了也只会
+      让用户以为生效——所以这里直接由 provider 改走编辑底座（meta.autoRouted 标记）。
+    """
+    from .providers.diffusers_local import MAX_REFS
+
+    images: List[Image.Image] = []
+    for f in refs or []:
+        if f is not None:
+            images.append((await _read_image(f)).convert("RGB"))
+    for aid in [x.strip() for x in (refAssetIds or "").split(",") if x.strip()]:
+        item = storage.get_asset(aid)
+        if not item:
+            raise HTTPException(400, f"参考图资产不存在：{aid}")
+        p = storage.asset_path(item)
+        if not p.exists():
+            raise HTTPException(400, f"参考图文件缺失：{aid}")
+        images.append(Image.open(p).convert("RGB"))
+    if not images:
+        raise HTTPException(400, "至少需要一张参考图（上传 refs 或指定 refAssetIds）")
+    if len(images) > MAX_REFS:
+        raise HTTPException(400, f"参考图最多 {MAX_REFS} 张，当前 {len(images)} 张")
+
+    s = load_settings()
+    pid = s.get("activeProvider") or "diffusers"
+    pcfg = s["providers"].get(pid)
+    if pcfg is None:
+        raise HTTPException(400, f"未配置 Provider: {pid}")
+    provider = get_provider(pid, pcfg)
+
+    styled = styles.apply_style(prompt, style or None)
+    w = int(width or images[0].width) // 16 * 16 or 512
+    h = int(height or images[0].height) // 16 * 16 or 512
+    try:
+        result = await provider.generate(
+            prompt=styled["prompt"],
+            width=w,
+            height=h,
+            steps=steps or None,
+            cfg=cfg or 7.5,
+            seed=seed,
+            n=max(1, min(int(n or 1), 4)),
+            refs=images,
+        )
+    except Exception as e:
+        raise HTTPException(502, str(e))
+
+    meta = {**result.meta, "prompt": styled["prompt"], "promptSource": prompt,
+            "mode": "ref2img", "refCount": len(images)}
+    if styled["style"]:
+        meta["style"] = styled["style"]
+    items = [
+        storage.save_asset(img, kind="generated", meta=meta, ai_label=False)
+        for img in result.images
+    ]
+    return {"images": items, "meta": meta}
+
+
 # ---------- 后处理管线 ----------
 async def _read_image(file: UploadFile) -> Image.Image:
     raw = await file.read()

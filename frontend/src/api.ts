@@ -100,6 +100,36 @@ export const api = {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(payload),
     }).then(json),
+  // 参考图生成（图生图）：1–4 张参考图 + 指令 → Qwen-Image-Edit。
+  // 后端会自动改用编辑底座（Z-Image 是纯文生图，没有参考图输入）。
+  generateRef: (
+    payload: {
+      prompt: string
+      style?: string
+      width?: number
+      height?: number
+      steps?: number
+      cfg?: number
+      seed?: number | null
+      n?: number
+      refAssetIds?: string[]
+    },
+    files: File[] = [],
+  ) => {
+    const fd = new FormData()
+    fd.append('prompt', payload.prompt)
+    if (payload.style) fd.append('style', payload.style)
+    // 0 表示「跟随参考图尺寸」，交给后端判断
+    fd.append('width', String(payload.width ?? 0))
+    fd.append('height', String(payload.height ?? 0))
+    fd.append('steps', String(payload.steps ?? 0))
+    fd.append('cfg', String(payload.cfg ?? 0))
+    fd.append('n', String(payload.n ?? 1))
+    if (payload.seed != null) fd.append('seed', String(payload.seed))
+    if (payload.refAssetIds?.length) fd.append('refAssetIds', payload.refAssetIds.join(','))
+    files.forEach((f) => fd.append('refs', f))
+    return fetch('/api/generate/ref', { method: 'POST', body: fd }).then(json)
+  },
   // 角色三视图：正/侧/背三张独立生成 + 拼板（images[0]=拼板，1-3=正/侧/背单视图）
   threeview: (payload: {
     prompt: string

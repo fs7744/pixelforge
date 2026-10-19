@@ -2,8 +2,10 @@
 
 分工：
 - 本脚本：抠图 / 像素化 / 缩放 / 镜像延展 / 无缝平铺 / 分表 / 合表 /
-  确定性去水印 / Provider 测试与卸载 / 资产删除 / 设置回写 / run 错误路径。
+  确定性去水印 / Provider 测试与卸载 / 资产删除 / 设置回写 / run 错误路径 /
+  参考图生成的输入校验（无图、超 4 张、坏资产 id、非图片）。
 - e2e_gpu_test.py：/api/generate、工作流步骤执行、/api/pipeline/restyle。
+- e2e_gpu_gap_test.py：/api/generate/ref 的真实出图（单图 + 多图）。
 - test_ai_pipelines.py：watermark/ai、seamless/ai、restyle 三个管线的真实出图。
 - /api/pipeline/threeview：三视图端点（需 GPU，见 e2e_gpu_test 说明）。
 
@@ -252,6 +254,19 @@ check("未知步骤 → 404", r.status_code == 404, str(r.status_code))
 r = client.post("/api/runs/zzzzzzzzzzzz/run-all")
 check("未知 run 的 run-all → 404", r.status_code == 404, str(r.status_code))
 
+
+print("== 参考图生成（图生图）的输入校验 ==")
+r = client.post("/api/generate/ref", data={"prompt": "测试"})
+check("无参考图 → 400", r.status_code == 400, r.json().get("detail", "")[:40])
+r = client.post("/api/generate/ref", data={"prompt": "测试"},
+                files=[("refs", (f"r{i}.png", png(matte_src), "image/png")) for i in range(5)])
+check("超过 4 张 → 400", r.status_code == 400, r.json().get("detail", "")[:40])
+r = client.post("/api/generate/ref", data={"prompt": "测试", "refAssetIds": "notexist"},
+                files=[("refs", ("a.png", png(matte_src), "image/png"))])
+check("资产 id 不存在 → 400", r.status_code == 400, r.json().get("detail", "")[:40])
+r = client.post("/api/generate/ref", data={"prompt": "测试"},
+                files=[("refs", ("a.png", b"notanimage", "image/png"))])
+check("参考图非图片 → 400", r.status_code == 400, r.json().get("detail", "")[:40])
 
 print("== 错误输入 ==")
 r = client.post("/api/pipeline/matte", files={"file": ("x.png", b"notanimage", "image/png")})
