@@ -51,6 +51,8 @@ function Shell() {
     }
   }
 
+  // 顶栏底座名只依赖后端状态，与当前页签无关：原来写 [tab] 会导致每切一次
+  // 页签就重拉一遍 health + providers，纯属浪费
   useEffect(() => {
     Promise.all([api.health(), api.providers()])
       .then(([h, p]) => {
@@ -58,7 +60,7 @@ function Shell() {
         setActiveLabel(act ? act.label : h.activeProvider)
       })
       .catch(() => setActiveLabel('后端未连接'))
-  }, [tab])
+  }, [])
 
   // 分栏宽度走 CSS 变量，五个视图共用同一套，切换 tab 不跳变
   const style = {

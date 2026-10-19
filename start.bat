@@ -155,7 +155,7 @@ if errorlevel 1 (
       rem Plain uvicorn instead of uvicorn[standard]: skips PyYAML/uvloop,
       rem which are the packages that need a C compiler on brand-new Python.
       echo        Retrying without optional extras ^(core packages only^) ...
-      "%PY%" -m pip install --disable-pip-version-check fastapi uvicorn pillow numpy python-multipart aiofiles httpx opencv-python-headless -i https://mirrors.aliyun.com/pypi/simple
+      "%PY%" -m pip install --disable-pip-version-check fastapi uvicorn pillow numpy python-multipart httpx opencv-python-headless -i https://mirrors.aliyun.com/pypi/simple
     )
   )
   "%PY%" -c "import fastapi, uvicorn, PIL, numpy, cv2" >nul 2>nul

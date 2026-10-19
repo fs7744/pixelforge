@@ -8,7 +8,13 @@ GPU 相关（/api/generate、AI 编辑、工作流步骤）由 e2e_gpu_test.py �
 """
 import io
 import json
+import sys
 import zipfile
+from pathlib import Path
+
+# 按 `python backend/e2e_api_test.py` 直接跑时，sys.path[0] 是 backend/，
+# 没有仓库根，`import backend.app.main` 会失败。与 smoke_test.py 同一做法。
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from fastapi.testclient import TestClient
 from PIL import Image

@@ -181,7 +181,7 @@ if [ -n "$MISSING" ]; then
 
   # 兜底依赖集：不含 uvicorn[standard]，因此不会拉 PyYAML/uvloop 这些需要编译的包。
   # 少了 extras 只影响 --reload 的 watchfiles 热重载与 httptools 提速，功能不受影响。
-  CORE_FALLBACK=(fastapi uvicorn pillow numpy python-multipart aiofiles httpx opencv-python-headless)
+  CORE_FALLBACK=(fastapi uvicorn pillow numpy python-multipart httpx opencv-python-headless)
   MIRROR="https://mirrors.aliyun.com/pypi/simple"
 
   if ! pip_install -r "$REQ"; then

@@ -8,7 +8,9 @@ uvicorn[standard]>=0.27
 pillow>=10.0
 numpy>=1.26
 python-multipart>=0.0.9
-aiofiles>=23.2
+
+# 测试用：fastapi.testclient.TestClient 依赖（backend/e2e_api_test.py、
+# backend/coverage_api_test.py 等脚本，见 README「测试」一节）
 httpx>=0.27
 
 # 抠图 GrabCut 路径（无 GUI 依赖，服务器可用）。缺失时 matte 退到纯颜色键。

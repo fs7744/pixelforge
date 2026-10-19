@@ -218,6 +218,18 @@ export default function Workbench({ onSendToPost }: Props) {
   const [meta, setMeta] = useState<any>(null)
   // 参考图（图生图）：本地文件 + objectURL 缩略图，移除时立即释放
   const [refItems, setRefItems] = useState<{ file: File; url: string }[]>([])
+  // 切 tab 卸载时统一回收 object URL：单张移除时 removeRef 已各自 revoke
+  // （重复 revoke 是无害操作），没有这段的话每次切走工作台都漏一批 blob
+  const refItemsRef = useRef(refItems)
+  useEffect(() => {
+    refItemsRef.current = refItems
+  }, [refItems])
+  useEffect(
+    () => () => {
+      for (const it of refItemsRef.current) URL.revokeObjectURL(it.url)
+    },
+    [],
+  )
   // 参考图另一种来源：直接从资产库挑（不用先下载再上传）
   const [refAssetIds, setRefAssetIds] = useState<string[]>([])
   const [pickerOpen, setPickerOpen] = useState(false)

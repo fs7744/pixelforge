@@ -11,6 +11,7 @@ import zipfile
 from typing import Any, Dict, List, Optional
 
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
+from fastapi.concurrency import run_in_threadpool
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
@@ -27,10 +28,18 @@ from .pipelines import watermark as wm_pipe
 from .providers import REGISTRY, get_provider
 
 app = FastAPI(title="PixelForge MVP", version="0.1.0")
+# 本地工作站：只可能来自本机浏览器（生产同源；开发态 vite 也代理 /api，
+# 见 frontend/vite.config.ts）。原写法 allow_origins=["*"] 与
+# allow_credentials=True 并存是 CORS 规范禁止的组合，浏览器会整组拒绝；
+# 且本服务不使用 Cookie / 会话，没有任何 credentialed 请求，
+# 所以显式列来源 + allow_credentials=False 既合法又够用。
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
+    allow_origins=[
+        "http://127.0.0.1:8787",
+        "http://localhost:8787",
+    ],
+    allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -266,8 +275,27 @@ async def generate_with_refs(
 
 
 # ---------- 后处理管线 ----------
+# 上传上限：误拖进来的几百 MB「图片」会整体读进内存，直接把服务打爆。
+# 64MB 对 PNG 精灵表 / 场景图绰绰有余。分块读、超限即断——
+# 不能先 read() 完再判断，那时内存已经吃满了。
+MAX_UPLOAD_BYTES = 64 * 1024 * 1024
+
+
 async def _read_image(file: UploadFile) -> Image.Image:
-    raw = await file.read()
+    declared = getattr(file, "size", None)
+    if declared and declared > MAX_UPLOAD_BYTES:
+        raise HTTPException(400, f"文件过大（上限 {MAX_UPLOAD_BYTES // (1024 * 1024)}MB）")
+    chunks: List[bytes] = []
+    total = 0
+    while True:
+        chunk = await file.read(1024 * 1024)
+        if not chunk:
+            break
+        total += len(chunk)
+        if total > MAX_UPLOAD_BYTES:
+            raise HTTPException(400, f"文件过大（上限 {MAX_UPLOAD_BYTES // (1024 * 1024)}MB）")
+        chunks.append(chunk)
+    raw = b"".join(chunks)
     if not raw:
         raise HTTPException(400, "空文件")
     try:
@@ -284,7 +312,10 @@ async def pipeline_matte(
     sample: str = Form("topleft"),
 ):
     img = await _read_image(file)
-    out, meta = matte_pipe.connected_matte(img, tolerance=tolerance, feather=feather, sample=sample)
+    # 抠图可能跑数秒（u2net CPU 推理），卸载到线程池，别占着事件循环
+    out, meta = await run_in_threadpool(
+        matte_pipe.connected_matte, img,
+        tolerance=tolerance, feather=feather, sample=sample)
     item = storage.save_asset(out, kind="matte", meta={"pipeline": "matte", **meta})
     return {"asset": item, "meta": meta}
 
@@ -298,14 +329,19 @@ async def pipeline_resize(
     variant: str = Form("v1"),
 ):
     img = await _read_image(file)
-    if mode == "rpgmaker":
-        out, meta = resize_pipe.rpgmaker(img, variant=variant)
-    elif mode == "fit":
-        out = resize_pipe.fit_pad(img, (width, height))
-        meta = {"mode": "fit", "size": [width, height]}
-    else:
-        out = resize_pipe.hard_resize(img, (width, height))
-        meta = {"mode": "hard", "size": [width, height], "interpolation": "nearest"}
+
+    def _resize():
+        if mode == "rpgmaker":
+            out, meta = resize_pipe.rpgmaker(img, variant=variant)
+        elif mode == "fit":
+            out = resize_pipe.fit_pad(img, (width, height))
+            meta = {"mode": "fit", "size": [width, height]}
+        else:
+            out = resize_pipe.hard_resize(img, (width, height))
+            meta = {"mode": "hard", "size": [width, height], "interpolation": "nearest"}
+        return out, meta
+
+    out, meta = await run_in_threadpool(_resize)
     item = storage.save_asset(out, kind="resized", meta={"pipeline": "resize", **meta})
     return {"asset": item, "meta": meta}
 
@@ -321,14 +357,19 @@ async def pipeline_sheet_split(
     tolerance: int = Form(80),
 ):
     img = await _read_image(file)
-    frames, meta = sheet_pipe.split_sheet(img, cols, rows)
-    if matte:
-        cleaned = []
-        for i, f in enumerate(frames):
-            m, minfo = matte_pipe.connected_matte(f, tolerance=tolerance)
-            cleaned.append(m)
-            meta["frames"][i]["matte"] = minfo
-        frames = cleaned
+
+    def _split():
+        frames, meta = sheet_pipe.split_sheet(img, cols, rows)
+        if matte:
+            cleaned = []
+            for i, f in enumerate(frames):
+                m, minfo = matte_pipe.connected_matte(f, tolerance=tolerance)
+                cleaned.append(m)
+                meta["frames"][i]["matte"] = minfo
+            frames = cleaned
+        return frames, meta
+
+    frames, meta = await run_in_threadpool(_split)
     items = [
         storage.save_asset(f, kind="frame", name=f"frame-{i:02d}", meta={"pipeline": "sheet-split", "index": i})
         for i, f in enumerate(frames)
@@ -342,7 +383,7 @@ async def pipeline_sheet_compose(
     cols: int = Form(4),
 ):
     frames = [await _read_image(f) for f in files]
-    sheet, meta = sheet_pipe.compose_sheet(frames, cols)
+    sheet, meta = await run_in_threadpool(sheet_pipe.compose_sheet, frames, cols)
     item = storage.save_asset(sheet, kind="sheet", meta={"pipeline": "sheet-compose", **meta.get("grid", {})})
     return {"asset": item, "index": meta}
 
@@ -430,8 +471,8 @@ async def pipeline_sprite_compose(payload: SpriteComposePayload):
         raise HTTPException(400, f"一次最多合成 64 帧，收到 {len(ids)} 帧")
 
     imgs = [_load_asset_image(i) for i in ids]
-    sheet, frames, index, meta = sprite_loop.compose(
-        imgs, cols=payload.cols, size=payload.size, anchor=payload.anchor,
+    sheet, frames, index, meta = await run_in_threadpool(
+        sprite_loop.compose, imgs, cols=payload.cols, size=payload.size, anchor=payload.anchor,
         matte=payload.matte, tolerance=payload.tolerance, feather=payload.feather,
         colors=payload.colors,
     )
@@ -461,8 +502,9 @@ async def pipeline_pixelize(
     from .pipelines import pixelize as pixelize_pipe
 
     img = await _read_image(file)
-    out, meta = pixelize_pipe.pixelize(img, colors=colors, pixel_size=pixel_size,
-                                       dither=dither, palette=palette)
+    out, meta = await run_in_threadpool(
+        pixelize_pipe.pixelize, img,
+        colors=colors, pixel_size=pixel_size, dither=dither, palette=palette)
     item = storage.save_asset(out, kind="pixelized", meta={"pipeline": "pixelize", **meta})
     return {"asset": item, "meta": meta}
 
@@ -477,7 +519,8 @@ async def pipeline_seamless(
     from .pipelines import seamless as seamless_pipe
 
     img = await _read_image(file)
-    out, meta = seamless_pipe.extend_horizontal(img, times=times, blend=blend, mirror=mirror)
+    out, meta = await run_in_threadpool(
+        seamless_pipe.extend_horizontal, img, times=times, blend=blend, mirror=mirror)
     item = storage.save_asset(out, kind="seamless", meta={"pipeline": "seamless", **meta})
     return {"asset": item, "meta": meta}
 
@@ -491,7 +534,7 @@ async def pipeline_tile(
     from .pipelines import tile as tile_pipe
 
     img = await _read_image(file)
-    out, meta = tile_pipe.make_seamless(img, band=band, feather=feather)
+    out, meta = await run_in_threadpool(tile_pipe.make_seamless, img, band=band, feather=feather)
     item = storage.save_asset(out, kind="tile", meta={"pipeline": "tile", **meta})
     return {"asset": item, "meta": meta}
 
@@ -500,7 +543,7 @@ async def pipeline_tile(
 async def unload_diffusers():
     from .providers.diffusers_local import DiffusersProvider
 
-    DiffusersProvider.unload()
+    await run_in_threadpool(DiffusersProvider.unload)
     return {"ok": True, "message": "已卸载模型并清空显存缓存"}
 
 
@@ -513,7 +556,8 @@ async def pipeline_watermark(
 ):
     img = await _read_image(file)
     mask_img = await _read_image(mask) if mask is not None else None
-    out, meta = wm_pipe.remove_watermark(img, mask=mask_img, size=size, strength=strength)
+    out, meta = await run_in_threadpool(
+        wm_pipe.remove_watermark, img, mask=mask_img, size=size, strength=strength)
     if not meta.get("applied"):
         return {"asset": None, "meta": meta}
     item = storage.save_asset(out, kind="watermark", meta={"pipeline": "watermark", **meta})
@@ -695,8 +739,9 @@ async def pipeline_char_pixel_repixel(payload: CharRepixelPayload):
     if not payload.draftAssetId:
         raise ValueError("需要 AI 原稿的资产 id（draftAssetId）")
     draft = _load_asset_image(payload.draftAssetId)
-    out, meta = charpixel.repixel(
-        draft, payload.grid, payload.colors, payload.dither, payload.background)
+    out, meta = await run_in_threadpool(
+        charpixel.repixel, draft, payload.grid, payload.colors,
+        payload.dither, payload.background)
     item = storage.save_asset(
         out, kind="charpixel", name=f"人物像素化-{payload.grid}格",
         meta={**meta, "draftAssetId": payload.draftAssetId},
@@ -812,8 +857,9 @@ async def pipeline_threeview_step(payload: ThreeViewStepPayload):
         if len(ids) != 3:
             raise ValueError(f"拼板需要按 正/侧/背 顺序给 3 张图，收到 {len(ids)} 张")
         imgs = [_load_asset_image(i) for i in ids]
-        cw, ch = tv_pipe._cell(payload.width, payload.height)
-        strip, cmeta = tv_pipe.compose_three_view(imgs, cell=(cw, ch))
+        cw, ch = tv_pipe.cell(payload.width, payload.height)
+        strip, cmeta = await run_in_threadpool(
+            tv_pipe.compose_three_view, imgs, cell=(cw, ch))
         item = storage.save_asset(
             strip, kind="generated", name="threeview-三视图拼板",
             meta={"pipeline": "threeview", "view": "三视图拼板", "compose": cmeta},
@@ -879,7 +925,8 @@ async def asset_thumb(asset_id: str, w: int = 160):
     if not item:
         raise HTTPException(404, "资产不存在")
     try:
-        p = storage.ensure_thumb(item, w)
+        # 缩略图首次生成要解码 + 重绘 + 编码 PNG，进线程池，别占事件循环
+        p = await run_in_threadpool(storage.ensure_thumb, item, w)
     except FileNotFoundError:
         raise HTTPException(404, "文件缺失")
     return FileResponse(str(p), media_type="image/png",
@@ -903,11 +950,16 @@ async def download_asset(asset_id: str, label: Optional[int] = None):
         raise HTTPException(404, "文件缺失")
     if not label:
         return FileResponse(str(path), media_type="image/png", filename=f"{item['name']}.png")
-    img = Image.open(path).convert("RGBA")
-    img = storage.stamp_ai_label(img)
-    buf = io.BytesIO()
-    img.save(buf, "PNG")
-    buf.seek(0)
+
+    def _stamp():
+        img = Image.open(path).convert("RGBA")
+        img = storage.stamp_ai_label(img)
+        buf = io.BytesIO()
+        img.save(buf, "PNG")
+        buf.seek(0)
+        return buf
+
+    buf = await run_in_threadpool(_stamp)
     return StreamingResponse(buf, media_type="image/png",
                              headers={"Content-Disposition":
                                       f'attachment; filename="{asset_id}.png"'})
@@ -928,17 +980,22 @@ async def export_zip(payload: Dict[str, List[str]]):
     items = [i for i in items if i]
     if not items:
         raise HTTPException(400, "没有可导出的资产")
-    buf = io.BytesIO()
-    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
-        index = []
-        for item in items:
-            p = storage.asset_path(item)
-            if not p.exists():      # 索引里有、磁盘上没了：跳过而不是整包 500
-                continue
-            zf.write(p, arcname=item["file"])
-            index.append({k: item[k] for k in ("id", "name", "file", "width", "height", "kind")})
-        zf.writestr("index.json", json.dumps(index, ensure_ascii=False, indent=2))
-    buf.seek(0)
+
+    def _zip():
+        buf = io.BytesIO()
+        with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+            index = []
+            for item in items:
+                p = storage.asset_path(item)
+                if not p.exists():      # 索引里有、磁盘上没了：跳过而不是整包 500
+                    continue
+                zf.write(p, arcname=item["file"])
+                index.append({k: item[k] for k in ("id", "name", "file", "width", "height", "kind")})
+            zf.writestr("index.json", json.dumps(index, ensure_ascii=False, indent=2))
+        buf.seek(0)
+        return buf
+
+    buf = await run_in_threadpool(_zip)
     return StreamingResponse(buf, media_type="application/zip",
                              headers={"Content-Disposition": 'attachment; filename="pixelforge-export.zip"'})
 

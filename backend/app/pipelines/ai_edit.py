@@ -24,7 +24,7 @@ from typing import Any, Dict, Optional, Tuple
 
 from PIL import Image
 
-from ..config import ROOT, load_settings
+from ..config import ROOT, load_settings, resolve_path
 
 # 默认 Edit 底座（与 workflows.py 的 txt2imgModel 默认值同一套约定）
 DEFAULT_EDIT_MODEL = "models/qwen-image-edit-2511"
@@ -32,14 +32,17 @@ DEFAULT_EDIT_MODEL = "models/qwen-image-edit-2511"
 
 def resolve_edit_model(explicit: Optional[str] = None) -> str:
     """解析 Qwen-Image-Edit 底座路径，解析不到就抛带指引的错误。"""
-    if explicit and os.path.isdir(explicit):
-        return explicit
+    # 相对路径按项目根解析：settings.json 里的模型路径可能是在别的目录下配的
+    if explicit:
+        hit = resolve_path(explicit)
+        if os.path.isdir(hit):
+            return hit
     try:
         s = load_settings()
         for cfg in (s.get("providers") or {}).values():
             if not isinstance(cfg, dict):
                 continue
-            mid = str(cfg.get("model") or "").strip()
+            mid = resolve_path(str(cfg.get("model") or ""))
             if not mid or not os.path.isdir(mid):
                 continue
             from ..providers.diffusers_local import detect_family

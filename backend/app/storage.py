@@ -13,6 +13,13 @@ from .config import ASSETS_DIR, ensure_dirs
 
 INDEX_PATH = ASSETS_DIR / "index.json"
 
+# 进程内索引缓存：index.json 已到 263KB/513 条，每次保存都全量读盘解析
+# 再全量重写，工作流一步存 16 帧就是 16 轮全量 IO。缓存后保存仍是全量
+# 原子写（正确性优先），但读路径不再碰盘。
+# 前提：单进程部署（start.sh 默认单 worker uvicorn）。多 worker 时各进程
+# 缓存会互相看不到，届时需要换回每次读盘或改存储后端。
+_INDEX_CACHE: Optional[List[Dict[str, Any]]] = None
+
 # ---------- 分类标签 ----------
 # 中文名只在这里维护一份，前端拿 facets 直接渲染。
 # 之前的教训：Library.tsx 里手写了 6 个 kind 的 chips，而实际写入的 kind 有 12 种，
@@ -69,21 +76,28 @@ def asset_pipeline(item: Dict[str, Any]) -> str:
 
 
 def _load_index() -> List[Dict[str, Any]]:
-    ensure_dirs()
-    if INDEX_PATH.exists():
-        try:
-            return json.loads(INDEX_PATH.read_text(encoding="utf-8"))
-        except Exception:
-            return []
-    return []
+    global _INDEX_CACHE
+    if _INDEX_CACHE is None:
+        ensure_dirs()
+        if INDEX_PATH.exists():
+            try:
+                _INDEX_CACHE = json.loads(INDEX_PATH.read_text(encoding="utf-8"))
+            except Exception:
+                _INDEX_CACHE = []
+        else:
+            _INDEX_CACHE = []
+    # 防御性拷贝：调用方的增删改不直接污染缓存，缓存只由 _save_index 推进
+    return list(_INDEX_CACHE)
 
 
 def _save_index(items: List[Dict[str, Any]]) -> None:
+    global _INDEX_CACHE
     # 先写临时文件再原子替换：直接覆盖时若进程中断，index.json 会变成
     # 半截 JSON，_load_index 只能返回空列表，整个资产库等于丢失。
     tmp = INDEX_PATH.with_suffix(".json.tmp")
     tmp.write_text(json.dumps(items, ensure_ascii=False, indent=2), encoding="utf-8")
     tmp.replace(INDEX_PATH)
+    _INDEX_CACHE = list(items)
 
 
 def stamp_ai_label(img: Image.Image, text: str = "AI") -> Image.Image:

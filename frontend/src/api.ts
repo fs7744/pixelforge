@@ -459,7 +459,9 @@ export const api = {
       a.href = url
       a.download = 'pixelforge-export.zip'
       a.click()
-      URL.revokeObjectURL(url)
+      // 不能马上 revoke：部分浏览器（Firefox）在 click() 返回时还没开始
+      // 读取 blob，立即撤销会让下载失败。延后一小会儿再回收。
+      setTimeout(() => URL.revokeObjectURL(url), 1000)
     }),
 
   // ---- 工作流 ----

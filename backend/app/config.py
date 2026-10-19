@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 from typing import Any, Dict
 
@@ -38,6 +39,21 @@ DEFAULT_SETTINGS: Dict[str, Any] = {
 
 def ensure_dirs() -> None:
     ASSETS_DIR.mkdir(parents=True, exist_ok=True)
+
+
+def resolve_path(p: str) -> str:
+    """把设置里的相对路径按项目根目录解析。
+
+    模型路径（如 "models/z-image-turbo"）存进 settings.json 后， historically
+    依赖「从项目根目录启动」才找得到；换成别的目录启动 uvicorn 就会静默
+    找不到模型。这里兜底：绝对路径 / 已存在的路径原样返回，否则按 ROOT
+    拼一次，拼出来存在就用，不存在也返回原值（让调用方报它自己的错）。
+    """
+    p = (p or "").strip()
+    if not p or os.path.isabs(p) or Path(p).exists():
+        return p
+    cand = ROOT / p
+    return str(cand) if cand.exists() else p
 
 
 def load_settings() -> Dict[str, Any]:

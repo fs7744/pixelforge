@@ -1,0 +1,42 @@
+name: CI
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+
+jobs:
+  # 后端测试全部无需 GPU / 无需模型（确定性管线 + in-process TestClient）
+  backend:
+    runs-on: ubuntu-latest
+    env:
+      # 测试脚本按 `python backend/xxx.py` 直接跑，依赖仓库根在 sys.path 上
+      PYTHONPATH: .
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r backend/requirements.txt
+      - name: Deterministic pipeline smoke test
+        run: python backend/smoke_test.py
+      - name: API end-to-end test
+        run: python backend/e2e_api_test.py
+      - name: Route coverage test
+        run: python backend/coverage_api_test.py
+
+  # 前端：tsc 类型检查 + vite 构建（与 package.json 的 build 脚本一致）
+  frontend:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+      - run: npm ci
+        working-directory: frontend
+      - run: npm run build
+        working-directory: frontend

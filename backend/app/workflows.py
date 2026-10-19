@@ -18,7 +18,7 @@ import numpy as np
 from PIL import Image
 
 from . import storage
-from .config import DATA_DIR, load_settings
+from .config import DATA_DIR, load_settings, resolve_path
 from .pipelines import matte as matte_pipe
 from .pipelines import resize as resize_pipe
 from .pipelines import sheet as sheet_pipe
@@ -471,8 +471,48 @@ def _fill(template: str, run: Dict[str, Any], step: Dict[str, Any], idx: int) ->
     )
 
 
+# ---------------- Run 并发保护 ----------------
+# run 状态是「读-改-写」落盘：两个请求同时操作同一个 run（两个标签页各点
+# 一次「执行此步」、或 run-all 与单步并行）会互相覆盖 artifacts，后写的赢。
+# 每个 run 一把进程内锁，同一时刻只放一个步骤执行；已在执行中的步骤直接
+# 拒绝，避免同一步被跑两遍。
+# 进程崩溃会留下 status=running 的残留记录，锁已经随进程消亡，此时按
+# startedAt 超时自动重置：单步最慢的是视频生成（约 90s）与 40 步编辑
+# （约 4 分钟），10 分钟足够宽裕——真卡死时允许重跑比永远拒绝重跑重要。
+_RUN_LOCKS: Dict[str, asyncio.Lock] = {}
+_STALE_RUNNING_SECONDS = 600
+
+
+def _run_lock(run_id: str) -> asyncio.Lock:
+    # asyncio 单线程：get-or-create 之间没有 await，不需要额外加锁
+    lock = _RUN_LOCKS.get(run_id)
+    if lock is None:
+        lock = asyncio.Lock()
+        _RUN_LOCKS[run_id] = lock
+    return lock
+
+
+def _reset_stale_running(step_state: Dict[str, Any]) -> bool:
+    """把上次进程崩溃遗留的 running 重置为 failed；返回是否重置过。"""
+    started = int(step_state.get("startedAt") or 0)
+    if int(time.time()) - started < _STALE_RUNNING_SECONDS:
+        return False
+    step_state.update({
+        "status": "failed",
+        "error": "服务中断导致步骤未完成（已自动重置，可重新执行）",
+        "finishedAt": int(time.time()),
+    })
+    return True
+
+
 # ---------------- 步骤执行 ----------------
 async def run_step(run_id: str, step_id: str, overrides: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    """执行单步（持 run 锁，理由见 _run_lock 说明）。"""
+    async with _run_lock(run_id):
+        return await _run_step_locked(run_id, step_id, overrides)
+
+
+async def _run_step_locked(run_id: str, step_id: str, overrides: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     run = get_run(run_id)
     if not run:
         raise KeyError("run 不存在")
@@ -485,6 +525,12 @@ async def run_step(run_id: str, step_id: str, overrides: Optional[Dict[str, Any]
     step_def = step_defs[index]
     step_state = run["steps"][index]
     overrides = overrides or {}
+
+    # 并发保护：已在执行中的步骤直接拒绝（崩溃残留的 running 按超时重置）
+    if step_state.get("status") == "running":
+        if not _reset_stale_running(step_state):
+            raise RuntimeError(f"步骤「{step_state['name']}」正在执行中，请勿重复触发")
+        _save_run(run)
 
     # 依赖检查：前面的 generate/compose 步骤必须完成
     if index > 0:
@@ -607,8 +653,9 @@ async def run_step(run_id: str, step_id: str, overrides: Optional[Dict[str, Any]
                         and detect_family(provider._resolve_model()) == "qwen_edit"
                     )
                     if edit_relay:
-                        txt_model = step_def.get("txt2imgModel") or str(
-                            Path(__file__).resolve().parents[2] / "models" / "z-image-turbo")
+                        # txt2imgModel 在工作流定义里是相对路径，按项目根解析
+                        txt_model = resolve_path(step_def.get("txt2imgModel") or str(
+                            Path(__file__).resolve().parents[2] / "models" / "z-image-turbo"))
                         if not os.path.isdir(txt_model):
                             # 没装生成底座：退回单模型链（提示词锚定），
                             # 并把原因写进 meta，别让用户以为是 Bug
@@ -873,9 +920,13 @@ async def run_all(run_id: str) -> Dict[str, Any]:
     run = get_run(run_id)
     if not run:
         raise KeyError("run 不存在")
-    wf = get_workflow(run["workflowId"])
-    for i, step_def in enumerate(wf["steps"]):
-        if run["steps"][i]["status"] == "done":
-            continue
-        run = await run_step(run_id, step_def["id"])
+    # 全程持锁：边顺序跑边让单步请求插进来，两边会互相覆盖状态
+    async with _run_lock(run_id):
+        wf = get_workflow(run["workflowId"])
+        for i, step_def in enumerate(wf["steps"]):
+            # 锁内重读最新状态，反映此前单步请求的改动
+            run = get_run(run_id) or run
+            if run["steps"][i]["status"] == "done":
+                continue
+            run = await _run_step_locked(run_id, step_def["id"])
     return run

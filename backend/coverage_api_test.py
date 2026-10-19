@@ -9,14 +9,19 @@
 - test_ai_pipelines.py：watermark/ai、seamless/ai、restyle 三个管线的真实出图。
 - /api/pipeline/threeview：三视图端点（需 GPU，见 e2e_gpu_test 说明）。
 
-用法：PYTHONPATH=. python backend/coverage_api_test.py
+用法：python backend/coverage_api_test.py（自动把仓库根加进 sys.path）
 """
 import inspect
 import io
 import json
 import os
+import sys
 import zipfile
 from pathlib import Path
+
+# 按 `python backend/coverage_api_test.py` 直接跑时，sys.path[0] 是 backend/，
+# 没有仓库根，`import backend.app.main` 会失败。与 smoke_test.py 同一做法。
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import numpy as np
 

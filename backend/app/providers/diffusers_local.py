@@ -27,6 +27,7 @@ import os
 from typing import Any, Dict, Optional
 
 from .base import BaseProvider, ProviderResult
+from ..config import resolve_path
 
 _CACHE: Dict[str, Any] = {}
 _CAPS: Dict[str, Dict[str, Any]] = {}
@@ -337,9 +338,10 @@ class DiffusersProvider(BaseProvider):
     def _resolve_model(self) -> str:
         model = (self.cfg.get("model") or "").strip()
         if model:
-            return model
+            # 相对路径按项目根解析：从别的目录启动服务也能找到 models/ 下的底座
+            return resolve_path(model)
         # 默认：Z-Image-Turbo（本地目录；首次使用请在设置里确认实际路径）
-        return os.environ.get("PIXELFORGE_MODEL", "models/z-image-turbo")
+        return resolve_path(os.environ.get("PIXELFORGE_MODEL", "models/z-image-turbo"))
 
     def _load(self, model_id: str):
         if model_id in _CACHE:

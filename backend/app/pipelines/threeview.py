@@ -337,7 +337,7 @@ def compose_three_view(
 # 单步执行：正视图 / 侧背视图 / （拼板走 compose_three_view）
 # 分步界面按这三步推进，任何一步都能单独重跑；run_three_view 只是把它们串起来。
 # --------------------------------------------------------------------------- #
-def _cell(width: int, height: int) -> Tuple[int, int]:
+def cell(width: int, height: int) -> Tuple[int, int]:
     """对齐到 16 的倍数（下采样约束），最小 64。"""
     return max(64, int(width) // 16 * 16), max(64, int(height) // 16 * 16)
 
@@ -351,7 +351,7 @@ def _engines(*, provider_id: Optional[str] = None,
     Provider，也可能有别的请求把模型换进换出了。代价只有一次设置读取
     加几个目录判断，不值得做缓存。
     """
-    from ..config import ROOT, load_settings
+    from ..config import ROOT, load_settings, resolve_path
     from ..providers import get_provider
     from ..providers.diffusers_local import DiffusersProvider, detect_family
 
@@ -366,7 +366,9 @@ def _engines(*, provider_id: Optional[str] = None,
         getattr(active, "id", "") == "diffusers"
         and detect_family(active._resolve_model()) == "qwen_edit"
     )
-    txt_model = txt2img_model or str(ROOT / "models" / "z-image-turbo")
+    # txt2img_model 可能是相对路径（工作流里写的就是 "models/z-image-turbo"），
+    # 按项目根解析，从别的目录启动服务也找得到
+    txt_model = resolve_path(txt2img_model or str(ROOT / "models" / "z-image-turbo"))
     if is_editor and not os.path.isdir(txt_model):
         raise RuntimeError(
             "当前 Provider 是 Qwen-Image-Edit 编辑器（无法从零出图），"
@@ -414,7 +416,7 @@ async def run_front(
                               txt2img_model=txt2img_model)
     st = get_style(style)
     sw = style_words(style)
-    cw, ch = _cell(width, height)
+    cw, ch = cell(width, height)
     prompt = _view_prompt((subject or "").strip(), "front", sw)
 
     t = time.time()
@@ -465,7 +467,7 @@ async def run_derived(
 
     eng = engines or _engines(provider_id=provider_id, provider_cfg=provider_cfg,
                               txt2img_model=txt2img_model)
-    cw, ch = _cell(width, height)
+    cw, ch = cell(width, height)
     t = time.time()
 
     if eng["editModel"]:
@@ -542,7 +544,7 @@ async def run_three_view(
         views.append(out)
         per_view.append(vmeta)
 
-    cw, ch = _cell(width, height)
+    cw, ch = cell(width, height)
     strip, cmeta = compose_three_view(views, cell=(cw, ch))
     st = get_style(style)
     meta: Dict[str, Any] = {

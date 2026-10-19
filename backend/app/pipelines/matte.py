@@ -366,43 +366,6 @@ def _mask_keep(rgb: np.ndarray) -> np.ndarray:
     return np.array(mask) >= 128
 
 
-def _u2net_session():
-    global _SESSION, _U2NET_ERR
-    if _SESSION is not None or _U2NET_ERR is not None:
-        return _SESSION
-    # 关键：权重文件不存在时 **绝不** 触发 rembg 的联网下载（会卡死数十分钟，
-    # 直接拖垮整个请求）。只有本地权重就绪才尝试 new_session。
-    if not os.path.exists(_U2NET_ONNX):
-        _U2NET_ERR = f"u2net 权重缺失：{_U2NET_ONNX}（请先放置权重）"
-        return None
-    try:
-        from rembg import new_session
-        _SESSION = new_session("u2net")
-    except Exception as e:  # 权重损坏 / onnxruntime 不可用
-        _U2NET_ERR = f"{type(e).__name__}: {e}"
-        _SESSION = None
-    return _SESSION
-
-
-def u2net_available() -> bool:
-    return _u2net_session() is not None
-
-
-def u2net_status() -> dict:
-    _u2net_session()
-    return {"available": _SESSION is not None, "error": _U2NET_ERR}
-
-
-def _mask_keep(rgb: np.ndarray) -> np.ndarray:
-    """显著性分割得到 kept 掩码（阈值二值化，像素素材不要软边）。"""
-    from rembg import remove
-    session = _u2net_session()
-    if session is None:
-        raise RuntimeError(_U2NET_ERR or "u2net session unavailable")
-    mask = remove(Image.fromarray(rgb), session=session, only_mask=True)
-    return np.array(mask) >= 128
-
-
 # --------------------------------------------------------------------------- #
 # 路径 2：GrabCut 图割
 # --------------------------------------------------------------------------- #
