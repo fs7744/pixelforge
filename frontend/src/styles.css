@@ -574,3 +574,79 @@ button, input, textarea, select { font-family: inherit; }
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
 .sprite-redo { padding: 1px 6px !important; font-size: 12px !important; }
+
+/* ---------- 画风转换：画风画廊 ---------- */
+/* 15 个画风平铺成 chips 无法判断「长什么样」，这里按组铺成带示例图的卡片；
+   没有示例图（gen_style_samples.py 没跑过）就退回纯文字卡，不留空框。 */
+.style-gallery {
+  display: flex; flex-direction: column; gap: 12px;
+  margin-top: 8px; max-height: 46vh; overflow-y: auto; padding-right: 2px;
+}
+.style-group-name {
+  font-family: var(--chip); font-size: 9px; letter-spacing: 0.5px;
+  color: var(--muted); margin-bottom: 6px;
+}
+.style-cards { display: grid; grid-template-columns: repeat(3, 1fr); gap: 6px; }
+.style-card {
+  display: flex; flex-direction: column; gap: 4px; padding: 0;
+  border: 1px solid rgba(255, 255, 255, 0.15); background: transparent;
+  cursor: pointer; text-align: left; color: var(--muted);
+}
+.style-card:hover { border-color: var(--line); }
+.style-card.on { border-color: var(--green); box-shadow: 0 0 0 1px var(--green); }
+.style-card-img {
+  position: relative; display: block; aspect-ratio: 1 / 1; overflow: hidden;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.12);
+}
+.style-card-img img { width: 100%; height: 100%; object-fit: cover; display: block; }
+.style-card-ph {
+  position: absolute; inset: 0; display: grid; place-items: center; text-align: center;
+  padding: 4px; font-size: 11px; line-height: 1.4; color: var(--muted);
+}
+.style-card-name { font-size: 11px; line-height: 1.3; padding: 0 4px 4px; }
+.style-card.on .style-card-name { color: var(--green); }
+
+/* ---------- 画风转换：前后对比滑块 ---------- */
+/* 转换前后画布尺寸一致（后端编辑完放回原尺寸），所以两张图可以严格叠在一起 */
+.cmp {
+  position: relative; height: 420px; background: #0b0b0e;
+  border: 1px solid var(--line); overflow: hidden;
+  user-select: none; touch-action: none; cursor: ew-resize;
+}
+.cmp-img {
+  position: absolute; inset: 0; margin: auto;
+  max-width: 100%; max-height: 100%; width: auto; height: auto; display: block;
+}
+.cmp-after { position: absolute; inset: 0; }
+.cmp-line {
+  position: absolute; top: 0; bottom: 0; width: 2px; background: var(--green);
+  transform: translateX(-1px); pointer-events: none;
+}
+.cmp-line i {
+  position: absolute; top: 50%; left: 50%; width: 11px; height: 11px;
+  transform: translate(-50%, -50%) rotate(45deg);
+  background: var(--green); border: 2px solid #0a0a0a;
+}
+.cmp-tag {
+  position: absolute; top: 8px; font-family: var(--chip); font-size: 9px;
+  padding: 3px 6px; background: rgba(0, 0, 0, 0.62);
+  border: 1px solid var(--line); color: var(--white); pointer-events: none;
+}
+.cmp-tag.left { left: 8px; }
+.cmp-tag.right { right: 8px; border-color: var(--green); color: var(--green); }
+.cmp-wrap { display: flex; flex-direction: column; gap: 10px; }
+
+/* 会话内多次转换留档：换画风一次 2-4 分钟，靠记忆对比不现实 */
+.hist-strip { display: flex; gap: 8px; overflow-x: auto; padding-bottom: 2px; }
+.hist-item {
+  display: flex; flex-direction: column; gap: 3px; width: 96px; flex: 0 0 auto;
+  padding: 4px; border: 1px solid rgba(255, 255, 255, 0.15);
+  background: transparent; cursor: pointer;
+}
+.hist-item.on { border-color: var(--green); }
+.hist-img { aspect-ratio: 1 / 1; display: block; overflow: hidden; }
+.hist-img img { width: 100%; height: 100%; object-fit: contain; }
+.hist-name {
+  font-size: 11px; color: var(--muted); text-align: left;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}

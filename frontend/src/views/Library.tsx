@@ -46,7 +46,7 @@ function ChipRow({ title, hint, active, options, total, onPick }: ChipRowProps) 
   )
 }
 
-export default function Library() {
+export default function Library({ onRestyle }: { onRestyle?: (a: Asset) => void }) {
   const [all, setAll] = useState<Asset[]>([])
   const [facets, setFacets] = useState<AssetFacets | null>(null)
   const [kind, setKind] = useState(ALL)
@@ -246,17 +246,27 @@ export default function Library() {
                 <div className="row">
                   <button
                     className="btn btn-ghost"
-                    style={{ height: 32, fontSize: 13 }}
+                    style={{ height: 32, fontSize: 13, padding: '0 8px' }}
                     onClick={() => openPreview(a.url, a.name)}
                   >
                     放大
                   </button>
-                  <a className="btn btn-ghost" href={`/api/assets/${a.id}/download`} download={`${a.name}.png`} style={{ height: 32, fontSize: 13 }}>
+                  <a className="btn btn-ghost" href={`/api/assets/${a.id}/download`} download={`${a.name}.png`} style={{ height: 32, fontSize: 13, padding: '0 8px' }}>
                     下载
                   </a>
+                  {onRestyle && (
+                    <button
+                      className="btn btn-ghost"
+                      style={{ height: 32, fontSize: 13, padding: '0 8px', color: 'var(--green)' }}
+                      onClick={() => onRestyle(a)}
+                      title="把这张图带到画风转换页"
+                    >
+                      转画风
+                    </button>
+                  )}
                   <button
                     className="btn btn-ghost"
-                    style={{ height: 32, fontSize: 13 }}
+                    style={{ height: 32, fontSize: 13, padding: '0 8px' }}
                     onClick={() => {
                       if (confirm('删除该资产？')) api.delAsset(a.id).then(load)
                     }}
@@ -292,6 +302,11 @@ export default function Library() {
               </div>
               <div className="hint">ID {detail.id}</div>
             </div>
+            {onRestyle && (
+              <button className="btn btn-primary btn-block" onClick={() => onRestyle(detail)}>
+                转成其他画风
+              </button>
+            )}
             {detail.meta && Object.keys(detail.meta).length > 0 && (
               <div className="card">
                 <div className="label">元数据</div>

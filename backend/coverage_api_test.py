@@ -628,6 +628,57 @@ check("画风列表带 words（前端可展示）",
       all(s.get("words") for s in sty["styles"]),
       str([s["id"] for s in sty["styles"] if not s.get("words")]))
 
+print("== HD-2D 画风与画风转换 ==")
+# HD-2D 是「像素素材 + 3D 景深光照」，不是「更精细的像素」：
+# 给它配 pixelize 会把虚化和光晕一起量化成色块，3D 感直接消失。
+hd = next((s for s in sty["styles"] if s["id"] == "hd2d"), None)
+check("HD-2D 画风存在", hd is not None)
+check("HD-2D 有独立的风格词", bool(hd and hd.get("words")), (hd or {}).get("words", "")[:40])
+check("HD-2D 风格词写清像素+3D 景深",
+      all(k in (hd or {}).get("words", "") for k in ("像素", "3D", "景深", "泛光")),
+      (hd or {}).get("words", "")[:60])
+check("HD-2D 不做自动像素化（量化会抹掉景深）", not (hd or {}).get("pixelize"))
+check("HD-2D 归到「像素 · HD-2D」分组", (hd or {}).get("group") == "像素 · HD-2D",
+      str((hd or {}).get("group")))
+check("每个画风都有分组", all(s.get("group") for s in sty["styles"]),
+      str([s["id"] for s in sty["styles"] if not s.get("group")]))
+check("分组都在 STYLE_GROUPS 里",
+      all(s["group"] in sty_mod.STYLE_GROUPS for s in sty["styles"]),
+      str({s["group"] for s in sty["styles"]} - set(sty_mod.STYLE_GROUPS)))
+check("HD-2D 出现在角色/场景/视差的推荐里",
+      all("hd2d" in rec.get(k, []) for k in ("角色", "场景", "视差")),
+      str({k: rec.get(k) for k in ("角色", "场景", "视差")}))
+check("场景类首选 HD-2D", (rec.get("场景") or [""])[0] == "hd2d", str(rec.get("场景")))
+check("HD-2D 场景模板默认画风跟着换",
+      api_tpls["scene_hd2d_ref"].get("defaultStyle") == "hd2d",
+      str(api_tpls["scene_hd2d_ref"].get("defaultStyle")))
+
+# 画风转换指令：必须以「重绘成…」开头。写成「保持…完全不变，只改变画风」时，
+# 编辑底座会先读到「什么都别改」，整张图原样返回——观感就是转换没生效。
+from backend.app.pipelines import ai_edit  # noqa: E402
+
+_rp = ai_edit._restyle_prompt(sty_mod.get_style("hd2d"))
+check("转换指令以重绘动作开头", _rp.startswith("把这张图整体重绘成"), _rp[:20])
+check("转换指令带上目标画风名", "HD-2D 幻想" in _rp)
+check("转换指令带上该画风的风格词", sty_mod.get_style("hd2d")["prompt"] in _rp)
+check("转换指令用「沿用原图」做内容锚点", "沿用原图" in _rp)
+check("转换指令不写压制性措辞（完全不变 / 保持不变 / 只改变）",
+      not any(w in _rp for w in ("完全不变", "保持不变", "只改变")), _rp[-40:])
+check("restyle 支持关掉自动像素化",
+      "pixelize" in inspect.signature(ai_edit.restyle).parameters)
+check("restyle 支持 max_side（转换后放回原尺寸）",
+      "max_side" in inspect.signature(ai_edit.restyle).parameters)
+
+check("转换：未知画风 → 400",
+      client.post("/api/pipeline/restyle", data={"style": "nope"}).status_code == 400)
+_r = client.post("/api/pipeline/restyle", data={"style": "hd2d"})
+check("转换：没有输入图 → 400", _r.status_code == 400, _r.status_code)
+check("转换：缺图报错说清两种输入方式",
+      "refAssetId" in str(_r.json().get("detail", "")) or "上传" in str(_r.json().get("detail", "")),
+      str(_r.json().get("detail", ""))[:60])
+_r = client.post("/api/pipeline/restyle", data={"style": "hd2d", "refAssetId": "nope"})
+check("转换：资产不存在 → 404", _r.status_code == 404, _r.status_code)
+
 # 模板里写死画风 = 选择器失效。这几个是**编辑/提取类**指令，要求「参考原图、
 # 画风不变」，它们本来就不参与画风切换，所以不计入、也不给默认画风。
 NO_DEFAULT_STYLE = {

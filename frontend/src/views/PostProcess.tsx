@@ -479,6 +479,8 @@ export default function PostProcess({ incoming }: Props) {
             <div className="hint" style={{ marginTop: 8 }}>
               保持主体、构图、角色外观不变，只换绘画风格。像素类画风会在 AI 重绘后自动按建议参数像素化归一化
               （AI 直接出不了硬边像素，必须确定性管线收尾）。
+              <br />
+              要一次比对多个画风、拖前后滑块看效果，用顶部「画风转换」页——那边有画风画廊和结果留档。
             </div>
           </div>
         )}

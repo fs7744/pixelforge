@@ -72,9 +72,9 @@
 ```
 ┌─────────────────────────────────────────────┐
 │ 前端 React + Vite（像素风设计系统）          │
-│  views/: Workbench(工作台) Workflow(工作流)  │
-│          PostProcess(后处理) Library(素材库) │
-│          Settings(模型设置)                  │
+│  views/: Workbench(工作台) Restyle(画风转换)  │
+│          Workflow(工作流) PostProcess(后处理)│
+│          Library(素材库) Settings(模型设置)  │
 ├─────────────────────────────────────────────┤
 │ API 网关 FastAPI（backend/app/main.py）      │
 │  · Provider 路由（diffusers/a1111/云端/mock）│

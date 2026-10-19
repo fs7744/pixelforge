@@ -545,17 +545,43 @@ async def pipeline_seamless_ai(
 
 @app.post("/api/pipeline/restyle")
 async def pipeline_restyle(
-    file: UploadFile = File(...),
     style: str = Form(...),
+    # 输入两种来源可二选一：直接上传，或直接指资产库里的那张（素材库旧图换画风）
+    file: Optional[UploadFile] = File(None),
+    refAssetId: str = Form(""),
     steps: Optional[int] = Form(None),
     seed: Optional[int] = Form(None),
+    maxSide: int = Form(1024),
+    # 像素类画风默认自动接像素化；关掉可以先看 AI 重绘的原始结果
+    pixelize: bool = Form(True),
 ):
+    """图片画风转换：一张图 + 目标画风 → 编辑底座按画风重绘。
+
+    与「参考图生成」的区别：那条是「按指令画一张新图」，这条是「把这张图
+    重绘成另一种画风」——主体、构图、角色沿用原图，只换笔触/线条/上色。
+    编辑前把长边压到 1024（编辑成本随像素数涨），出图后 Lanczos 放回原尺寸，
+    所以转换前后画布尺寸一致，前端可以直接叠前后对比滑块。
+    """
     from .pipelines import ai_edit
 
-    img = await _read_image(file)
-    out, meta = await ai_edit.restyle(img, style, steps=steps, seed=seed)
-    item = storage.save_asset(out, kind="restyled", meta={"pipeline": "restyle", **meta})
-    return {"asset": item, "meta": meta}
+    # 画风先校验：未知 id 不该先读一遍图再报错
+    if styles.get_style(style) is None:
+        raise ValueError(f"未知画风：{style}")
+    if file is not None:
+        img = (await _read_image(file)).convert("RGB")
+    elif refAssetId:
+        img = _load_asset_image(refAssetId)
+    else:
+        raise ValueError("需要一张待转换的图片（上传 file 或指定 refAssetId）")
+
+    out, meta = await ai_edit.restyle(
+        img, style, steps=steps, seed=seed, max_side=maxSide, pixelize=pixelize)
+    item = storage.save_asset(
+        out, kind="restyled",
+        name=f"换画风-{meta.get('styleName') or style}",
+        meta={"pipeline": "restyle", "sourceAssetId": refAssetId or None, **meta},
+    )
+    return {"asset": item, "meta": {"pipeline": "restyle", **meta}}
 
 
 # ---------- 角色三视图（正/侧/背独立生成 + 拼板） ----------

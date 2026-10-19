@@ -76,6 +76,8 @@ export type Template = {
 export type StyleInfo = {
   id: string
   name: string
+  /** 画廊分区（像素 · HD-2D / 动漫卡通 / 写实 · 3D …） */
+  group?: string
   tags: string[]
   hint: string
   /** 实际拼进提示词的风格词（前置到开头），用于界面展示「加的是什么」 */
@@ -306,6 +308,32 @@ export const api = {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(payload),
     }).then(json),
+  /**
+   * 图片画风转换：把一张图重绘成目标画风（主体/构图沿用原图，只换笔触与上色）。
+   * 输入二选一：assetId（素材库里的图，不用先下载再上传）或 file（本地文件）。
+   * 单次 40 步约 2-4 分钟；像素类画风默认在 AI 重绘后自动像素化。
+   */
+  restyle: (
+    payload: {
+      style: string
+      assetId?: string
+      steps?: number
+      seed?: number | null
+      maxSide?: number
+      pixelize?: boolean
+    },
+    file?: File | null,
+  ) => {
+    const fd = new FormData()
+    fd.append('style', payload.style)
+    if (payload.assetId) fd.append('refAssetId', payload.assetId)
+    if (payload.steps) fd.append('steps', String(payload.steps))
+    if (payload.seed != null) fd.append('seed', String(payload.seed))
+    if (payload.maxSide) fd.append('maxSide', String(payload.maxSide))
+    fd.append('pixelize', String(payload.pixelize ?? true))
+    if (file) fd.append('file', file)
+    return fetch('/api/pipeline/restyle', { method: 'POST', body: fd }).then(json)
+  },
   pixelize: (file: File, colors: number, pixelSize: number, dither: boolean, palette: string) => {
     const fd = new FormData()
     fd.append('file', file)

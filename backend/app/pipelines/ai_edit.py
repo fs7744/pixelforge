@@ -243,10 +243,18 @@ async def extend_horizontal_ai(
 # --------------------------------------------------------------------------- #
 
 def _restyle_prompt(style: Dict[str, Any]) -> str:
+    """画风转换指令：**以「重绘成什么」开头**，内容锚点写成「沿用原图」。
+
+    为什么不写「保持主体、构图、角色外观完全不变，只改变画风」：
+    编辑底座对「保持不变 / 不要改」这类否定约束极其敏感（精灵表逐帧管线的
+    实测教训——加了这句，同一个 seed 下姿势纹丝不动）。放在句首时更糟：
+    模型会先读到「什么都别改」，整张图原样返回，观感就是「转换没生效」。
+    现在变换在句首、锚点用正向的「沿用」，既不动骨架，也不会退化成 no-op。
+    """
     return (
-        f"将这张图片整体转换为{style['name']}风格："
-        f"{style['prompt']}。保持主体内容、构图、角色外观和姿态完全不变，"
-        f"只改变绘画风格、线条和上色方式，不要添加或移除画面元素。"
+        f"把这张图整体重绘成{style['name']}：{style['prompt']}。"
+        f"用这套画风的笔触、线条、上色方式和材质表现重新绘制整个画面，"
+        f"主体、构图、角色外形比例与配色关系沿用原图，不新增也不删减画面元素。"
     )
 
 
@@ -258,11 +266,14 @@ async def restyle(
     seed: Optional[int] = None,
     model: Optional[str] = None,
     max_side: int = 1024,
+    pixelize: bool = True,
 ) -> Tuple[Image.Image, Dict[str, Any]]:
     """画风重统一：把已有资产/旧帧重绘到选定画风。
 
     像素类画风在 AI 重绘后会自动接 pixelize 归一化（画风库自带的
     suggestPost 参数）——AI 直接出不了硬边像素，必须确定性管线收尾。
+    `pixelize=False` 关掉这一步：画风转换页允许用户自己决定要不要量化
+    （比如先看 AI 重绘的原始结果，再手动调像素块大小）。
     """
     from ..styles import get_style
     from . import pixelize as pixelize_pipe
@@ -273,9 +284,13 @@ async def restyle(
     out, meta = await run_edit(
         img, _restyle_prompt(style), steps=steps, seed=seed, model=model, max_side=max_side)
     px = style.get("pixelize")
-    if px:
+    if px and pixelize:
         out, px_meta = pixelize_pipe.pixelize(
             out, colors=px["colors"], pixel_size=px["block"], dither=False)
         meta["pixelize"] = px_meta
-    meta.update({"pipeline": "restyle", "style": style_id, "styleName": style["name"]})
+    elif px:
+        # 记下来「本来该量化但我没做」，前端才能解释为什么这次结果没有硬边像素
+        meta["pixelizeSkipped"] = px
+    meta.update({"pipeline": "restyle", "style": style_id, "styleName": style["name"],
+                 "styleWords": style["prompt"]})
     return out, meta

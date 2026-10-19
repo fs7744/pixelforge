@@ -13,6 +13,8 @@
   只认前面那个）；
 - pixelize 字段是「后处理建议」：像素类画风出图后应接最近邻降采样 +
   调色板量化，参数随画风返回给前端，一键送后处理时预填。
+  唯一的例外是 HD-2D：它的像素感来自「像素角色 + 3D 景深」，整图量化会把
+  虚化与光晕一起压成色块，3D 感直接消失，所以它不配 pixelize。
 """
 from __future__ import annotations
 
@@ -40,6 +42,25 @@ STYLES: List[Dict[str, Any]] = [
         "hint": "现代独立游戏像素风（Owlboy/Sea of Stars 感），大色块+选择性高光，出图后建议 4× 像素化",
         "prompt": "高清像素艺术风格，大块饱满色块，选择性高光与轮廓光，细腻色阶但保持像素硬边，现代独立游戏美术",
         "pixelize": {"block": 4, "colors": 32},
+    },
+    {
+        "id": "hd2d",
+        "name": "HD-2D 幻想",
+        # 场景在前：HD-2D 的辨识度主要来自「像素素材 + 立体场景的景深光照」，
+        # 而且 gen_style_samples.py 用 tags[0] 选示例主体——排第一才能和
+        # data/style_samples/hd2d.png 保持一致，重跑脚本不会换掉示例内容。
+        "tags": ["场景", "角色"],
+        "hint": "像素角色站在立体场景里：移轴微缩景深 + 泛光 + 体积光，日式 RPG 实机质感（不做像素化）",
+        # HD-2D 的关键不是「更精细的像素」，而是**像素素材 + 3D 空间的景深与光照**：
+        # 角色保持硬边像素块，背景有真实纵深、远景虚化、焦平面清晰。如果给它配
+        # pixelize，整张图（连同虚化的景深和光晕）会被量化成色块，3D 感直接消失，
+        # 所以这条是画风库里唯一一个「像素味但不做像素化」的画风。
+        "prompt": (
+            "HD-2D 风格，像素颗粒清晰的 2D 素材置于有纵深感的 3D 立体场景之中，"
+            "移轴微缩景深：远景与近景虚化、主体所在焦平面保持清晰，"
+            "泛光与体积光束，柔和暗角，高饱和明快的幻想配色，戏剧化明暗对比，"
+            "日式幻想RPG实机画面质感"
+        ),
     },
     # ---------------- 2D 动漫/卡通 ----------------
     {
@@ -134,6 +155,36 @@ STYLES: List[Dict[str, Any]] = [
 _BY_ID: Dict[str, Dict[str, Any]] = {s["id"]: s for s in STYLES}
 
 # --------------------------------------------------------------------------- #
+# 画风分组：画风转换页要铺一整面画廊，15 个画风平铺成一堆 chips 没法扫读
+# --------------------------------------------------------------------------- #
+# 为什么不复用 tags：tags 是「适合什么内容」（角色/场景/UI），同一个画风可能
+# 同时打两个；画廊要的是「长什么样」，两者不是一回事。单独维护一张 id→组 的表，
+# 改组不需要动每个画风字典，也不会把 tags 的语义搞混。
+STYLE_GROUPS: List[str] = ["像素 · HD-2D", "动漫卡通", "写实 · 3D", "UI · 图标", "手绘"]
+_STYLE_GROUP: Dict[str, str] = {
+    "pixel_16bit": "像素 · HD-2D",
+    "pixel_hd": "像素 · HD-2D",
+    "hd2d": "像素 · HD-2D",
+    "chibi": "动漫卡通",
+    "anime_cel": "动漫卡通",
+    "manga_bw": "动漫卡通",
+    "us_cartoon": "动漫卡通",
+    "painterly": "写实 · 3D",
+    "realistic": "写实 · 3D",
+    "lowpoly": "写实 · 3D",
+    "voxel": "写实 · 3D",
+    "flat_vector": "UI · 图标",
+    "outline_icon": "UI · 图标",
+    "watercolor": "手绘",
+    "concept_sketch": "手绘",
+}
+
+
+def style_group(style_id: str) -> str:
+    """画风所属分组（画廊分区用）；没登记的归到「其他」，不吞掉新画风。"""
+    return _STYLE_GROUP.get(style_id, "其他")
+
+# --------------------------------------------------------------------------- #
 # 模板分类 → 推荐画风
 # --------------------------------------------------------------------------- #
 # 为什么不用 tags 过滤：tags 太粗，「场景」覆盖 13/14 个画风、「角色」覆盖
@@ -141,10 +192,10 @@ _BY_ID: Dict[str, Dict[str, Any]] = {s["id"]: s for s in STYLES}
 # 一份表，默认只露 5-6 个最常用的，其余折在「全部」里。
 # 「工程」是文本任务（不出图），返回空列表，前端整块隐藏画风区。
 CATEGORY_STYLES: Dict[str, List[str]] = {
-    "角色": ["anime_cel", "chibi", "pixel_16bit", "pixel_hd", "painterly", "realistic"],
+    "角色": ["chibi", "anime_cel", "hd2d", "pixel_16bit", "painterly", "realistic"],
     "动画": ["chibi", "anime_cel", "pixel_16bit", "pixel_hd", "us_cartoon", "concept_sketch"],
-    "场景": ["anime_cel", "painterly", "realistic", "watercolor", "pixel_hd", "lowpoly"],
-    "视差": ["painterly", "realistic", "watercolor", "pixel_hd", "anime_cel", "lowpoly"],
+    "场景": ["hd2d", "anime_cel", "painterly", "realistic", "watercolor", "lowpoly"],
+    "视差": ["hd2d", "painterly", "realistic", "watercolor", "pixel_hd", "lowpoly"],
     "瓦片": ["pixel_16bit", "pixel_hd", "lowpoly", "voxel", "painterly"],
     "工程": [],
 }
@@ -163,6 +214,7 @@ def list_styles() -> List[Dict[str, Any]]:
     sample：示例图 URL（gen_style_samples.py 生成过才返回），供悬浮 tooltip 展示。
     words：实际拼进提示词的风格词。放出来是为了让「选了画风」变成可验证的
     事实——前端直接展示这句话会被加在提示词最前面，而不是只亮一个 chip。
+    group：画廊分区（见 STYLE_GROUPS）。
     """
     out = []
     for s in STYLES:
@@ -171,6 +223,7 @@ def list_styles() -> List[Dict[str, Any]]:
             {
                 "id": s["id"],
                 "name": s["name"],
+                "group": style_group(s["id"]),
                 "tags": s["tags"],
                 "hint": s["hint"],
                 "words": s["prompt"],
