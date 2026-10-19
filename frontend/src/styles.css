@@ -205,6 +205,32 @@ button, input, textarea, select { font-family: inherit; }
 .tpl-notes li + li { margin-top: 4px; }
 .tpl-notes li::marker { color: var(--green); }
 
+/* ---------- 文本任务指引（本地不出图，只教怎么去别的 AI 做） ---------- */
+.text-task {
+  display: flex; flex-direction: column; gap: 12px;
+  border: 2px solid var(--pink); padding: 14px;
+  background: rgba(255, 51, 102, 0.05);
+}
+.tt-why { font-size: 13px; line-height: 1.75; color: var(--muted); }
+.tt-steps { margin: 0; padding-left: 20px; font-size: 14px; line-height: 1.75; color: var(--white); }
+.tt-steps li + li { margin-top: 4px; }
+.tt-steps li::marker { color: var(--pink); }
+.tt-where { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.tt-targets { font-size: 13px; color: var(--white); }
+.tt-flag {
+  font-family: var(--chip); font-size: 9px; letter-spacing: 0.3px;
+  border: 1px solid var(--pink); color: var(--pink); padding: 2px 6px;
+}
+.tt-prompt-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.tt-prompt {
+  margin: 0; padding: 10px 12px; max-height: 280px; overflow-y: auto;
+  background: #0f0f0f; border: 1px solid var(--line); border-left: 2px solid var(--green);
+  font-family: var(--mono); font-size: 13px; line-height: 1.8; color: var(--white);
+  white-space: pre-wrap; word-break: break-word;
+}
+.tt-note { font-size: 12px; line-height: 1.7; color: var(--muted); }
+.tt-note b { color: var(--green); font-weight: 600; margin-right: 6px; }
+
 /* ---------- 结果网格 ---------- */
 .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(190px, 1fr)); gap: 12px; }
 .thumb {

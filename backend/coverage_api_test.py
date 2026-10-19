@@ -315,6 +315,32 @@ check("接口透传 notes/kind", all(
     "notes" in api_tpls[t["id"]] and "kind" in api_tpls[t["id"]]
     for t in tpl_mod.TEMPLATES))
 
+# 文本任务不做操作面板：只给「去别的对话式 AI 怎么做」的指引，
+# 所以 guide 必须齐备——缺一项前端就只剩一句「本页不出图」的空说明。
+text_tpls = [t for t in tpl_mod.TEMPLATES if t.get("kind") == "text"]
+no_guide = [t["id"] for t in text_tpls if not isinstance(t.get("guide"), dict)]
+guide_fields = ("needsImage", "targets", "steps", "edit", "after")
+bad_guide = [
+    (t["id"], [k for k in guide_fields if k not in t["guide"]])
+    for t in text_tpls if isinstance(t.get("guide"), dict)
+]
+bad_guide = [x for x in bad_guide if x[1]]
+guide_targets = [t["id"] for t in text_tpls
+                 if isinstance(t.get("guide"), dict) and len(t["guide"].get("targets") or []) < 2]
+guide_steps = [t["id"] for t in text_tpls
+               if isinstance(t.get("guide"), dict) and len(t["guide"].get("steps") or []) < 2]
+image_with_guide = [t["id"] for t in tpl_mod.TEMPLATES
+                    if t.get("kind") != "text" and t.get("guide")]
+check("文本任务都带 guide", not no_guide, str(no_guide))
+check("guide 字段齐备", not bad_guide, str(bad_guide))
+check("guide 至少列两个对话式 AI", not guide_targets, str(guide_targets))
+check("guide 至少两步操作", not guide_steps, str(guide_steps))
+check("只有文本任务带 guide", not image_with_guide, str(image_with_guide))
+check("读图任务的 guide 标了 needsImage",
+      api_tpls["char_style_extract"].get("guide", {}).get("needsImage") is True)
+check("纯文本任务的 guide 不需要图",
+      api_tpls["eng_spec_doc"].get("guide", {}).get("needsImage") is False)
+
 print("== 画风推荐表 ==")
 r = client.get("/api/styles")
 check("画风接口可用", r.status_code == 200)

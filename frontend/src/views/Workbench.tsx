@@ -3,6 +3,7 @@ import { createPortal } from 'react-dom'
 import { api, Asset, ProviderInfo, StyleInfo, Template } from '../api'
 import { openPreview } from '../Preview'
 import { Splitter } from '../split'
+import TextTaskPanel from '../TextTaskPanel'
 
 type Props = { onSendToPost: (asset: Asset) => void }
 
@@ -326,6 +327,8 @@ export default function Workbench({ onSendToPost }: Props) {
 
   const current = results.find((r) => r.id === selected)
   const currentTpl = templates.find((t) => t.id === tplId)
+  // 文本任务本地做不了（底座只出图），整块操作面板换成「去别的 AI 做」指引
+  const isTextTask = currentTpl?.kind === 'text'
   // 当前模板适用的画风：后端按分类给出推荐集（tags 太粗，按它过滤等于没过滤）。
   // 文本任务不出图，整块画风区不渲染。
   const recStyleIds = styleRecs[currentTpl?.category || '角色'] || []
@@ -340,20 +343,23 @@ export default function Workbench({ onSendToPost }: Props) {
     <div className="body">
       <aside className="panel">
         <div className="section-title">
-          生成参数 <span className="tag">PARAMS</span>
+          {isTextTask ? '文本任务' : '生成参数'}{' '}
+          {isTextTask ? <span className="tag pink">TEXT</span> : <span className="tag">PARAMS</span>}
         </div>
 
-        <div>
-          <div className="label">模型服务</div>
-          <div className="card" style={{ padding: '8px 10px' }}>
-            <div style={{ fontSize: 14, fontWeight: 600 }}>
-              {providers.find((p) => p.active)?.label || '本地双底座'}
-            </div>
-            <div className="hint" style={{ marginTop: 4 }}>
-              {providers.find((p) => p.active)?.model || 'models/z-image-turbo'}
+        {!isTextTask && (
+          <div>
+            <div className="label">模型服务</div>
+            <div className="card" style={{ padding: '8px 10px' }}>
+              <div style={{ fontSize: 14, fontWeight: 600 }}>
+                {providers.find((p) => p.active)?.label || '本地双底座'}
+              </div>
+              <div className="hint" style={{ marginTop: 4 }}>
+                {providers.find((p) => p.active)?.model || 'models/z-image-turbo'}
+              </div>
             </div>
           </div>
-        </div>
+        )}
 
         <div>
           <div className="label">模板库 · 单图模式</div>
@@ -379,6 +385,8 @@ export default function Workbench({ onSendToPost }: Props) {
             </div>
           )}
         </div>
+
+        {isTextTask && currentTpl && <TextTaskPanel tpl={currentTpl} />}
 
         {showStyleBlock && (
           <div>
@@ -431,21 +439,24 @@ export default function Workbench({ onSendToPost }: Props) {
           </div>
         )}
 
-        <div>
-          <div className="label">提示词（可编辑）</div>
-          <textarea className="textarea" value={prompt} onChange={(e) => setPrompt(e.target.value)} />
-          {currentTpl?.notes?.length ? (
-            <ul className="tpl-notes">
-              {currentTpl.notes.map((n, i) => (
-                <li key={i}>{n}</li>
-              ))}
-            </ul>
-          ) : null}
-          <div className="hint" style={{ marginTop: 6 }}>
-            中文直喂本地底座（Z-Image / Qwen-Edit），全程不做英文翻译。
+        {!isTextTask && (
+          <div>
+            <div className="label">提示词（可编辑）</div>
+            <textarea className="textarea" value={prompt} onChange={(e) => setPrompt(e.target.value)} />
+            {currentTpl?.notes?.length ? (
+              <ul className="tpl-notes">
+                {currentTpl.notes.map((n, i) => (
+                  <li key={i}>{n}</li>
+                ))}
+              </ul>
+            ) : null}
+            <div className="hint" style={{ marginTop: 6 }}>
+              中文直喂本地底座（Z-Image / Qwen-Edit），全程不做英文翻译。
+            </div>
           </div>
-        </div>
+        )}
 
+        {!isTextTask && (
         <div>
           <div className="row between" style={{ alignItems: 'center' }}>
             <div className="label" style={{ marginBottom: 0 }}>
@@ -527,7 +538,9 @@ export default function Workbench({ onSendToPost }: Props) {
             </div>
           )}
         </div>
+        )}
 
+        {!isTextTask && (
         <div>
           <div className="label">高级参数</div>
           <div className="row" style={{ marginTop: 6 }}>
@@ -561,16 +574,12 @@ export default function Workbench({ onSendToPost }: Props) {
             </div>
           </div>
         </div>
+        )}
 
-        <button
-          className="btn btn-primary btn-block"
-          disabled={busy || !prompt.trim() || currentTpl?.kind === 'text'}
-          onClick={run}
-        >
-          {busy ? '生成中' : currentTpl?.kind === 'text' ? '文本任务 · 不出图' : '生成'}
-        </button>
-        {currentTpl?.kind === 'text' && (
-          <div className="hint">这条是文本提示词，复制到对话式 AI 使用；本页只出图。</div>
+        {!isTextTask && (
+          <button className="btn btn-primary btn-block" disabled={busy || !prompt.trim()} onClick={run}>
+            {busy ? '生成中' : '生成'}
+          </button>
         )}
         {meta?.note && <div className="hint">{meta.note}</div>}
         {meta?.mode === 'ref2img' && (

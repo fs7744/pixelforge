@@ -18,8 +18,16 @@ export type Template = {
   prompt: string
   /** 页面单独展示的提示，非提示词内容（不进模型） */
   notes?: string[]
-  /** image = 出图；text = 文本任务，本页不生成 */
+  /** image = 出图；text = 文本任务，本页不出图 */
   kind?: 'image' | 'text'
+  /** 仅 text：引导用户去别的对话式 AI 完成，不在本页做操作面板 */
+  guide?: {
+    needsImage: boolean
+    targets: string[]
+    steps: string[]
+    edit: string
+    after: string
+  }
   params: Record<string, number>
 }
 
