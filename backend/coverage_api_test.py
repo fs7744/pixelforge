@@ -330,6 +330,94 @@ if not _shutil.which("ffmpeg"):
           r.status_code == 400 and "ffmpeg" in str(r.json().get("detail", "")),
           f"{r.status_code} {r.text[:80]}")
 
+# 参考图规范化（h3 normalize-master）：主体偏右上 + 统一底色
+_rn = Image.new("RGB", (300, 200), (25, 25, 25))
+ImageDraw.Draw(_rn).rectangle((200, 40, 260, 160), fill=(220, 80, 60))
+r = client.post("/api/pipeline/refnorm", files={"file": ("r.png", png(_rn), "image/png")})
+check("refnorm 200", r.status_code == 200, str(r.json())[:100])
+if r.status_code == 200:
+    remember(r.json()["asset"])
+    _m = r.json()["meta"]
+    check("refnorm 输出方形 16 对齐",
+          _m["canvas"][0] == _m["canvas"][1] and _m["canvas"][0] % 16 == 0,
+          str(_m["canvas"]))
+    check("refnorm 记录主体框与底色判定",
+          "subjectBox" in _m and "backgroundDetected" in _m, str(_m)[:100])
+
+# 四方向行走工作流注册与步骤类型
+_wfs = {w["id"]: w for w in client.get("/api/workflows").json()["workflows"]}
+check("四方向行走工作流已注册",
+      "walk_4dir" in _wfs and len(_wfs.get("walk_4dir", {}).get("steps", [])) == 3,
+      str(list(_wfs))[:100])
+if "walk_4dir" in _wfs:
+    check("四方向步骤类型齐全",
+          [s["type"] for s in _wfs["walk_4dir"]["steps"]]
+          == ["fourdir_bases", "fourdir_walk", "godot_fourdir"],
+          str([s["type"] for s in _wfs["walk_4dir"]["steps"]]))
+# 未完成立绘就点行走帧 → 明确 400（依赖检查先拦住，不碰 GPU）
+_run4 = client.post("/api/workflows/walk_4dir/runs",
+                    json={"input": "四向测试", "params": {}}).json()
+_r = client.post(f"/api/runs/{_run4['id']}/steps/walk/run", json={})
+check("四向：缺立绘点行走帧 → 400",
+      _r.status_code == 400 and "上一步" in str(_r.json().get("detail", "")),
+      f"{_r.status_code} {_r.text[:80]}")
+Path("data/runs", f"{_run4['id']}.json").unlink(missing_ok=True)
+
+# 四方向编排全链路（桩替 run_frame，不碰 GPU）：立绘 meta → 每方向 4 帧
+# → 横排精灵表 + 审查图 → Godot 四向包
+print("== 四方向行走编排（run_frame 打桩） ==")
+import backend.app.pipelines.sprite_loop as _sl  # noqa: E402
+
+_orig_rf = _sl.run_frame
+
+
+async def _fake_rf(ref, pose, index, total, **kw):
+    im = Image.new("RGB", (48, 64), (40, 40, 50))
+    ImageDraw.Draw(im).rectangle((14, 8, 34, 62), fill=(200, 120, 90))
+    return im, {"mode": "stub", "pose": pose}
+
+
+_sl.run_frame = _fake_rf
+try:
+    _r4 = client.post("/api/workflows/walk_4dir/runs",
+                      json={"input": "桩测试", "params": {}}).json()
+    _p4 = Path("data/runs") / f"{_r4['id']}.json"
+    _st4 = json.loads(_p4.read_text(encoding="utf-8"))
+    _dirs4 = []
+    for d in ("down", "up", "left", "right"):
+        it = storage.save_asset(Image.new("RGB", (64, 96), (30, 30, 40)),
+                                kind="generated", name=f"stub-base-{d}")
+        remember(it)
+        _dirs4.append({"id": d, "assetId": it["id"], "prompt": "stub"})
+    _st4["steps"][0]["status"] = "done"
+    _st4["steps"][0]["meta"] = {"directions": _dirs4}
+    _p4.write_text(json.dumps(_st4), encoding="utf-8")
+
+    _r = client.post(f"/api/runs/{_r4['id']}/steps/walk/run", json={})
+    _body = _r.json() if _r.status_code == 200 else {}
+    _steps = _body.get("steps") or []
+    _wm = (_steps[1].get("meta") or {}) if len(_steps) > 1 else {}
+    _outs = _wm.get("directions") or []
+    check("fourdir_walk 200", _r.status_code == 200, str(_body)[:100])
+    check("四方向各出精灵表", len(_outs) == 4
+          and all(d.get("sheetAssetId") for d in _outs), str([d.get("id") for d in _outs]))
+    check("每方向 4 帧、帧尺寸 128", all(d["frames"] == 4 and d["frameSize"] == [128, 128]
+                                   for d in _outs), str(_outs)[:140])
+    check("产物数 = 4 × (表+4帧+审查)", len(_steps[1].get("artifacts") or []) == 24,
+          str(len(_steps[1].get("artifacts") or [])))
+    created.extend(_steps[1].get("artifacts") or [])
+
+    _r = client.post(f"/api/runs/{_r4['id']}/steps/godot/run", json={})
+    _body = _r.json() if _r.status_code == 200 else {}
+    _gm = ((_body.get("steps") or [{}, {}, {}])[2].get("meta") or {})
+    check("Godot 四向包导出", _r.status_code == 200 and _gm.get("kind") == "godot_fourdir"
+          and _gm.get("directions") == ["down", "up", "left", "right"], str(_gm)[:110])
+    if _gm.get("zip"):
+        (Path("data/exports") / _gm["zip"].rsplit("/", 1)[-1]).unlink(missing_ok=True)
+finally:
+    _sl.run_frame = _orig_rf
+    Path("data/runs", f"{_r4['id']}.json").unlink(missing_ok=True)
+
 # 硬 alpha 保留「描边 + 键色」的抗锯齿混色：绿幕底实测边缘环 51% 偏绿。
 # clean_edge_spill 只改 RGB 不动 alpha，把它洗成内侧颜色。
 from backend.app.pipelines import matte as matte_pipe  # noqa: E402
@@ -557,6 +645,33 @@ if _r.status_code == 200:
 
 check("sprite/compose 空帧 → 400",
       client.post("/api/pipeline/sprite/compose", json={"frameAssetIds": []}).status_code == 400)
+
+# 循环段选择（h3 select）：取 [1, 4) 三帧合成，meta 明确「未插帧/未跳帧」
+_r = client.post("/api/pipeline/sprite/select",
+                 json={"frameAssetIds": _sp_ids, "start": 1, "stop": 4,
+                       "cols": 3, "size": 64, "matte": True, "colors": 0})
+check("sprite/select 200", _r.status_code == 200, str(_r.json())[:120])
+if _r.status_code == 200:
+    _sj = _r.json()
+    remember(_sj["asset"])
+    for f in _sj["frames"]:
+        remember(f)
+    if _sj.get("review"):
+        remember(_sj["review"])
+    _sel = _sj["meta"]["selection"]
+    check("选段区间与帧数正确",
+          _sel["interval"] == [1, 4] and len(_sj["frames"]) == 3, str(_sel))
+    check("选段声明未插帧/未跳帧/未改时长",
+          _sel["frameSkipping"] is False and _sel["interpolation"] is False
+          and _sel["retiming"] is False, str(_sel))
+    check("选段合成 3 帧排 1×3", _sj["index"]["grid"] == {"cols": 3, "rows": 1},
+          str(_sj["index"]["grid"]))
+check("sprite/select 区间不足 2 帧 → 400",
+      client.post("/api/pipeline/sprite/select",
+                  json={"frameAssetIds": _sp_ids, "start": 2, "stop": 2}).status_code == 400)
+check("sprite/select 帧数不足 → 400",
+      client.post("/api/pipeline/sprite/select",
+                  json={"frameAssetIds": ["one"], "start": 0, "stop": 1}).status_code == 400)
 check("sprite/compose 超过 64 帧 → 400",
       client.post("/api/pipeline/sprite/compose",
                   json={"frameAssetIds": ["x"] * 65}).status_code == 400)

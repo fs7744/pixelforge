@@ -11,6 +11,7 @@ type Props = { incoming?: Asset | null }
 const PIPELINES = [
   { id: 'matte', name: '连通域抠图', tag: 'FLOOD-FILL', desc: '只删与边缘连通的同色背景，不误删内部同色像素' },
   { id: 'video', name: '视频/GIF 导入', tag: 'EXTRACT', desc: '录像/GIF 拆成帧资产，可选逐帧抠图（绿幕直接可用）' },
+  { id: 'refnorm', name: '参考图规范化', tag: 'NORMALIZE', desc: '裁主体 → 方形画布 → 底部对齐基线，参考图几何一致重跑才可比' },
   { id: 'resize', name: '尺寸规整', tag: 'NEAREST', desc: '最近邻硬缩放 / 等比留白 / RPGMaker 一键' },
   { id: 'sheet', name: 'Sprite Sheet 拆分', tag: 'N×M', desc: '按行列拆帧并生成引擎索引 JSON' },
   { id: 'pixelize', name: '像素化对齐', tag: 'PALETTE', desc: '分块单色 + 限定调色板，把 AI 图变成规整像素风' },
@@ -54,6 +55,13 @@ export default function PostProcess({ incoming }: Props) {
   const [vidFps, setVidFps] = useState(0)
   const [vidMax, setVidMax] = useState(64)
   const [vidMatte, setVidMatte] = useState(false)
+  // 循环段选择（h3 select）：拆帧结果里取 [start, stop) 连续段合成
+  const [selStart, setSelStart] = useState(0)
+  const [selStop, setSelStop] = useState(0)
+  // 参考图规范化
+  const [refSize, setRefSize] = useState(0)
+  const [refPad, setRefPad] = useState(6)
+  const [refBase, setRefBase] = useState(94)
   const [styles, setStyles] = useState<StyleInfo[]>([])
   const [restyleId, setRestyleId] = useState('')
   const [aiSeed, setAiSeed] = useState('')
@@ -148,6 +156,19 @@ export default function PostProcess({ incoming }: Props) {
         const res = await api.matte(file, tolerance, feather)
         setOut(res.asset)
         setNote(`背景色 ${res.meta.background} · 移除 ${(res.meta.removedRatio * 100).toFixed(1)}% 像素`)
+      } else if (pipeline === 'refnorm') {
+        const res = await api.refNorm(file, {
+          size: refSize,
+          padRatio: refPad / 100,
+          baseline: refBase / 100,
+        })
+        if (!res.asset) throw new Error(res.detail || '规范化失败')
+        setOut(res.asset)
+        const bg = res.meta.backgroundDetected ? '原底色' : '中性灰'
+        setNote(
+          `${res.meta.canvas[0]}×${res.meta.canvas[1]} · 主体 ${res.meta.subjectSize.join('×')}` +
+          ` · 缩放 ${Math.round(res.meta.scale * 100)}% · 底色${bg} ${res.meta.background}`,
+        )
       } else if (pipeline === 'video') {
         const res = await api.videoFrames(
           { fps: vidFps, maxFrames: vidMax, matte: vidMatte, tolerance },
@@ -156,6 +177,8 @@ export default function PostProcess({ incoming }: Props) {
         if (!res.frames?.length) throw new Error(res.meta?.reason || res.detail || '没有拆出帧')
         setFrames(res.frames)
         setIndex(null)
+        setSelStart(0)
+        setSelStop(res.frames.length)
         const m = res.meta
         const trunc = m.truncated ? ` · ${m.truncated}` : ''
         const matted = m.matte ? ` · 已逐帧抠图（平均移除 ${(m.matte.avgRemoved * 100).toFixed(0)}%）` : ''
@@ -236,6 +259,43 @@ export default function PostProcess({ incoming }: Props) {
     } finally {
       setBusy(false)
       if (aiRun) taskProgress.stop()
+    }
+  }
+
+  // 循环段选择（h3 select）：只定区间，不插帧/不跳帧/不改时长——
+  // 画面内容与顺序原样保留，循环才真的干净
+  const applySelect = async () => {
+    if (frames.length < 2) return
+    const start = Math.max(0, Math.min(selStart, frames.length))
+    const stop = Math.max(0, Math.min(selStop, frames.length))
+    if (stop - start < 2) {
+      setError(`循环段至少 2 帧（当前 [${start}, ${stop})）`)
+      return
+    }
+    setBusy(true)
+    setError('')
+    setNote('')
+    try {
+      const res = await api.spriteSelect({
+        frameAssetIds: frames.map((f) => f.id),
+        start,
+        stop,
+        cols: Math.min(8, stop - start),
+        size: 128,
+        matte: true,
+        colors: 24,
+      })
+      if (!res.asset) throw new Error(res.detail || '合成失败')
+      setOut(res.asset)
+      const iv = res.meta.selection?.interval ?? [start, stop]
+      setNote(
+        `选段 [${iv[0]}, ${iv[1]}) · ${iv[1] - iv[0]} 帧 → 精灵表 ` +
+        `${res.index.frame_size.w}×${res.index.frame_size.h} · 未插帧未跳帧 · 附审查图`,
+      )
+    } catch (e: any) {
+      setError(e.message || String(e))
+    } finally {
+      setBusy(false)
     }
   }
 
@@ -424,6 +484,41 @@ export default function PostProcess({ incoming }: Props) {
               支持 GIF / WebP / MP4（按文件头判断，不看扩展名）。GIF 走 PIL 原生拆帧；
               MP4 需要本机安装 ffmpeg（未装会给出安装提示）。拆出的帧进素材库，
               可在「Sprite Sheet 拆分」或生成工作台的逐帧合成里继续用。
+            </div>
+          </>
+        )}
+
+        {pipeline === 'refnorm' && (
+          <>
+            <div className="row">
+              <div className="grow">
+                <div className="label">边长 {refSize || '自动'}</div>
+                <input
+                  className="input"
+                  type="number"
+                  min={0}
+                  step={16}
+                  value={refSize}
+                  onChange={(e) => setRefSize(Math.max(0, +e.target.value))}
+                />
+                <div className="hint">0 = 按主体自动取（16 对齐）</div>
+              </div>
+              <div className="grow">
+                <div className="label">留白 {refPad}%</div>
+                <input type="range" min={0} max={25} value={refPad}
+                       onChange={(e) => setRefPad(+e.target.value)} style={{ width: '100%' }} />
+              </div>
+              <div className="grow">
+                <div className="label">基线 {refBase}%</div>
+                <input type="range" min={60} max={100} value={refBase}
+                       onChange={(e) => setRefBase(+e.target.value)} style={{ width: '100%' }} />
+                <div className="hint">主体底边落在画布高度的哪一档</div>
+              </div>
+            </div>
+            <div className="hint">
+              参考图来源杂（截图/照片/别家导出），画幅与主体位置不一致会让编辑底座的构图
+              跟着漂；规范化后同一角色换图重跑才有可比性。有透明区按 alpha 裁，没有就按
+              四角底色做颜色键。
             </div>
           </>
         )}
@@ -721,6 +816,42 @@ export default function PostProcess({ incoming }: Props) {
             </>
           )}
         </div>
+
+        {pipeline === 'video' && frames.length > 1 && !out && (
+          <div className="card" style={{ marginTop: 10 }}>
+            <div className="row">
+              <div className="grow">
+                <div className="label">起始帧（含）</div>
+                <input
+                  className="input"
+                  type="number"
+                  min={0}
+                  max={frames.length - 1}
+                  value={selStart}
+                  onChange={(e) => setSelStart(Math.max(0, Math.min(+e.target.value, frames.length)))}
+                />
+              </div>
+              <div className="grow">
+                <div className="label">结束帧（不含）</div>
+                <input
+                  className="input"
+                  type="number"
+                  min={1}
+                  max={frames.length}
+                  value={selStop}
+                  onChange={(e) => setSelStop(Math.max(0, Math.min(+e.target.value, frames.length)))}
+                />
+              </div>
+              <button className="btn" disabled={busy} onClick={applySelect}>
+                按选中段合成精灵表
+              </button>
+            </div>
+            <div className="hint">
+              共 {frames.length} 帧 · 选段只定区间，不插帧、不跳帧、不改时长；
+              合成后附帧审查图，循环接缝看首尾两帧是否连贯
+            </div>
+          </div>
+        )}
 
         {index && (
           <div className="card">

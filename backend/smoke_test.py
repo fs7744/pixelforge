@@ -154,6 +154,45 @@ async def main() -> None:
     assert cs.width == 2 * (48 + 6) + 6 and cs.height == 2 * (48 + 26 + 6) + 6, cs.size
     print(f"[7e] review  → 审查图 {cs.size} OK")
 
+    # 参考图规范化（移植自 h3 normalize-master）
+    from backend.app.pipelines import refnorm as refnorm_pipe
+
+    src_ref = Image.new("RGB", (400, 300), (30, 32, 40))  # 统一底色
+    dr = ImageDraw.Draw(src_ref)
+    dr.rectangle((300, 60, 360, 200), fill=(220, 80, 60))  # 主体偏右上
+    norm, nmeta = refnorm_pipe.normalize_ref(src_ref)
+    assert norm.width == norm.height and norm.width % 16 == 0, norm.size
+    assert nmeta["backgroundDetected"] is True
+    _arr = np.asarray(norm.convert("RGB"))
+    _mask = (np.abs(_arr.astype(np.int16) - np.array((220, 80, 60))).sum(axis=2) < 60)
+    _ys = np.where(_mask.any(axis=1))[0]
+    assert _ys.size, "规范化后主体丢失"
+    # 主体底边应落在 baseline（0.94）附近（±8px）
+    assert abs(int(_ys.max()) - int(norm.height * 0.94)) <= 8, \
+        f"底边 {int(_ys.max())} vs 基线 {int(norm.height * 0.94)}"
+    print(f"[7f] refnorm  → {norm.size} 方形 · 主体底边对齐基线 OK")
+
+    # 四方向 Godot 包（h3 delivery 四向清单）
+    d_sheets = []
+    for d in ("down", "up"):
+        sh = storage.save_asset(Image.new("RGBA", (64, 32), (10, 200, 100, 255)),
+                                kind="sheet", name=f"smoke-4dir-{d}")
+        d_sheets.append({"id": d, "sheetAssetId": sh["id"], "frames": 2,
+                         "frameSize": [32, 32]})
+    finfo = godot_export.build_fourdir_package(d_sheets, {"id": "smoke4dir0000"})
+    assert "SHA256SUMS.json" in finfo["files"], finfo["files"]
+    with zipfile.ZipFile(godot_export.EXPORTS_DIR / finfo["zip"].rsplit("/", 1)[-1]) as zf:
+        znames = zf.namelist()
+        assert "scripts/direction_controller.gd" in znames
+        assert "sprites/walk_down_frames.tres" in znames
+        sums = json.loads(zf.read("SHA256SUMS.json"))
+        for row in sums["files"]:
+            assert hashlib.sha256(zf.read(row["path"])).hexdigest() == row["sha256"], row["path"]
+    for sh in d_sheets:
+        storage.delete_asset(sh["sheetAssetId"])
+    (godot_export.EXPORTS_DIR / finfo["zip"].rsplit("/", 1)[-1]).unlink(missing_ok=True)
+    print(f"[7g] fourdir  → 四向包 {len(znames)} 文件，清单校验通过 OK")
+
     png = io.BytesIO()
     rpg.save(png, "PNG")
     print(f"[8] export   → rpgmaker png {len(png.getvalue())} bytes")

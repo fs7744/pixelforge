@@ -537,6 +537,62 @@ async def pipeline_sheet_compose(
     return {"asset": item, "index": meta}
 
 
+class SpriteSelectPayload(BaseModel):
+    """循环段选择（移植自 h3 的 select）：从有序帧里取 [start, stop) 连续段。
+
+    h3 的约束照搬并写进 meta：不插帧、不跳帧、不改时长——选段只决定
+    「从哪一帧到哪一帧」，画面内容与顺序原样保留，循环才真的干净。
+    """
+
+    frameAssetIds: List[str]
+    start: int = 0
+    stop: int = 0
+    cols: int = 4
+    size: int = 256
+    matte: bool = True
+    colors: int = 0
+
+
+@app.post("/api/pipeline/sprite/select")
+async def pipeline_sprite_select(payload: SpriteSelectPayload):
+    from .pipelines import sprite_loop
+
+    ids = [i for i in (payload.frameAssetIds or []) if i]
+    n = len(ids)
+    if n < 2:
+        raise HTTPException(400, f"至少需要 2 帧，收到 {n} 帧")
+    start = max(0, min(int(payload.start), n))
+    stop = max(0, min(int(payload.stop), n))
+    if stop - start < 2:
+        raise HTTPException(400, f"循环段至少 2 帧（收到 [{start}, {stop})）")
+
+    imgs = [_load_asset_image(i) for i in ids[start:stop]]
+    sheet, frames, index, meta, review = await run_in_threadpool(
+        sprite_loop.compose, imgs, cols=payload.cols, size=payload.size,
+        anchor="bottom", matte=payload.matte, colors=payload.colors,
+    )
+    frame_items = [
+        storage.save_asset(f, kind="frame", name=f"loop-frame-{i + 1:02d}",
+                           meta={"pipeline": "sprite-select", "index": i,
+                                 "frameSize": index["frame_size"]})
+        for i, f in enumerate(frames)
+    ]
+    sheet_item = storage.save_asset(
+        sheet, kind="sheet", name="loop-sheet",
+        meta={"pipeline": "sprite-select", **meta, "index": index},
+    )
+    review_item = storage.save_asset(
+        review, kind="sheet", name="contact-sheet",
+        meta={"pipeline": "sprite-select-review", "frames": len(frames)},
+    )
+    return {"asset": sheet_item, "frames": frame_items, "index": index,
+            "review": review_item,
+            "meta": {**meta, "pipeline": "sprite-select",
+                     "selection": {"interval": [start, stop],
+                                   "sourceFrames": n, "frameSkipping": False,
+                                   "interpolation": False, "retiming": False}}}
+
+
 @app.post("/api/pipeline/sprite/frame")
 async def pipeline_sprite_frame(
     pose: str = Form(...),
@@ -682,6 +738,31 @@ async def pipeline_seamless(
     out, meta = await run_in_threadpool(
         seamless_pipe.extend_horizontal, img, times=times, blend=blend, mirror=mirror)
     item = storage.save_asset(out, kind="seamless", meta={"pipeline": "seamless", **meta})
+    return {"asset": item, "meta": meta}
+
+
+@app.post("/api/pipeline/refnorm")
+async def pipeline_refnorm(
+    file: UploadFile = File(...),
+    size: int = Form(0),
+    padRatio: float = Form(0.06),
+    baseline: float = Form(0.94),
+    tolerance: int = Form(24),
+):
+    """参考图规范化（移植自 h3 的 normalize-master）：裁主体 → 方形画布 → 底部对齐基线。
+
+    参考图来源杂（截图/照片/别家导出），画幅与主体位置不一致会让编辑底座
+    的构图跟着漂；规范化后同一角色换图重跑才有可比性。
+    """
+    from .pipelines import refnorm as refnorm_pipe
+
+    img = await _read_image(file)
+    pad = max(0.0, min(float(padRatio), 0.4))
+    base = max(0.5, min(float(baseline), 1.0))
+    out, meta = await run_in_threadpool(
+        refnorm_pipe.normalize_ref, img,
+        tolerance=tolerance, pad_ratio=pad, baseline=base, size=size)
+    item = storage.save_asset(out, kind="refnorm", name="参考图规范化", meta=meta)
     return {"asset": item, "meta": meta}
 
 

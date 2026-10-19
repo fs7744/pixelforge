@@ -29,6 +29,19 @@ from .providers.diffusers_local import DiffusersProvider, detect_family
 
 RUNS_DIR = DATA_DIR / "runs"
 
+# ---------- 四方向行走（h3 的 recipe 思路：方向是角色的一等维度） ----------
+FOUR_DIRS = ("down", "up", "left", "right")
+DIR_DESC = {
+    "down": "面向观众（正面视角）",
+    "up": "背对观众（背面视角）",
+    "left": "侧身朝左（左侧视角）",
+    "right": "侧身朝右（右侧视角）",
+}
+# 行走循环的姿势序列：抬脚 → 并拢 → 换脚 → 并拢。凑不成 4 帧就按前者截断，
+# 别用「均匀抽帧」——那样两帧同姿势，循环会卡顿。
+WALK_POSES = ("左脚向前迈出、右臂前摆", "双脚并拢、身体微沉",
+              "右脚向前迈出、左臂前摆", "双脚并拢、身体回正")
+
 
 # ---------------- 工作流注册 ----------------
 WORKFLOWS: List[Dict[str, Any]] = [
@@ -195,6 +208,40 @@ WORKFLOWS: List[Dict[str, Any]] = [
                 "name": "Godot 工程导出",
                 "type": "godot",
                 "desc": "生成 SpriteFrames 资源 + AnimatedSprite2D 场景 + 导入说明",
+            },
+        ],
+    },
+    {
+        "id": "walk_4dir",
+        "name": "四方向行走工作流",
+        "tag": "FOUR-DIR",
+        "desc": "四方向立绘 → 每方向行走循环帧 → 横排精灵表 → Godot 四向工程",
+        "inputHint": "角色描述（如：灰白英短猫武士，红披风，武士刀）",
+        "steps": [
+            {
+                "id": "bases",
+                "name": "四方向立绘",
+                "type": "fourdir_bases",
+                "desc": "下/上/左/右各一张全身立绘（同一角色描述与画风，{dir_desc} 由管线替换）",
+                "prompt": "{input}。游戏角色{dir_desc}，全身，双脚踩在同一水平线上，"
+                          "身体水平居中，纯色背景，无文字、无水印、无边框。",
+                "width": 512,
+                "height": 768,
+                "maxSide": 768,
+            },
+            {
+                "id": "walk",
+                "name": "四方向行走帧",
+                "type": "fourdir_walk",
+                "desc": "每方向 4 帧行走循环（编辑底座接力保外观），自动拼横排精灵表 + 审查图",
+                "frames": 4,
+                "size": 128,
+            },
+            {
+                "id": "godot",
+                "name": "Godot 四向工程",
+                "type": "godot_fourdir",
+                "desc": "四方向 SpriteFrames + 场景 + 方向控制器脚本 + SHA256SUMS 清单",
             },
         ],
     },
@@ -800,6 +847,93 @@ async def _run_step_locked(run_id: str, step_id: str, overrides: Optional[Dict[s
             if res.meta.get("vramWarning"):
                 meta["vramWarning"] = res.meta["vramWarning"]
 
+        elif stype == "fourdir_bases":
+            # 四方向立绘（h3 的 recipe 是「每方向一张 master + 各自 prompt」，
+            # 这里用同一角色描述 + 方向描述词生成四张，随后各自派生行走帧）
+            pw = int(step_def.get("width") or 512)
+            ph = int(step_def.get("height") or 768)
+            psteps = run.get("params", {}).get("steps")
+            pcfg = run.get("params", {}).get("cfg")
+            seed = run.get("params", {}).get("seed")
+            gen_kw2: Dict[str, Any] = {}
+            if psteps:
+                gen_kw2["steps"] = int(psteps)
+            if pcfg is not None:
+                gen_kw2["cfg"] = float(pcfg)
+            tpl = step_def["prompt"]
+            dirs_meta = []
+            for i, d in enumerate(FOUR_DIRS):
+                prompt = _fill(tpl, run, step_def, 0).replace("{dir_desc}", DIR_DESC[d])
+                progress_mod.report(task_id, i, len(FOUR_DIRS), f"{DIR_DESC[d]}立绘")
+                res = await provider.generate(
+                    prompt, pw, ph, n=1, seed=seed, task_id=task_id, **gen_kw2)
+                aid = _save_asset(
+                    res.images[0], kind="workflow", name=f"{run['id']}-{step_id}-{d}",
+                    meta={"runId": run["id"], "step": step_id, "direction": d,
+                          "label": f"{DIR_DESC[d]}立绘", "prompt": prompt},
+                )["id"]
+                artifacts.append(aid)
+                dirs_meta.append({"id": d, "assetId": aid, "prompt": prompt})
+            meta = {"directions": dirs_meta, "promptLang": "zh",
+                    "mode": "txt2img×4"}
+
+        elif stype == "fourdir_walk":
+            # 每方向：以该方向立绘为参考，逐帧换姿势（编辑底座），再确定性拼排
+            from .pipelines import sprite_loop
+
+            prev_meta = (run["steps"][index - 1].get("meta") or {}) if index else {}
+            src_dirs = prev_meta.get("directions") or []
+            if not src_dirs:
+                raise RuntimeError("四方向行走帧需要上一步的「四方向立绘」产物")
+            total = max(2, min(int(step_def.get("frames", 4)), 8))
+            poses = WALK_POSES[:total]
+            size = int(step_def.get("size", 128))
+            out_dirs = []
+            done = 0
+            for d in src_dirs:
+                base = _load(d["assetId"])
+                seq = []
+                for i in range(total):
+                    progress_mod.report(task_id, done, len(src_dirs) * total,
+                                        f"{DIR_DESC.get(d['id'], d['id'])} 行走 {i + 1}/{total}")
+                    img, _fm = await sprite_loop.run_frame(
+                        base, poses[i], i, total,
+                        subject=run.get("input", ""), style="",
+                        width=int(step_def.get("width") or 512),
+                        height=int(step_def.get("height") or 768),
+                        max_side=int(step_def.get("maxSide") or 768),
+                        task_id=task_id,
+                    )
+                    seq.append(img)
+                    done += 1
+                sheet, norm_frames, index_json, cmeta, review = sprite_loop.compose(
+                    seq, cols=total, size=size, matte=True,
+                    colors=int(step_def.get("colors", 0)),
+                )
+                sheet_id = _save_asset(
+                    sheet, kind="sheet", name=f"{run['id']}-{step_id}-{d['id']}-sheet",
+                    meta={"runId": run["id"], "step": step_id, "direction": d["id"],
+                          "index": index_json, "metrics": cmeta.get("metrics")},
+                )["id"]
+                review_id = _save_asset(
+                    review, kind="sheet", name=f"{run['id']}-{step_id}-{d['id']}-review",
+                    meta={"runId": run["id"], "step": step_id, "direction": d["id"]},
+                )["id"]
+                frame_ids = [
+                    _save_asset(f, kind="frame",
+                                name=f"{run['id']}-{step_id}-{d['id']}-{i}",
+                                meta={"runId": run["id"], "step": step_id,
+                                      "direction": d["id"], "index": i})["id"]
+                    for i, f in enumerate(norm_frames)
+                ]
+                artifacts.extend([sheet_id, *frame_ids, review_id])
+                out_dirs.append({
+                    "id": d["id"], "sheetAssetId": sheet_id, "frames": len(norm_frames),
+                    "frameSize": [index_json["frame_size"]["w"], index_json["frame_size"]["h"]],
+                    "reviewAssetId": review_id,
+                })
+            meta = {"directions": out_dirs, "poses": poses, "framesPerDir": total}
+
         elif stype == "dedup":
             src = overrides.get("artifacts") or _prev_artifacts(run, index)
             threshold = int(step_def.get("threshold", 10))
@@ -927,15 +1061,23 @@ async def _run_step_locked(run_id: str, step_id: str, overrides: Optional[Dict[s
             artifacts = [item["id"]]
             meta = {"cols": cols, "elements": len(frames)}
 
-        elif stype in ("godot", "godot_parallax"):
-            from .godot_export import build_godot_package, build_parallax_package
+        elif stype in ("godot", "godot_parallax", "godot_fourdir"):
+            from .godot_export import (build_fourdir_package, build_godot_package,
+                                       build_parallax_package)
             src = overrides.get("artifacts") or _prev_artifacts(run, index)
             if not src:
                 raise RuntimeError("没有可导出的产物")
             if stype == "godot":
                 info = build_godot_package(src, run)
-            else:
+            elif stype == "godot_parallax":
                 info = build_parallax_package(src, run)
+            else:
+                # 四方向包按上一步 meta 里的方向表导出（不靠产物顺序猜）
+                prev_meta = (run["steps"][index - 1].get("meta") or {}) if index else {}
+                dirs = prev_meta.get("directions") or []
+                if not dirs:
+                    raise RuntimeError("四向导出需要上一步的「四方向行走帧」产物")
+                info = build_fourdir_package(dirs, run)
             artifacts = []
             meta = info
 

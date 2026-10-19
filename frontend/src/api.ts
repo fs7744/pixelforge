@@ -302,6 +302,34 @@ export const api = {
     fd.append('variant', variant)
     return fetch('/api/pipeline/resize', { method: 'POST', body: fd }).then(json)
   },
+  /** 参考图规范化（h3 normalize-master）：裁主体 → 方形画布 → 底部对齐基线 */
+  refNorm: (
+    file: File,
+    payload: { size?: number; padRatio?: number; baseline?: number; tolerance?: number } = {},
+  ) => {
+    const fd = new FormData()
+    fd.append('file', file)
+    fd.append('size', String(payload.size ?? 0))
+    fd.append('padRatio', String(payload.padRatio ?? 0.06))
+    fd.append('baseline', String(payload.baseline ?? 0.94))
+    fd.append('tolerance', String(payload.tolerance ?? 24))
+    return fetch('/api/pipeline/refnorm', { method: 'POST', body: fd }).then(json)
+  },
+  /** 循环段选择（h3 select）：取 [start, stop) 连续帧合成精灵表 + 审查图 */
+  spriteSelect: (payload: {
+    frameAssetIds: string[]
+    start: number
+    stop: number
+    cols?: number
+    size?: number
+    matte?: boolean
+    colors?: number
+  }) =>
+    fetch('/api/pipeline/sprite/select', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    }).then(json),
   splitSheet: (file: File, cols: number, rows: number, matte = false, tolerance = 80) => {
     const fd = new FormData()
     fd.append('file', file)

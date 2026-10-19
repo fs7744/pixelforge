@@ -172,6 +172,129 @@ def build_godot_package(artifacts: List[str], run: Dict[str, Any]) -> Dict[str, 
 PARALLAX_SCALES = [0.05, 0.2, 0.5, 1.0, 1.15]
 
 
+# --------------------------------------------------------------------------- #
+# 四方向角色包（四方向行走工作流用；思路来自 h3 的 delivery 四方向清单）
+# --------------------------------------------------------------------------- #
+FOUR_DIRS = ("down", "up", "left", "right")
+_DIR_CN = {"down": "下（正面）", "up": "上（背面）", "left": "左", "right": "右"}
+
+_DIR_CONTROLLER = """\
+extends Node2D
+## 四方向角色控制器（PixelForge 导出）
+## 用法：把本脚本挂到含四个 AnimatedSprite2D 子节点（$Down/$Up/$Left/$Right）的节点上，
+## 调用 set_direction("left") 切换方向；未给定的方向沿用上一次。
+
+const DIRS := ["down", "up", "left", "right"]
+
+func set_direction(dir_name: String) -> void:
+    assert(dir_name in DIRS, "unknown direction: " + dir_name)
+    for d in DIRS:
+        var node := get_node_or_null(d.capitalize())
+        if node:
+            node.visible = (d == dir_name)
+"""
+
+
+def build_fourdir_package(directions: List[Dict[str, Any]], run: Dict[str, Any]) -> Dict[str, Any]:
+    """四方向角色包：每方向 1 个 SpriteFrames + 4 张表 + 场景 + 控制器 + 清单。
+
+    directions: [{"id": "down", "sheetAssetId": ..., "frames": N, "frameSize": [w,h]}, ...]
+    """
+    EXPORTS_DIR.mkdir(parents=True, exist_ok=True)
+    name = _safe(f"pf_{run['id']}_4dir")
+    if not directions:
+        raise RuntimeError("没有可导出的四方向素材")
+
+    entries: List[Tuple[str, bytes]] = []
+    tres_files: List[str] = []
+    index_dirs: Dict[str, Any] = {}
+
+    for d in directions:
+        did = str(d["id"])
+        item = storage.get_asset(str(d["sheetAssetId"]))
+        if not item:
+            raise RuntimeError(f"方向素材缺失：{did} → {d['sheetAssetId']}")
+        img = Image.open(storage.asset_path(item)).convert("RGBA")
+        fw, fh = int(d["frameSize"][0]), int(d["frameSize"][1])
+        total = int(d["frames"])
+
+        sheet_name = f"walk_{did}.png"
+        tres_name = f"walk_{did}_frames.tres"
+        b = io.BytesIO()
+        img.save(b, "PNG")
+        entries.append((f"sprites/{sheet_name}", b.getvalue()))
+
+        subs, frames = [], []
+        for i in range(total):
+            rid = f"AtlasTexture_{did}_{i}"
+            subs.append(
+                f'[sub_resource type="AtlasTexture" id="{rid}"]\n'
+                f'atlas = ExtResource("1_sheet")\n'
+                f"region = Rect2({i * fw}, 0, {fw}, {fh})\n"
+            )
+            frames.append('{\n"duration": 1.0,\n"texture": SubResource("%s")\n}' % rid)
+        tres = (
+            f'[gd_resource type="SpriteFrames" load_steps={len(subs) + 2} format=3]\n\n'
+            f'[ext_resource type="Texture2D" path="res://sprites/{sheet_name}" id="1_sheet"]\n\n'
+            + "\n".join(subs)
+            + "\n[resource]\nanimations = [{\n"
+            + '"frames": [' + ", ".join(frames) + "],\n"
+            + f'"loop": true,\n"name": &"walk_{did}",\n"speed": 10.0\n'
+            + "}]\n"
+        )
+        entries.append((f"sprites/{tres_name}", tres.encode("utf-8")))
+        tres_files.append(tres_name)
+        index_dirs[did] = {"sheet": f"sprites/{sheet_name}", "frames": total,
+                           "frameSize": [fw, fh], "animation": f"walk_{did}",
+                           "label": _DIR_CN.get(did, did)}
+
+    scene = (
+        # load_steps = 资源数 + 1；本场景只有 ext_resource（SpriteFrames×N + 脚本）
+        f"[gd_scene load_steps={len(directions) + 2} format=3]\n\n"
+        + "\n".join(
+            f'[ext_resource type="SpriteFrames" path="res://sprites/{f}" id="1_{d}"]'
+            for d, f in zip([x["id"] for x in directions], tres_files))
+        + "\n[ext_resource type=\"Script\" path=\"res://scripts/direction_controller.gd\" id=\"2_ctrl\"]\n\n"
+        '[node name="Character" type="Node2D"]\n'
+        'script = ExtResource("2_ctrl")\n\n'
+        + "\n".join(
+            f'[node name="{str(d["id"]).capitalize()}" type="AnimatedSprite2D" parent="."]\n'
+            f'sprite_frames = ExtResource("1_{d["id"]}")\n'
+            f'animation = &"walk_{d["id"]}"\n'
+            f'autoplay = "walk_{d["id"]}"\n'
+            f'visible = {"true" if d["id"] == "down" else "false"}\n'
+            for d in directions)
+    )
+    entries.append((f"scenes/{name}.tscn", scene.encode("utf-8")))
+    entries.append(("scripts/direction_controller.gd", _DIR_CONTROLLER.encode("utf-8")))
+    entries.append(("pixelforge_directions.json", json.dumps({
+        "version": "1.0", "generator": "pixelforge", "animations": index_dirs,
+        "directions": [d["id"] for d in directions],
+    }, ensure_ascii=False, indent=2).encode("utf-8")))
+    entries.append(("README.md", (
+        f"# {name} · 四方向角色导入说明\n\n"
+        "1. 把 `sprites/`、`scenes/`、`scripts/` 复制进 Godot 项目。\n"
+        "2. 打开 `scenes/" + name + ".tscn`：四个方向各一个 AnimatedSprite2D，默认显示 down。\n"
+        "3. 用 `Character.set_direction(\"left\")` 切方向（见 scripts/direction_controller.gd）。\n"
+        "4. 每个方向一条横排精灵表，帧数相同（每方向 " + str(directions[0].get("frames", "?")) + " 帧）。\n"
+        "5. 动画名：`walk_down` / `walk_up` / `walk_left` / `walk_right`。\n\n"
+        "由 PixelForge 生成 · " + time.strftime("%Y-%m-%d %H:%M") + "\n"
+    ).encode("utf-8")))
+
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+        _write_zip(zf, entries)
+    out = EXPORTS_DIR / f"{name}.zip"
+    out.write_bytes(buf.getvalue())
+    return {
+        "kind": "godot_fourdir",
+        "zip": f"/exports/{out.name}",
+        "directions": [d["id"] for d in directions],
+        "files": [a for a, _ in entries] + ["SHA256SUMS.json"],
+        "note": f"ZIP 大小 {round(len(buf.getvalue()) / 1024, 1)} KB · 四方向各一条精灵表",
+    }
+
+
 def build_parallax_package(artifacts: List[str], run: Dict[str, Any]) -> Dict[str, Any]:
     """视差包：layers/*.png + scroll_scale.json + parallax.tscn + README。"""
     EXPORTS_DIR.mkdir(parents=True, exist_ok=True)

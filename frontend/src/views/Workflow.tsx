@@ -316,13 +316,16 @@ export default function WorkflowView() {
                 </div>
               )}
 
-              {(stepDef?.type === 'godot' || stepDef?.type === 'godot_parallax') && godotZip && (
+              {(stepDef?.type === 'godot' || stepDef?.type === 'godot_parallax'
+                || stepDef?.type === 'godot_fourdir') && godotZip && (
                 <div className="card-white">
                   <div style={{ fontFamily: 'Silkscreen, monospace', fontSize: 10, marginBottom: 4 }}>GODOT PACKAGE</div>
                   <div style={{ fontSize: 14, lineHeight: 1.7 }}>
                     {currentStepMeta.kind === 'godot_parallax'
                       ? `图层 ${currentStepMeta.layers} · 画布 ${currentStepMeta.canvas?.join('×')} · scroll_scale ${JSON.stringify(currentStepMeta.scrollScale)}`
-                      : `帧数 ${currentStepMeta.frames} · 帧尺寸 ${currentStepMeta.frameSize?.join('×')} · ${currentStepMeta.fps}fps`}
+                      : currentStepMeta.kind === 'godot_fourdir'
+                        ? `四方向 ${Array.isArray(currentStepMeta.directions) ? currentStepMeta.directions.join(' / ') : ''} · 含方向控制器脚本`
+                        : `帧数 ${currentStepMeta.frames} · 帧尺寸 ${currentStepMeta.frameSize?.join('×')} · ${currentStepMeta.fps}fps`}
                     <br />
                     {currentStepMeta.note}
                   </div>
