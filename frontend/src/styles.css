@@ -544,3 +544,33 @@ button, input, textarea, select { font-family: inherit; }
 
 /* 缩略图是 LANCZOS 缩过的，别再按像素画风放大（.thumb img 默认 pixelated） */
 .thumb img.smooth { image-rendering: auto; }
+
+/* 模板字段（角色 / 动作序列）：改动直接落到提示词里 */
+.tpl-fields { display: flex; flex-direction: column; gap: 10px; margin-top: 8px; }
+.tpl-field-label { font-size: 13px; color: var(--muted); }
+
+/* 精灵表逐帧生成：每帧一格，谁生成了、谁在跑一眼看清 */
+.sprite-loop { padding: 12px; }
+.sprite-frames {
+  display: grid; grid-template-columns: repeat(auto-fill, minmax(84px, 1fr));
+  gap: 6px; margin-top: 6px;
+}
+.sprite-cell {
+  position: relative; display: flex; flex-direction: column; align-items: center;
+  gap: 3px; padding: 4px; border: 1px solid var(--line); background: #0f0f12;
+}
+.sprite-cell.done { border-color: rgba(0, 255, 136, 0.45); }
+.sprite-cell.run { border-color: var(--yellow); }
+.sprite-cell img {
+  width: 100%; aspect-ratio: 1; object-fit: contain; cursor: zoom-in;
+  background: repeating-conic-gradient(#1a1a1f 0% 25%, #101013 0% 50%) 0 0 / 12px 12px;
+}
+.sprite-empty {
+  width: 100%; aspect-ratio: 1; display: flex; align-items: center; justify-content: center;
+  font-size: 12px; color: var(--muted); background: #0c0c0f;
+}
+.sprite-pose {
+  font-size: 12px; color: var(--muted); max-width: 100%;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.sprite-redo { padding: 1px 6px !important; font-size: 12px !important; }

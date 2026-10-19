@@ -408,6 +408,71 @@ r = client.post("/api/pipeline/restyle",
 check("未知画风 → 4xx", 400 <= r.status_code < 500, str(r.status_code))
 
 
+print("== 精灵表：逐帧动作生成（不加载模型的部分） ==")
+# 造 4 帧：高度递增，用来验证「共享缩放」——逐帧各自撑满会让角色在循环里忽大忽小
+_sp_ids = []
+for i in range(4):
+    im = Image.new("RGB", (96, 96), (0, 255, 0))
+    dd = ImageDraw.Draw(im)
+    hh = 36 + i * 14
+    dd.rectangle((36, 92 - hh, 60, 92), fill=(30, 30, 30))
+    rr = client.post("/api/pipeline/matte",
+                     files={"file": ("f.png", png(im), "image/png")},
+                     data={"tolerance": 80, "feather": 0})
+    _id = rr.json()["asset"]["id"]
+    _sp_ids.append(_id)
+    remember(rr.json()["asset"])
+
+_r = client.post("/api/pipeline/sprite/compose",
+                 json={"frameAssetIds": _sp_ids, "cols": 2, "size": 64, "matte": True})
+check("sprite/compose 合成成功", _r.status_code == 200, str(_r.json())[:120])
+if _r.status_code == 200:
+    _j = _r.json()
+    remember(_j["asset"])
+    for f in _j["frames"]:
+        remember(f)
+    check("合成按 cols 排成 2×2", _j["index"]["grid"] == {"cols": 2, "rows": 2}, str(_j["index"]["grid"]))
+    check("单帧尺寸统一为 64", _j["index"]["frame_size"] == {"w": 64, "h": 64}, str(_j["index"]["frame_size"]))
+    _sr = _j["meta"]["normalize"]["scaleRange"]
+    check("共享缩放：所有帧用同一个系数（下蹲帧不被放大）",
+          _j["meta"]["normalize"]["sharedScale"] and _sr and abs(_sr[0] - _sr[1]) < 1e-6, str(_sr))
+    check("精灵表按帧数铺满", _j["asset"]["width"] == 128 and _j["asset"]["height"] == 128,
+          f'{_j["asset"]["width"]}x{_j["asset"]["height"]}')
+
+check("sprite/compose 空帧 → 400",
+      client.post("/api/pipeline/sprite/compose", json={"frameAssetIds": []}).status_code == 400)
+check("sprite/compose 超过 64 帧 → 400",
+      client.post("/api/pipeline/sprite/compose",
+                  json={"frameAssetIds": ["x"] * 65}).status_code == 400)
+check("sprite/frame 动作留空 → 400",
+      client.post("/api/pipeline/sprite/frame",
+                  data={"pose": "  ", "index": 0, "total": 1,
+                        "refAssetId": _sp_ids[0]}).status_code == 400)
+check("sprite/frame 没有参考图 → 400",
+      client.post("/api/pipeline/sprite/frame",
+                  data={"pose": "站立", "index": 0, "total": 1}).status_code == 400)
+check("sprite/frame 帧序号越界 → 400",
+      client.post("/api/pipeline/sprite/frame",
+                  data={"pose": "站立", "index": 3, "total": 3,
+                        "refAssetId": _sp_ids[0]}).status_code == 400)
+check("sprite/frame 参考图不存在 → 400/404",
+      client.post("/api/pipeline/sprite/frame",
+                  data={"pose": "站立", "index": 0, "total": 1,
+                        "refAssetId": "nope"}).status_code in (400, 404))
+
+# 指令写法是有实测依据的：带「保持…不变」的约束会把编辑底座压成「什么都别改」，
+# 出来 16 格一个姿势。回归锁：不许再出现这类压制性措辞。
+from backend.app.pipelines import sprite_loop as sl  # noqa: E402
+
+_inst = sl.pose_instruction("迈步", 1, 4)
+check("逐帧指令带上动作名", "迈步" in _inst, _inst[:40])
+check("逐帧指令把两字动作扩成肢体描述", "蹬直" in _inst or "迈出" in _inst, _inst[:60])
+check("逐帧指令不含「保持不变」这类压制措辞",
+      not any(w in _inst for w in ("保持不变", "不要改", "完全不变")), _inst[:60])
+check("逐帧指令钉住绿幕背景", "#00FF00" in _inst)
+check("逐帧指令要求全身入画", "全身" in _inst)
+check("未知动作也给出可用指令", "旋转" in sl.pose_instruction("旋转", 0, 1))
+
 print("== 模板库：提示词纯净度 ==")
 from backend.app import templates as tpl_mod
 
@@ -419,7 +484,8 @@ api_tpls = {t["id"]: t for t in r.json()["templates"]}
 DIRTY = ("替换", "示例", "无需", "管线", "勾选", "填写", "注意：", "如：",
          "花括号", "提示词里", "占位符")
 bad_placeholder, dirty_hits, missing_notes, bad_kind = [], [], [], []
-for t in tpl_mod.TEMPLATES:
+# 用接口返回的渲染版：占位符在服务端就填成默认值，前端拿到的能直接跑
+for t in tpl_mod.api_items():
     p = t["prompt"]
     if "{" in p or "}" in p:
         bad_placeholder.append(t["id"])
@@ -430,6 +496,22 @@ for t in tpl_mod.TEMPLATES:
         missing_notes.append(t["id"])
     if t.get("kind") not in ("image", "text"):
         bad_kind.append(t["id"])
+
+# 原始模板里的占位符必须都在 fields 里声明过，否则渲染会漏成 `{xxx}` 送给模型
+undeclared = []
+for t in tpl_mod.TEMPLATES:
+    ids = {f["id"] for f in t.get("fields") or []}
+    import re as _re
+    used = set(_re.findall(r"\{([a-zA-Z_][\w]*)\}", t.get("prompt", "")))
+    used |= set(_re.findall(r"\{([a-zA-Z_][\w]*)\}", (t.get("textMode") or {}).get("prompt", "")))
+    if used - ids:
+        undeclared.append((t["id"], sorted(used - ids)))
+check("prompt 里的占位符都在 fields 里声明", not undeclared, str(undeclared))
+check("字段都有 id/label/default", all(
+    f.get("id") and f.get("label") and "default" in f
+    for t in tpl_mod.TEMPLATES for f in t.get("fields") or []))
+check("精灵表带「照参考图」的角色字段",
+      any(f.get("fromRef") for f in api_tpls["char_sprite_sheet"].get("fields") or []))
 
 check("占位符已填成可直接跑的示例值", not bad_placeholder, str(bad_placeholder))
 check("prompt 不含写作说明", not dirty_hits, str(dirty_hits))

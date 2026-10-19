@@ -53,7 +53,9 @@ async def health():
 
 @app.get("/api/templates")
 async def get_templates():
-    return {"categories": templates.CATEGORIES, "templates": templates.TEMPLATES}
+    # 占位符在返回前就填成默认值：前端拿到的是「点了就能跑」的提示词，
+    # 用户改「角色 / 动作序列」字段时再按字段值替换那一段。
+    return {"categories": templates.CATEGORIES, "templates": templates.api_items()}
 
 
 @app.get("/api/settings")
@@ -342,6 +344,99 @@ async def pipeline_sheet_compose(
     sheet, meta = sheet_pipe.compose_sheet(frames, cols)
     item = storage.save_asset(sheet, kind="sheet", meta={"pipeline": "sheet-compose", **meta.get("grid", {})})
     return {"asset": item, "index": meta}
+
+
+@app.post("/api/pipeline/sprite/frame")
+async def pipeline_sprite_frame(
+    pose: str = Form(...),
+    index: int = Form(0),
+    total: int = Form(1),
+    refAssetId: str = Form(""),
+    file: Optional[UploadFile] = File(None),
+    subject: str = Form(""),
+    style: str = Form(""),
+    steps: Optional[int] = Form(None),
+    seed: Optional[int] = Form(None),
+    width: int = Form(512),
+    height: int = Form(512),
+    maxSide: int = Form(768),
+):
+    """逐帧动作生成：一次一帧，用户填的动作原样进指令。
+
+    为什么不一次出整张精灵表：文生图/编辑底座都没有「第几格画什么」的定位
+    能力，一张图排 4×4 时姿势大面积重复（实测 16 格几乎同姿势），动作循环
+    根本不能用。改成一次一帧后，模型只需做「换个姿势」一件事，身份由同一张
+    参考图钉住，拼板/对齐交给本地确定性管线。
+    """
+    from .pipelines import sprite_loop
+
+    if not (pose or "").strip():
+        raise HTTPException(400, "动作不能为空")
+    if not 0 <= index < max(1, total):
+        raise HTTPException(400, f"帧序号越界：{index} / 共 {total} 帧")
+
+    ref: Optional[Image.Image] = None
+    if refAssetId:
+        ref = _load_asset_image(refAssetId)
+    elif file is not None:
+        ref = (await _read_image(file)).convert("RGB")
+    else:
+        raise HTTPException(400, "逐帧生成需要一张角色参考图（refAssetId 或 file）")
+
+    img, meta = await sprite_loop.run_frame(
+        ref, pose.strip(), index, max(1, total),
+        subject=subject, style=style, steps=steps, seed=seed,
+        width=width, height=height, max_side=maxSide,
+    )
+    item = storage.save_asset(
+        img, kind="generated",
+        name=f"sprite-{index + 1:02d}-{pose.strip()[:8]}",
+        meta={"pipeline": "sprite-frame", "pose": pose.strip(), **meta},
+    )
+    return {"image": item, "meta": {"pipeline": "sprite-frame", "pose": pose.strip(), **meta}}
+
+
+class SpriteComposePayload(BaseModel):
+    """逐帧结果拼板：按顺序给帧资产 id，cols 决定每行几帧。"""
+
+    frameAssetIds: List[str]
+    cols: int = 4
+    size: int = 256
+    anchor: str = "bottom"
+    matte: bool = True
+    tolerance: int = 80
+    feather: int = 0
+
+
+@app.post("/api/pipeline/sprite/compose")
+async def pipeline_sprite_compose(payload: SpriteComposePayload):
+    """逐帧结果 → 规整（共享缩放、底部对齐、抠图）→ 精灵表 + 引擎索引。"""
+    from .pipelines import sprite_loop
+
+    ids = [i for i in (payload.frameAssetIds or []) if i]
+    if not ids:
+        raise HTTPException(400, "没有可合成的帧")
+    if len(ids) > 64:
+        raise HTTPException(400, f"一次最多合成 64 帧，收到 {len(ids)} 帧")
+
+    imgs = [_load_asset_image(i) for i in ids]
+    sheet, frames, index, meta = sprite_loop.compose(
+        imgs, cols=payload.cols, size=payload.size, anchor=payload.anchor,
+        matte=payload.matte, tolerance=payload.tolerance, feather=payload.feather,
+    )
+    frame_items = [
+        storage.save_asset(
+            f, kind="frame", name=f"sprite-frame-{i + 1:02d}",
+            meta={"pipeline": "sprite-compose", "index": i, "frameSize": index["frame_size"]},
+        )
+        for i, f in enumerate(frames)
+    ]
+    sheet_item = storage.save_asset(
+        sheet, kind="sheet", name="sprite-sheet",
+        meta={"pipeline": "sprite-compose", **meta, "index": index},
+    )
+    return {"asset": sheet_item, "frames": frame_items, "index": index,
+            "meta": {"pipeline": "sprite-compose", **meta}}
 
 
 @app.post("/api/pipeline/pixelize")

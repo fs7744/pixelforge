@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
-import { api, Asset, StyleInfo } from '../api'
+import { api, Asset, AssetFacets, StyleInfo } from '../api'
+import { RefPicker } from '../RefPicker'
 import { StyleChip } from './Workbench'
 import { openPreview } from '../Preview'
 import { Splitter } from '../split'
@@ -58,6 +59,11 @@ export default function PostProcess({ incoming }: Props) {
   const [note, setNote] = useState('')
   const [over, setOver] = useState(false)
   const inputRef = useRef<HTMLInputElement>(null)
+  // 从资产库选图：后处理最常用的输入就是刚生成的那张，没必要先下载再拖进来
+  const [libOpen, setLibOpen] = useState(false)
+  const [library, setLibrary] = useState<Asset[]>([])
+  const [libFacets, setLibFacets] = useState<AssetFacets | null>(null)
+  const [libPick, setLibPick] = useState<string[]>([])
 
   // 画风列表：AI 画风重统一选目标用（chip 悬浮可见示例图）
   useEffect(() => {
@@ -75,6 +81,29 @@ export default function PostProcess({ incoming }: Props) {
     setIndex(null)
     setError('')
     setNote('')
+  }
+
+  // 资产库取图：每次都重拉一次列表，刚生成的图不用刷新页面就能选到
+  const openLib = () => {
+    const next = !libOpen
+    setLibOpen(next)
+    if (!next) return
+    api.assets().then((d) => setLibrary(d.assets)).catch(() => setLibrary([]))
+    api.assetFacets().then(setLibFacets).catch(() => setLibFacets(null))
+  }
+
+  const pickFromLibrary = (id: string) => {
+    const a = library.find((x) => x.id === id)
+    if (!a) return
+    setLibPick([id])
+    fetch(a.url)
+      .then((r) => r.blob())
+      .then((b) => {
+        accept(new File([b], `${a.name}.png`, { type: 'image/png' }))
+        setLibOpen(false)
+        setLibPick([])
+      })
+      .catch(() => setError('从资产库载入这张图失败'))
   }
 
   // 从生成工作台传入资产
@@ -186,8 +215,17 @@ export default function PostProcess({ incoming }: Props) {
   return (
     <div className="body">
       <aside className="panel">
-        <div className="section-title">
-          图片输入 <span className="tag">INPUT</span>
+        <div className="row between" style={{ alignItems: 'center' }}>
+          <div className="section-title">
+            图片输入 <span className="tag">INPUT</span>
+          </div>
+          <button
+            className="btn btn-ghost"
+            style={{ padding: '2px 8px', fontSize: 13 }}
+            onClick={openLib}
+          >
+            {libOpen ? '收起资产库' : '从资产库选'}
+          </button>
         </div>
 
         <div
@@ -224,6 +262,18 @@ export default function PostProcess({ incoming }: Props) {
           style={{ display: 'none' }}
           onChange={(e) => e.target.files?.[0] && accept(e.target.files[0])}
         />
+
+        {libOpen && (
+          <RefPicker
+            library={library}
+            facets={libFacets}
+            selected={libPick}
+            usedSlots={0}
+            maxRefs={1}
+            single
+            onToggle={pickFromLibrary}
+          />
+        )}
 
         <div>
           <div className="label">处理管线</div>

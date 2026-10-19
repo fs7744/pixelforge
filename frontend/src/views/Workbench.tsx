@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
-import { api, Asset, AssetFacets, ProviderInfo, StyleInfo, Template } from '../api'
+import { api, Asset, AssetFacets, ProviderInfo, StyleInfo, Template, TemplateField } from '../api'
 import { openPreview } from '../Preview'
 import { RefPicker } from '../RefPicker'
 import { Splitter } from '../split'
@@ -157,6 +157,39 @@ export function StyleChip({ style, active, onSelect }: { style: StyleInfo; activ
   )
 }
 
+/**
+ * 模板字段：把提示词里那段旧值换成新值。
+ *
+ * 提示词是用户可编辑的唯一事实来源，字段只负责「改那一段」：
+ * 找不到旧值就静默不动（用户可能已经手改过，硬塞会推翻他的手写内容）。
+ */
+function swapText(text: string, from: string, to: string): string {
+  if (!from || !to || from === to || !text.includes(from)) return text
+  return text.split(from).join(to)
+}
+
+/** 动作序列的拆分：顿号 / 逗号 / 换行都算分隔符 */
+const splitPoses = (s: string) =>
+  s.split(/[、,，\n]+/).map((x) => x.trim()).filter(Boolean)
+
+/** 模板字段的默认值；有参考图时带 fromRef 的字段默认走「照参考图」 */
+function defaultsOf(t: Template, useRef: boolean): Record<string, string> {
+  const v: Record<string, string> = {}
+  ;(t.fields || []).forEach((f) => {
+    v[f.id] = useRef && f.fromRef ? f.fromRef : f.default
+  })
+  return v
+}
+
+/** 接口返回的 prompt 里已经填了默认值，这里换成字段当前值 */
+function applyFields(text: string, fields: TemplateField[] | undefined, values: Record<string, string>): string {
+  let out = text
+  ;(fields || []).forEach((f) => {
+    out = swapText(out, f.default, values[f.id] || f.default)
+  })
+  return out
+}
+
 export default function Workbench({ onSendToPost }: Props) {
   const [templates, setTemplates] = useState<Template[]>([])
   const [categories, setCategories] = useState<string[]>(['全部'])
@@ -195,6 +228,18 @@ export default function Workbench({ onSendToPost }: Props) {
   const boardRef = useRef<BoardHandle>(null)
   const [boardState, setBoardState] = useState({ hasFront: false, busy: false })
   const isThreeView = tplId === 'char_three_view'
+  // 模板字段：角色 / 动作序列这类要用户单独填的内容，改动直接落到提示词里
+  const [fieldValues, setFieldValues] = useState<Record<string, string>>({})
+  // 逐帧动作生成（精灵表）：一次一帧，满足「不满意单独重出」
+  const [spriteCols, setSpriteCols] = useState(4)
+  const [spriteCell, setSpriteCell] = useState(256)
+  // 逐帧走编辑底座，步数越多越听话也越慢；20 步是「能改姿势」的实测下限
+  const [spriteSteps, setSpriteSteps] = useState(20)
+  const [spriteBusy, setSpriteBusy] = useState(false)
+  const [spriteWriting, setSpriteWriting] = useState(false)
+  const [spriteProg, setSpriteProg] = useState<{ i: number; total: number; pose: string } | null>(null)
+  const [spriteFrames, setSpriteFrames] = useState<Record<number, Asset>>({})
+  const spriteCancel = useRef(false)
 
   useEffect(() => {
     api.templates().then((d) => {
@@ -231,18 +276,27 @@ export default function Workbench({ onSendToPost }: Props) {
   // 底座是中文原生（Z-Image / Qwen-Edit），模板只有中文一版
   const promptFor = (t: Template) => t.prompt
 
-  // 切模板时若提示词没被改过，自动换成模板原文
+  // 切模板时若提示词没被改过，自动换成模板原文（字段按当前参考图状态取默认）
   useEffect(() => {
     const t = templates.find((x) => x.id === tplId)
-    if (t && (prompt === '' || templates.some((x) => x.prompt === prompt))) {
-      setPrompt(promptFor(t))
+    if (!t) return
+    const untouched =
+      prompt === '' ||
+      templates.some((x) => applyFields(x.prompt, x.fields, defaultsOf(x, false)) === prompt)
+    if (untouched) {
+      const fv = defaultsOf(t, refItems.length + refAssetIds.length > 0)
+      setFieldValues(fv)
+      setPrompt(applyFields(promptFor(t), t.fields, fv))
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [provider, templates, tplId])
 
   const pickTemplate = (t: Template) => {
     setTplId(t.id)
-    setPrompt(promptFor(t))
+    // 有参考图时，角色字段直接落成「照参考图」，不再写死某个示例角色
+    const fv = defaultsOf(t, totalRefs > 0)
+    setFieldValues(fv)
+    setPrompt(t.fields?.length ? applyFields(promptFor(t), t.fields, fv) : promptFor(t))
     // 切模板回到它自己的默认路线：文本模板只能是 text，双模式模板默认本地出图
     setRunMode(t.kind === 'text' ? 'text' : 'image')
     if (t.params?.width) setWidth(t.params.width)
@@ -252,9 +306,40 @@ export default function Workbench({ onSendToPost }: Props) {
     setStyleId(t.kind === 'text' || t.styleLocked ? '' : t.defaultStyle || '')
   }
 
+  /**
+   * 改模板字段 = 改提示词里那一段。
+   * 参考图从无到有（或反之）时，带 fromRef 的字段跟着切换成「照参考图」/默认描述。
+   */
+  const setField = (id: string, val: string) => {
+    const prev = fieldValues[id] || ''
+    setPrompt((p) => swapText(p, prev, val))
+    setFieldValues((v) => ({ ...v, [id]: val }))
+    // 帧是按动作序号存的：动作数量一变，旧帧就对不上号了；只改措辞则保留
+    if (id === 'actions' && splitPoses(prev).length !== splitPoses(val).length) {
+      setSpriteFrames({})
+    }
+  }
+
   // 参考图最多 4 张：再多也分不清主次，编码时间还线性上涨
   const MAX_REFS = 4
   const totalRefs = refItems.length + refAssetIds.length
+
+  // 参考图数量 0 ↔ >0：把「角色」字段在默认描述与「照参考图」之间对调
+  useEffect(() => {
+    const t = templates.find((x) => x.id === tplId)
+    const f = t?.fields?.find((x) => x.fromRef)
+    if (!f?.fromRef) return
+    const want = totalRefs > 0 ? f.fromRef : f.default
+    const cur = fieldValues[f.id]
+    if (!cur || cur === want) return
+    const other = totalRefs > 0 ? f.default : f.fromRef
+    // 用户自己改写过角色描述（既不是默认值也不是参考值）就不要覆盖
+    if (cur !== other) return
+    setFieldValues((v) => ({ ...v, [f.id]: want }))
+    setPrompt((p) => swapText(p, cur, want))
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [totalRefs, tplId, templates])
+
 
   const addRefs = (files: FileList | null) => {
     if (!files || !files.length) return
@@ -313,7 +398,7 @@ export default function Workbench({ onSendToPost }: Props) {
         ? await api.generateRef(
             {
               prompt,
-              style: styleId || undefined,
+              style: effectiveStyle,
               width,
               height,
               steps,
@@ -334,7 +419,7 @@ export default function Workbench({ onSendToPost }: Props) {
             n,
             seed: seed.trim() ? Number(seed) : null,
             templateId: tplId,
-            style: styleId || undefined,
+            style: effectiveStyle,
           })
       setResults((prev) => [...data.images, ...prev])
       setMeta(data.meta)
@@ -352,6 +437,93 @@ export default function Workbench({ onSendToPost }: Props) {
     setSelected(a.id)
   }, [])
 
+  // ---------- 精灵表：逐帧动作生成 ----------
+  // 动作列表就是「动作序列」字段本身（顿号/逗号/换行都能分隔），
+  // 用户在字段里改一次，提示词和逐帧生成同时生效，不会出现两处分叉。
+  const poseList = () => splitPoses(fieldValues.actions || '')
+
+  const runSpriteFrames = async (only?: number) => {
+    const list = poseList()
+    if (!list.length) {
+      setError('先填「动作序列」，一行一个动作')
+      return
+    }
+    if (!totalRefs) {
+      setError('逐帧生成需要一张角色参考图：先在下面「参考图」里选一张')
+      return
+    }
+    const refId = refAssetIds[0]
+    const refFile = refId ? null : refItems[0]?.file || null
+    setSpriteBusy(true)
+    setError('')
+    spriteCancel.current = false
+    try {
+      const targets = only == null ? list.map((_, i) => i) : [only]
+      for (const i of targets) {
+        if (spriteCancel.current) break
+        setSpriteProg({ i, total: list.length, pose: list[i] })
+        const d = await api.spriteFrame(
+          {
+            pose: list[i],
+            index: i,
+            total: list.length,
+            refAssetId: refId || undefined,
+            subject: fieldValues.subject,
+            style: effectiveStyle,
+            steps: spriteSteps,
+            seed: seed.trim() ? Number(seed) : null,
+            width,
+            height,
+          },
+          refFile,
+        )
+        if (!d.image) throw new Error(d.detail || '这一帧没出图')
+        setSpriteFrames((prev) => ({ ...prev, [i]: d.image }))
+        setResults((prev) => [d.image, ...prev])
+      }
+    } catch (e: any) {
+      setError(e.message || String(e))
+    } finally {
+      setSpriteProg(null)
+      setSpriteBusy(false)
+    }
+  }
+
+  const composeSprite = async () => {
+    const list = poseList()
+    const ids = list.map((_, i) => spriteFrames[i]?.id).filter(Boolean) as string[]
+    if (!ids.length) {
+      setError('还没有帧可以合成')
+      return
+    }
+    if (ids.length !== list.length) {
+      setError(`还有 ${list.length - ids.length} 帧没生成（或重出后没补上）`)
+      return
+    }
+    setSpriteWriting(true)
+    setError('')
+    try {
+      const d = await api.spriteCompose({
+        frameAssetIds: ids,
+        cols: Math.max(1, spriteCols),
+        size: Math.max(64, spriteCell),
+        matte: true,
+      })
+      if (!d.asset) throw new Error(d.detail || '合成失败')
+      setResults((prev) => [d.asset, ...prev])
+      setSelected(d.asset.id)
+      const g = d.index?.grid
+      setMeta({
+        ...d.meta,
+        note: `精灵表 ${g?.cols}×${g?.rows} · 单帧 ${d.index?.frame_size?.w}×${d.index?.frame_size?.h} · 已共享缩放并对齐基线`,
+      })
+    } catch (e: any) {
+      setError(e.message || String(e))
+    } finally {
+      setSpriteWriting(false)
+    }
+  }
+
   const current = results.find((r) => r.id === selected)
   const currentTpl = templates.find((t) => t.id === tplId)
   // 纯文本模板（kind=text）根本没得选；带 textMode 的模板由用户切路线
@@ -359,25 +531,32 @@ export default function Workbench({ onSendToPost }: Props) {
   const canSwitchMode = !!currentTpl?.textMode
   // 文本路线上本页不出图：整块操作面板换成「去别的 AI 做」指引
   const isTextTask = isPureText || (runMode === 'text' && canSwitchMode)
-  const textPrompt = isPureText ? currentTpl!.prompt : currentTpl?.textMode?.prompt || ''
+  const textPrompt = isPureText
+    ? applyFields(currentTpl!.prompt, currentTpl!.fields, fieldValues)
+    : applyFields(currentTpl?.textMode?.prompt || '', currentTpl?.fields, fieldValues)
   const textGuide = isPureText ? currentTpl?.guide : currentTpl?.textMode?.guide
   // 当前模板适用的画风：后端按分类给出推荐集（tags 太粗，按它过滤等于没过滤）。
   // 文本路线不出图、编辑/提取类模板画风跟随原图——这两种都不显示画风区，
   // 摆一个选了也不起作用的选择器，比不显示更糟。
   const recStyleIds = styleRecs[currentTpl?.category || '角色'] || []
-  const showStyleBlock =
-    !isTextTask && !currentTpl?.styleLocked && recStyleIds.length > 0
+  // 有参考图时，「画风跟随参考图」的模板也不再让用户选画风：
+  // 前置一句「写实 3A」会和参考图的画风打架，帧与帧之间还会各画各的。
+  const refsPresent = totalRefs > 0
+  const styleFollowsRef = refsPresent && !!currentTpl?.styleFollowsRef
+  const styleLockedNow = !!currentTpl?.styleLocked || styleFollowsRef
+  const showStyleBlock = !isTextTask && !styleLockedNow && recStyleIds.length > 0
   const visibleStyles = showAllStyles
     ? styles
     : styles.filter((s) => recStyleIds.includes(s.id) || s.id === styleId)
   // 选了但不在本类推荐里的画风：仍然显示（否则用户看不到自己选了什么），标注一下
   const styleOutOfRec = !!styleId && !recStyleIds.includes(styleId)
   // 当前画风实际会拼到提示词里的那句话；给「最终提示词」预览用
-  const styleWords = styles.find((s) => s.id === styleId)?.words || ''
+  const styleWords = styleLockedNow ? '' : styles.find((s) => s.id === styleId)?.words || ''
   // 后端 apply_style 是幂等的（已含就不再拼），预览也要一致，否则手动粘过会显示两遍
   const finalPrompt = styleWords && !prompt.startsWith(styleWords)
     ? `${styleWords}。${prompt}`
     : prompt
+  const effectiveStyle = styleLockedNow ? undefined : styleId || undefined
 
   return (
     <div className="body">
@@ -519,6 +698,40 @@ export default function Workbench({ onSendToPost }: Props) {
           </div>
         )}
 
+        {!isTextTask && (currentTpl?.fields?.length ?? 0) > 0 && (
+          <div>
+            <div className="label">模板字段（改动会写进下面的提示词）</div>
+            <div className="tpl-fields">
+              {(currentTpl!.fields || []).map((f) => (
+                <div key={f.id}>
+                  <div className="row between" style={{ alignItems: 'center' }}>
+                    <span className="tpl-field-label">{f.label}</span>
+                    {f.presets?.length ? (
+                      <span className="chips" style={{ gap: 4 }}>
+                        {f.presets.map((p) => (
+                          <button
+                            key={p.label}
+                            className={`chip sm ${fieldValues[f.id] === p.value ? 'on' : ''}`}
+                            onClick={() => setField(f.id, p.value)}
+                          >
+                            {p.label}
+                          </button>
+                        ))}
+                      </span>
+                    ) : null}
+                  </div>
+                  <input
+                    className="input"
+                    value={fieldValues[f.id] ?? ''}
+                    onChange={(e) => setField(f.id, e.target.value)}
+                  />
+                  {f.hint && <div className="hint" style={{ marginTop: 4 }}>{f.hint}</div>}
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
+
         {!isTextTask && (
           <div>
             <div className="label">提示词（可编辑）</div>
@@ -537,9 +750,11 @@ export default function Workbench({ onSendToPost }: Props) {
               </ul>
             ) : null}
             <div className="hint" style={{ marginTop: 6 }}>
-              {currentTpl?.styleLocked
-                ? '这类任务是对参考图做编辑/提取，画风跟随原图，不参与画风切换。'
-                : '中文直喂本地底座（Z-Image / Qwen-Edit），全程不做英文翻译。'}
+              {styleFollowsRef
+                ? '有参考图：画风与角色外观都跟随参考图（编辑底座只改要求改的部分），所以不再前置画风词。要换画风请去「后处理 · AI 画风重统一」。'
+                : currentTpl?.styleLocked
+                  ? '这类任务是对参考图做编辑/提取，画风跟随原图，不参与画风切换。'
+                  : '中文直喂本地底座（Z-Image / Qwen-Edit），全程不做英文翻译。'}
             </div>
           </div>
         )}
@@ -614,6 +829,124 @@ export default function Workbench({ onSendToPost }: Props) {
               : '不选 = 文生图（Z-Image）。需要按参考图生成时加图，会自动改用编辑底座；首图是主参考。'}
           </div>
         </div>
+        )}
+
+        {!isTextTask && !isThreeView && tplId === 'char_sprite_sheet' && (
+          <div className="card sprite-loop">
+            <div className="row between" style={{ alignItems: 'center' }}>
+              <div className="label" style={{ marginBottom: 0 }}>
+                逐帧动作生成 <span className="tag pink">RECOMMENDED</span>
+              </div>
+              <span className="hint">{poseList().length} 帧</span>
+            </div>
+            <div className="hint" style={{ marginTop: 6 }}>
+              一张图排 4×4 时模型只会把同一个姿势贴 16 遍，动作循环用不了。这里改成
+              一帧一次编辑：外观/画风由参考图钉住，每帧只改姿势，最后本地拼板并对齐基线。
+              单帧 1–3 分钟（编辑底座），4 帧约 5–12 分钟；动作写得越具体，改得越准
+              （「迈步」会自动补成「一腿前迈屈膝、另一腿后蹬、手臂摆动」这种四肢描述）。
+            </div>
+
+            <div className="label" style={{ marginTop: 10 }}>逐帧进度</div>
+            <div className="sprite-frames">
+              {poseList().map((p, i) => {
+                const f = spriteFrames[i]
+                const running = spriteProg?.i === i
+                return (
+                  <div className={`sprite-cell ${f ? 'done' : ''} ${running ? 'run' : ''}`} key={`${i}-${p}`}>
+                    {f ? (
+                      <img src={f.url} alt={p} onClick={() => openPreview(f.url, p)} title="点击看大图" />
+                    ) : (
+                      <span className="sprite-empty">{running ? '生成中' : '—'}</span>
+                    )}
+                    <span className="sprite-pose" title={p}>{p}</span>
+                    <button
+                      className="btn btn-ghost sprite-redo"
+                      disabled={spriteBusy || !totalRefs}
+                      onClick={() => runSpriteFrames(i)}
+                    >
+                      {f ? '重出' : '出这一帧'}
+                    </button>
+                  </div>
+                )
+              })}
+            </div>
+
+            <div className="row" style={{ marginTop: 8 }}>
+              <div className="grow">
+                <div className="label">每行帧数</div>
+                <input
+                  className="input"
+                  type="number"
+                  min={1}
+                  max={8}
+                  value={spriteCols}
+                  onChange={(e) => setSpriteCols(+e.target.value)}
+                />
+              </div>
+              <div className="grow">
+                <div className="label">单帧尺寸</div>
+                <input
+                  className="input"
+                  type="number"
+                  min={64}
+                  max={512}
+                  value={spriteCell}
+                  onChange={(e) => setSpriteCell(+e.target.value)}
+                />
+              </div>
+              <div className="grow">
+                <div className="label">步数</div>
+                <input
+                  className="input"
+                  type="number"
+                  min={8}
+                  max={40}
+                  value={spriteSteps}
+                  onChange={(e) => setSpriteSteps(+e.target.value)}
+                />
+              </div>
+            </div>
+
+            <div className="row" style={{ marginTop: 8 }}>
+              <button
+                className="btn btn-primary grow"
+                disabled={spriteBusy || !totalRefs || poseList().length === 0}
+                onClick={() => runSpriteFrames()}
+              >
+                {spriteBusy
+                  ? `生成中 ${spriteProg ? `${spriteProg.i + 1}/${spriteProg.total}` : ''}`
+                  : `全部生成（${poseList().length} 帧）`}
+              </button>
+              {spriteBusy ? (
+                <button className="btn" onClick={() => (spriteCancel.current = true)}>
+                  停止
+                </button>
+              ) : (
+                <button
+                  className="btn"
+                  disabled={spriteWriting || !Object.keys(spriteFrames).length}
+                  onClick={composeSprite}
+                >
+                  {spriteWriting ? '合成中…' : '合成精灵表'}
+                </button>
+              )}
+            </div>
+            {!totalRefs && (
+              <div className="warn" style={{ marginTop: 8 }}>
+                逐帧生成需要一张角色参考图：先在下面「参考图 · 图生图」里选一张（角色三视图或立绘都行），
+                否则每帧的角色会各画各的。
+              </div>
+            )}
+            {spriteProg && (
+              <div className="hint" style={{ marginTop: 6 }}>
+                正在生成第 {spriteProg.i + 1}/{spriteProg.total} 帧 · {spriteProg.pose}
+              </div>
+            )}
+            <div className="hint" style={{ marginTop: 6 }}>
+              「动作序列」在上面「模板字段」里改，这里和提示词共用同一份。合成时按顺序铺格子，
+              尺寸统一、底部对齐、绿底自动抠掉。
+            </div>
+          </div>
         )}
 
         {!isTextTask && (

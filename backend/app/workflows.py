@@ -649,6 +649,9 @@ async def run_step(run_id: str, step_id: str, overrides: Optional[Dict[str, Any]
             imgs = [_load(a) for a in src]
             outs, smeta = sprite_pipe.normalize_frames(
                 imgs,
+                # 动作序列必须共享缩放：下蹲/抬腿的帧包围盒更小，各自撑满画布
+                # 会让角色在整段动作里忽大忽小，一播就露馅
+                shared_scale=True,
                 size=int(overrides.get("size") or step_def.get("size", 128)),
                 anchor=str(overrides.get("anchor") or step_def.get("anchor", "bottom")),
                 matte=bool(step_def.get("matte", True)),

@@ -19,6 +19,8 @@ type Props = {
   usedSlots: number
   maxRefs: number
   onToggle: (id: string) => void
+  /** 单选（后处理选图）：选中即替换，不因为已选满而把所有项灰掉 */
+  single?: boolean
 }
 
 /**
@@ -33,7 +35,7 @@ type Props = {
  * 现在：缩略图走后端等比缩略图（宽条仍是宽条）、悬停出大图预览卡、
  * 可以按「来源」筛（三视图/精灵表拆分/直接生成…）、分页展开。
  */
-export function RefPicker({ library, facets, selected, usedSlots, maxRefs, onToggle }: Props) {
+export function RefPicker({ library, facets, selected, usedSlots, maxRefs, onToggle, single }: Props) {
   const [pipe, setPipe] = useState(ALL)
   const [limit, setLimit] = useState(PAGE)
   const [hover, setHover] = useState<Hover | null>(null)
@@ -113,7 +115,7 @@ export function RefPicker({ library, facets, selected, usedSlots, maxRefs, onTog
           <div className="ref-picker" onScroll={() => setHover(null)}>
             {shown.map((a) => {
               const on = selected.includes(a.id)
-              const full = !on && usedSlots + selected.length >= maxRefs
+              const full = !on && !single && usedSlots + selected.length >= maxRefs
               return (
                 <button
                   key={a.id}

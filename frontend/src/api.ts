@@ -27,6 +27,16 @@ export type TextGuide = {
   after: string
 }
 
+export type TemplateField = {
+  id: string
+  label: string
+  default: string
+  /** 选了参考图之后该字段该变成什么（精灵表：角色 → 照参考图） */
+  fromRef?: string
+  hint?: string
+  presets?: { label: string; value: string }[]
+}
+
 export type Template = {
   id: string
   category: string
@@ -41,6 +51,14 @@ export type Template = {
   defaultStyle?: string
   /** 参考原图的编辑/提取类模板：画风跟随原图，选画风无效，前端不显示画风区 */
   styleLocked?: boolean
+  /** 有参考图时画风跟随原图（编辑底座保画风），不前置画风词，也不显示画风区 */
+  styleFollowsRef?: boolean
+  /**
+   * 需要用户单独填的内容（角色、动作序列…）。
+   * prompt 里用 `{id}` 占位，接口返回时已用 default 填好；
+   * 用户改字段 → 前端把提示词里那段旧值替换成新值。
+   */
+  fields?: TemplateField[]
   /** 仅 text：引导用户去别的对话式 AI 完成，不在本页做操作面板 */
   guide?: TextGuide
   /**
@@ -246,6 +264,48 @@ export const api = {
     fd.append('tolerance', String(tolerance))
     return fetch('/api/pipeline/sheet/split', { method: 'POST', body: fd }).then(json)
   },
+  /**
+   * 逐帧动作生成：一次一帧（用户填的动作原样进编辑指令）。
+   * 参考图两种来源：资产库 id，或直接传本地文件。
+   */
+  spriteFrame: (payload: {
+    pose: string
+    index: number
+    total: number
+    refAssetId?: string
+    subject?: string
+    style?: string
+    steps?: number
+    seed?: number | null
+    width?: number
+    height?: number
+  }, file?: File | null) => {
+    const fd = new FormData()
+    fd.append('pose', payload.pose)
+    fd.append('index', String(payload.index))
+    fd.append('total', String(payload.total))
+    if (payload.refAssetId) fd.append('refAssetId', payload.refAssetId)
+    if (payload.subject) fd.append('subject', payload.subject)
+    if (payload.style) fd.append('style', payload.style)
+    if (payload.steps) fd.append('steps', String(payload.steps))
+    if (payload.seed != null) fd.append('seed', String(payload.seed))
+    if (payload.width) fd.append('width', String(payload.width))
+    if (payload.height) fd.append('height', String(payload.height))
+    if (file) fd.append('file', file)
+    return fetch('/api/pipeline/sprite/frame', { method: 'POST', body: fd }).then(json)
+  },
+  /** 逐帧结果 → 共享缩放/基线对齐/抠图 → 精灵表 + 引擎索引 */
+  spriteCompose: (payload: {
+    frameAssetIds: string[]
+    cols: number
+    size?: number
+    matte?: boolean
+  }) =>
+    fetch('/api/pipeline/sprite/compose', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    }).then(json),
   pixelize: (file: File, colors: number, pixelSize: number, dither: boolean, palette: string) => {
     const fd = new FormData()
     fd.append('file', file)
