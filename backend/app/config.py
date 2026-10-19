@@ -76,5 +76,7 @@ def save_settings(payload: Dict[str, Any]) -> Dict[str, Any]:
     merged = {**current, **payload}
     merged["providers"] = {**current["providers"], **payload.get("providers", {})}
     merged["defaults"] = {**current["defaults"], **payload.get("defaults", {})}
-    SETTINGS_PATH.write_text(json.dumps(merged, ensure_ascii=False, indent=2), encoding="utf-8")
+    # allow_nan=False：NaN 写坏不如写炸（同 storage._save_index 的原则）
+    SETTINGS_PATH.write_text(
+        json.dumps(merged, ensure_ascii=False, indent=2, allow_nan=False), encoding="utf-8")
     return merged

@@ -15,6 +15,7 @@ from __future__ import annotations
 import time
 from typing import Any, Dict, List, Optional, Tuple
 
+import numpy as np
 from PIL import Image
 
 from . import backdrop as backdrop_pipe
@@ -193,8 +194,28 @@ def compose(
         if pal:
             frames = [palette_pipe.apply_palette(f, pal) for f in frames]
 
+    # 入库的逐帧 PNG 也清零透明区 RGB：帧文件、指标、合成表三方一致，
+    # 指标也不再被「每帧不一样的背景色」虚增（移植自 h3 的 core.process）
+    frames = [sheet_pipe.zero_transparent_rgb(f) for f in frames]
+
     sheet, index = sheet_pipe.compose_sheet(frames, max(1, int(cols)))
     m = metrics_pipe.sheet_metrics(frames, pal or None)
+
+    # 帧级警告（移植自 h3-character-studio 的 core.process：没有结论的
+    # 指标等于没算，警告要能直接指到「第几帧、什么问题」）
+    warnings: List[str] = []
+    for i, f in enumerate(frames):
+        a = np.asarray(f.convert("RGBA"))
+        if not (a[:, :, 3] > 0).any():
+            warnings.append(f"第 {i + 1} 帧轮廓为空：抠图把整帧抠没了，检查该帧")
+            continue
+        bbox = f.getchannel("A").getbbox()
+        if bbox and (bbox[0] <= 0 or bbox[1] <= 0
+                     or bbox[2] >= f.width or bbox[3] >= f.height):
+            warnings.append(f"第 {i + 1} 帧角色贴到画布边缘：可能被裁切，加大尺寸或减小 inset")
+    if len(frames) == 1:
+        warnings.append("只有一帧：这是静态图，不构成循环动画")
+
     meta = {
         "cols": max(1, int(cols)),
         "frames": len(frames),
@@ -203,6 +224,9 @@ def compose(
         "sheetSize": index["sheet_size"],
         "metrics": m,
         "metricsVerdict": metrics_pipe.metrics_verdict(m),
+        "warnings": warnings,
+        # 交付前自检：合成表每个单元格与源帧逐位一致（移植自 h3 的 check_bundle）
+        "checks": sheet_pipe.verify_composed(sheet, frames, max(1, int(cols))),
     }
     if pal:
         meta["palette"] = {"colors": len(pal), "swatches": [list(c) for c in pal[:32]]}

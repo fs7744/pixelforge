@@ -105,11 +105,17 @@ def palette_error(rgb: np.ndarray, palette: Sequence[Color]) -> float:
 
 
 def apply_palette(img: Image.Image, palette: Sequence[Color]) -> Image.Image:
-    """整图锁色（保留 alpha），返回 RGB(A) 图。"""
+    """整图锁色（保留 alpha），返回 RGB(A) 图。
+
+    只量化可见像素；透明像素的 RGB 清零（h3-character-studio 的
+    core.process 同款做法）。原先透明区也被映射进色板，绿幕残色会以
+    「不可见但可采样」的形式留在图里，引擎一采样就是晕边。
+    """
     rgba = img.convert("RGBA")
     arr = np.asarray(rgba).copy()
-    rgb = arr[:, :, :3]
-    idx = quantize_to_palette(rgb, palette)
+    visible = arr[:, :, 3] > 0
+    idx = quantize_to_palette(arr[:, :, :3], palette)
     pal = np.asarray(palette, dtype=np.uint8)
     arr[:, :, :3] = pal[idx]
+    arr[~visible, :3] = 0
     return Image.fromarray(arr, "RGBA")

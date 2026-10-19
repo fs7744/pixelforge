@@ -14,6 +14,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+import numpy as np
 from PIL import Image, ImageDraw
 
 from backend.app.pipelines import matte, resize, sheet
@@ -62,6 +63,22 @@ async def main() -> None:
     merged, _ = sheet.compose_sheet(frames, 4)
     print(f"[5] compose  → {merged.size}")
 
+    # 透明区 RGB 清零校验（移植自 h3 的 a[~visible,:3]=0）：必须用抠过图的
+    # 帧来检验——不透明网格走不到这条路径。合成表空白区 RGB 必须为 0，
+    # 否则透明像素携带的底色会被引擎采样成晕边
+    cut_frames, _ = sheet.split_sheet(cut, 4, 4)
+    merged2, _ = sheet.compose_sheet(cut_frames, 4)
+    m2 = np.asarray(merged2.convert("RGBA"))
+    t2 = m2[:, :, 3] == 0
+    assert t2.any(), "抠图帧没有透明区，清零路径未被检验"
+    assert not m2[t2, :3].any(), "合成表存在透明区 RGB 非 0"
+    print(f"[5b] zero-rgb → 透明区 {int(t2.sum())}px 全零 OK")
+
+    # 合成自检（移植自 h3 的 check_bundle）：单元格与「清零后」的源帧逐位一致
+    checks = sheet.verify_composed(merged2, cut_frames, 4)
+    assert checks.get("cellsMatchFrames"), checks
+    print(f"[5c] verify  → {checks['cells']} 单元格与源帧逐位一致 OK")
+
     # 透明率校验：抠图后四角必须透明
     alpha = cut.getchannel("A")
     corners = [alpha.getpixel((0, 0)), alpha.getpixel((cut.width - 1, 0)),
@@ -69,9 +86,24 @@ async def main() -> None:
     assert all(a == 0 for a in corners), f"四角未透明: {corners}"
     print("[6] alpha    → 四角透明 OK")
 
+    # 资产 sha256 溯源 + 写坏不如写炸（移植自 h3 的 digest / write_json）
+    from backend.app import storage
+    item = storage.save_asset(merged, kind="smoke", name="smoke-zero-rgb")
+    assert item.get("sha256"), "save_asset 未记录 sha256"
+    import hashlib
+    actual = hashlib.sha256((storage.ASSETS_DIR / item["file"]).read_bytes()).hexdigest()
+    assert actual == item["sha256"], "sha256 与文件内容不符"
+    try:
+        storage.save_asset(merged, kind="smoke", meta={"bad": float("nan")})
+        raise AssertionError("NaN 元数据没有被拒绝")
+    except ValueError:
+        pass
+    storage.delete_asset(item["id"])
+    print("[7] digest   → sha256 记录一致 / NaN 写入被拒绝 OK")
+
     png = io.BytesIO()
     rpg.save(png, "PNG")
-    print(f"[7] export   → rpgmaker png {len(png.getvalue())} bytes")
+    print(f"[8] export   → rpgmaker png {len(png.getvalue())} bytes")
     print("\nALL CHECKS PASSED")
 
 

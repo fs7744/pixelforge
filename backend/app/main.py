@@ -384,7 +384,11 @@ async def pipeline_sheet_compose(
 ):
     frames = [await _read_image(f) for f in files]
     sheet, meta = await run_in_threadpool(sheet_pipe.compose_sheet, frames, cols)
-    item = storage.save_asset(sheet, kind="sheet", meta={"pipeline": "sheet-compose", **meta.get("grid", {})})
+    # 交付前自检：单元格与源帧逐位一致（移植自 h3 的 check_bundle）
+    checks = await run_in_threadpool(sheet_pipe.verify_composed, sheet, frames, cols)
+    item = storage.save_asset(sheet, kind="sheet",
+                              meta={"pipeline": "sheet-compose", **meta.get("grid", {}),
+                                    "checks": checks})
     return {"asset": item, "index": meta}
 
 
@@ -990,7 +994,10 @@ async def export_zip(payload: Dict[str, List[str]]):
                 if not p.exists():      # 索引里有、磁盘上没了：跳过而不是整包 500
                     continue
                 zf.write(p, arcname=item["file"])
-                index.append({k: item[k] for k in ("id", "name", "file", "width", "height", "kind")})
+                index.append({**{k: item[k] for k in ("id", "name", "file", "width", "height", "kind")},
+                              # sha256 溯源（移植自 h3 的导出 manifest）：接收方
+                              # 能校验文件完整性；老资产没有这个字段时为 null
+                              "sha256": item.get("sha256")})
             zf.writestr("index.json", json.dumps(index, ensure_ascii=False, indent=2))
         buf.seek(0)
         return buf

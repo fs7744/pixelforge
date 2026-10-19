@@ -95,9 +95,28 @@ def _save_index(items: List[Dict[str, Any]]) -> None:
     # 先写临时文件再原子替换：直接覆盖时若进程中断，index.json 会变成
     # 半截 JSON，_load_index 只能返回空列表，整个资产库等于丢失。
     tmp = INDEX_PATH.with_suffix(".json.tmp")
-    tmp.write_text(json.dumps(items, ensure_ascii=False, indent=2), encoding="utf-8")
+    # allow_nan=False：NaN/Infinity 混进 meta 时直接炸在这里，而不是写出
+    # 严格 JSON 解析器拒绝的索引文件，留着一颗雷等下次读取才爆
+    # （h3-character-studio 的 write_json 同款原则：写坏不如写炸）
+    tmp.write_text(json.dumps(items, ensure_ascii=False, indent=2, allow_nan=False),
+                   encoding="utf-8")
     tmp.replace(INDEX_PATH)
     _INDEX_CACHE = list(items)
+
+
+def _digest_file(path: Path) -> str:
+    """文件 sha256（移植自 h3-character-studio 的 core.digest）。
+
+    用途：资产完整性校验（磁盘损坏时能发现）、导出包溯源、将来做
+    「同内容去重」。分块读，大文件不吃内存。
+    """
+    import hashlib
+
+    h = hashlib.sha256()
+    with path.open("rb") as f:
+        for chunk in iter(lambda: f.read(1024 * 1024), b""):
+            h.update(chunk)
+    return h.hexdigest()
 
 
 def stamp_ai_label(img: Image.Image, text: str = "AI") -> Image.Image:
@@ -143,11 +162,18 @@ def save_asset(
         "width": img.width,
         "height": img.height,
         "createdAt": int(time.time()),
+        "sha256": _digest_file(path),
         "meta": meta or {},
     }
     items = _load_index()
     items.insert(0, item)
-    _save_index(items)
+    try:
+        _save_index(items)
+    except Exception:
+        # 索引写失败（NaN、磁盘满）时把刚写的 PNG 一起收走，不留
+        # 「磁盘有文件、索引无记录」的孤儿——导出和缩略图都会漏掉它
+        path.unlink(missing_ok=True)
+        raise
     return item
 
 
@@ -202,7 +228,13 @@ def get_asset(asset_id: str) -> Optional[Dict[str, Any]]:
 
 
 def asset_path(item: Dict[str, Any]) -> Path:
-    return ASSETS_DIR / item["file"]
+    # 纵深防御（移植自 h3-character-studio 的 core.contained）：file 来自
+    # index.json（本模块写入、uuid 命名），理论上不可能穿出 assets 目录；
+    # 索引被手工改坏时在这里挡下，而不是把挂载点之外的文件读出去/删掉。
+    p = (ASSETS_DIR / item["file"]).resolve()
+    if not p.is_relative_to(ASSETS_DIR.resolve()):
+        raise ValueError(f"资产路径越界：{item['file']}")
+    return p
 
 
 THUMB_DIR = ASSETS_DIR / "thumbs"

@@ -35,6 +35,10 @@ client = TestClient(app)
 ok = 0
 fail = 0
 created = []
+# 基线快照：收尾时做差集，兜底清掉任何漏登记的资产。
+# 只靠 created 列表会漏：多图响应（sheet/split 的 frames、sprite/compose 的
+# frames、threeview 的 4 张）经常只记得第一张，库会被测试跑胖。
+_baseline_ids = {a["id"] for a in storage.list_assets()}
 
 
 def check(name, cond, detail=""):
@@ -1232,6 +1236,12 @@ for aid in created:
     if client.delete(f"/api/assets/{aid}").status_code == 200:
         removed += 1
 check("测试资产已清理", removed == len(created), f"{removed}/{len(created)}")
+
+# 快照兜底：登记表漏掉的多图响应产物在这一并清掉
+leaked = {a["id"] for a in storage.list_assets()} - _baseline_ids - set(created)
+leaked_removed = sum(1 for aid in leaked
+                     if client.delete(f"/api/assets/{aid}").status_code == 200)
+check("快照兜底无泄漏", leaked_removed == len(leaked), f"{leaked_removed}/{len(leaked)}")
 
 print(f"\n结果：{ok} 通过 / {fail} 失败")
 raise SystemExit(1 if fail else 0)

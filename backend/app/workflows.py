@@ -320,9 +320,11 @@ def create_run(wf_id: str, input_text: str, params: Optional[Dict[str, Any]] = N
 def _save_run(run: Dict[str, Any]) -> None:
     # 原子替换：run.json 是「跑了几分钟」的唯一进度记录，直接覆盖时
     # 中断会留下半截 JSON，后面 get_run 解析失败，整个 run 等于废掉。
+    # allow_nan=False：指标里的 NaN 写坏不如写炸（同 storage._save_index）。
     path = _run_path(run["id"])
     tmp = path.with_suffix(".json.tmp")
-    tmp.write_text(json.dumps(run, ensure_ascii=False, indent=2), encoding="utf-8")
+    tmp.write_text(json.dumps(run, ensure_ascii=False, indent=2, allow_nan=False),
+                   encoding="utf-8")
     tmp.replace(path)
 
 
@@ -818,7 +820,9 @@ async def _run_step_locked(run_id: str, step_id: str, overrides: Optional[Dict[s
             item = _save_asset(composed, kind="sheet", name=f"{run['id']}-sheet",
                                       meta={"runId": run["id"], "step": step_id, "index": index_json})
             artifacts = [item["id"]]
-            meta = {"cols": cols, "frames": len(frames), "frameSize": index_json["frame_size"]}
+            # 交付前自检：单元格与源帧逐位一致（移植自 h3 的 check_bundle）
+            meta = {"cols": cols, "frames": len(frames), "frameSize": index_json["frame_size"],
+                    "checks": sheet_pipe.verify_composed(composed, frames, cols)}
 
         elif stype == "seamless":
             from .pipelines import seamless as seamless_pipe
