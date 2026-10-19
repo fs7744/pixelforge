@@ -132,8 +132,13 @@ class GeneratePayload(BaseModel):
 
 @app.get("/api/styles")
 async def styles_endpoint():
-    """美术画风库（游戏行业典型风格，生成时拼接在提示词尾部）。"""
-    return {"styles": styles.list_styles()}
+    """美术画风库（游戏行业典型风格，生成时拼接在提示词尾部）。
+
+    recommended：模板分类 → 默认展示的画风 id。前端按当前模板的 category
+    取对应列表，避免 14 个画风无条件全列出来（画风与模板类型不匹配时
+    用户根本无从判断该选哪个）。
+    """
+    return {"styles": styles.list_styles(), "recommended": styles.CATEGORY_STYLES}
 
 
 @app.post("/api/generate")

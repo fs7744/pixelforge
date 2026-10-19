@@ -126,6 +126,29 @@ STYLES: List[Dict[str, Any]] = [
 
 _BY_ID: Dict[str, Dict[str, Any]] = {s["id"]: s for s in STYLES}
 
+# --------------------------------------------------------------------------- #
+# 模板分类 → 推荐画风
+# --------------------------------------------------------------------------- #
+# 为什么不用 tags 过滤：tags 太粗，「场景」覆盖 13/14 个画风、「角色」覆盖
+# 10 个，按交集筛完几乎没减少。这里按「这类模板实际会用到什么」单独维护
+# 一份表，默认只露 5-6 个最常用的，其余折在「全部」里。
+# 「工程」是文本任务（不出图），返回空列表，前端整块隐藏画风区。
+CATEGORY_STYLES: Dict[str, List[str]] = {
+    "角色": ["anime_cel", "chibi", "pixel_16bit", "pixel_hd", "painterly", "realistic"],
+    "动画": ["chibi", "anime_cel", "pixel_16bit", "pixel_hd", "us_cartoon", "concept_sketch"],
+    "场景": ["anime_cel", "painterly", "realistic", "watercolor", "pixel_hd", "lowpoly"],
+    "视差": ["painterly", "realistic", "watercolor", "pixel_hd", "anime_cel", "lowpoly"],
+    "瓦片": ["pixel_16bit", "pixel_hd", "lowpoly", "voxel", "painterly"],
+    "工程": [],
+}
+
+
+def recommend_for(category: Optional[str]) -> List[str]:
+    """某类模板默认展示的画风 id（顺序即 chip 顺序）；空列表 = 不展示画风区。"""
+    if not category:
+        return []
+    return [i for i in (CATEGORY_STYLES.get(category) or []) if i in _BY_ID]
+
 
 def list_styles() -> List[Dict[str, Any]]:
     """画风列表（去掉大字段，给前端 chips 用）。

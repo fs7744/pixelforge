@@ -315,6 +315,26 @@ check("接口透传 notes/kind", all(
     "notes" in api_tpls[t["id"]] and "kind" in api_tpls[t["id"]]
     for t in tpl_mod.TEMPLATES))
 
+print("== 画风推荐表 ==")
+r = client.get("/api/styles")
+check("画风接口可用", r.status_code == 200)
+sty = r.json()
+style_ids = {s["id"] for s in sty["styles"]}
+rec = sty.get("recommended") or {}
+check("接口返回 recommended", bool(rec), str(list(rec)))
+check("推荐表覆盖全部分类",
+      set(tpl_mod.CATEGORIES) - {"全部"} == set(rec), str(set(rec)))
+check("推荐 id 都真实存在",
+      all(i in style_ids for ids in rec.values() for i in ids),
+      str([i for ids in rec.values() for i in ids if i not in style_ids]))
+check("工程类不给画风（文本任务）", rec.get("工程") == [], str(rec.get("工程")))
+check("每类推荐 4-6 个，不全量堆出来",
+      all(4 <= len(ids) <= 6 for k, ids in rec.items() if k != "工程"),
+      str({k: len(v) for k, v in rec.items()}))
+check("推荐数少于画风总数（确实做了收敛）",
+      all(len(ids) < len(style_ids) for k, ids in rec.items() if k != "工程"),
+      f"{len(style_ids)} 种画风")
+
 print("== 清理测试资产 ==")
 removed = 0
 for aid in created:

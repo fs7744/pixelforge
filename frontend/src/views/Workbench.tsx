@@ -156,6 +156,8 @@ export default function Workbench({ onSendToPost }: Props) {
   const [providers, setProviders] = useState<ProviderInfo[]>([])
   const [provider, setProvider] = useState('')
   const [styles, setStyles] = useState<StyleInfo[]>([])
+  const [styleRecs, setStyleRecs] = useState<Record<string, string[]>>({})
+  const [showAllStyles, setShowAllStyles] = useState(false)
   const [styleId, setStyleId] = useState('')
   const [width, setWidth] = useState(512)
   const [height, setHeight] = useState(512)
@@ -195,7 +197,10 @@ export default function Workbench({ onSendToPost }: Props) {
       setWidth(s.defaults.width)
       setHeight(s.defaults.height)
     })
-    api.styles().then((d) => setStyles(d.styles))
+    api.styles().then((d) => {
+      setStyles(d.styles)
+      setStyleRecs(d.recommended || {})
+    })
   }, [])
 
   const filtered = useMemo(
@@ -220,6 +225,8 @@ export default function Workbench({ onSendToPost }: Props) {
     setPrompt(promptFor(t))
     if (t.params?.width) setWidth(t.params.width)
     if (t.params?.height) setHeight(t.params.height)
+    // 文本任务不出图，画风不会生效；留着只会让界面状态和实际不一致
+    if (t.kind === 'text') setStyleId('')
   }
 
   // 参考图最多 4 张：再多也分不清主次，编码时间还线性上涨
@@ -319,6 +326,15 @@ export default function Workbench({ onSendToPost }: Props) {
 
   const current = results.find((r) => r.id === selected)
   const currentTpl = templates.find((t) => t.id === tplId)
+  // 当前模板适用的画风：后端按分类给出推荐集（tags 太粗，按它过滤等于没过滤）。
+  // 文本任务不出图，整块画风区不渲染。
+  const recStyleIds = styleRecs[currentTpl?.category || '角色'] || []
+  const showStyleBlock = currentTpl?.kind !== 'text' && recStyleIds.length > 0
+  const visibleStyles = showAllStyles
+    ? styles
+    : styles.filter((s) => recStyleIds.includes(s.id) || s.id === styleId)
+  // 选了但不在本类推荐里的画风：仍然显示（否则用户看不到自己选了什么），标注一下
+  const styleOutOfRec = !!styleId && !recStyleIds.includes(styleId)
 
   return (
     <div className="body">
@@ -364,34 +380,56 @@ export default function Workbench({ onSendToPost }: Props) {
           )}
         </div>
 
-        <div>
-          <div className="label">美术画风 · 游戏行业典型风格</div>
-          <div className="chips mt8">
-            <button className={`chip ${styleId === '' ? 'on' : ''}`} onClick={() => setStyleId('')}>
-              不限定
-            </button>
-            {styles.map((s) => (
-              <StyleChip key={s.id} style={s} active={styleId === s.id} onSelect={() => setStyleId(s.id)} />
-            ))}
-          </div>
-          {styleId && (() => {
-            const s = styles.find((x) => x.id === styleId)
-            if (!s) return null
-            return (
-              <div className="hint" style={{ marginTop: 8 }}>
-                {s.hint}
-                {s.pixelize && (
-                  <>
-                    {' '}
-                    <span className="tag" style={{ color: 'var(--green)' }}>
-                      建议像素化 {s.pixelize.block}× · {s.pixelize.colors} 色
-                    </span>
-                  </>
-                )}
+        {showStyleBlock && (
+          <div>
+            <div className="row between" style={{ alignItems: 'center' }}>
+              <div className="label" style={{ marginBottom: 0 }}>
+                美术画风 ·{' '}
+                {showAllStyles
+                  ? `全部 ${styles.length} 种`
+                  : `适合「${currentTpl?.category || '角色'}」的 ${recStyleIds.length} 种`}
               </div>
-            )
-          })()}
-        </div>
+              <button
+                className="btn btn-ghost"
+                style={{ padding: '2px 8px', fontSize: 13 }}
+                onClick={() => setShowAllStyles((v) => !v)}
+              >
+                {showAllStyles ? '只看推荐' : `全部 ${styles.length} 种`}
+              </button>
+            </div>
+            <div className="chips mt8">
+              <button className={`chip ${styleId === '' ? 'on' : ''}`} onClick={() => setStyleId('')}>
+                不限定
+              </button>
+              {visibleStyles.map((s) => (
+                <StyleChip key={s.id} style={s} active={styleId === s.id} onSelect={() => setStyleId(s.id)} />
+              ))}
+            </div>
+            {styleId && (() => {
+              const s = styles.find((x) => x.id === styleId)
+              if (!s) return null
+              return (
+                <div className="hint" style={{ marginTop: 8 }}>
+                  {s.hint}
+                  {styleOutOfRec && (
+                    <>
+                      {' '}
+                      <span className="tag pink">非本类推荐</span>
+                    </>
+                  )}
+                  {s.pixelize && (
+                    <>
+                      {' '}
+                      <span className="tag" style={{ color: 'var(--green)' }}>
+                        建议像素化 {s.pixelize.block}× · {s.pixelize.colors} 色
+                      </span>
+                    </>
+                  )}
+                </div>
+              )
+            })()}
+          </div>
+        )}
 
         <div>
           <div className="label">提示词（可编辑）</div>
