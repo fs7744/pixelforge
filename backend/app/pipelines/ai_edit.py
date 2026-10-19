@@ -143,18 +143,25 @@ async def remove_watermark_ai(
 # --------------------------------------------------------------------------- #
 
 def _extend_prompt(times: int) -> str:
+    """续画指令：只写「要做什么」，不写「不要做什么」。
+
+    实测（Qwen-Image-Edit-2511，768x384，40 步）：加上「不要改变原图已有区域、
+    不要添加新的主体元素」这类否定约束后，模型会把两侧纯色边距当成完成的画面
+    原样保留——左右新增区标准差仅 3~6，退化成一张带纯色边框的图。改成纯正向的
+    「继续绘制延伸的场景」后标准差升到 ~60，能真正续画。
+    """
     return (
-        f"将画面内容向左右两侧自然延展，填满两侧新增的空白区域，使总宽度约为"
-        f"原来的{times}倍。保持原有的透视、光照、色彩风格和画面主题完全一致，"
-        f"延展内容要与原图边缘的结构自然衔接，不要重复原图内容，不要改变原图"
-        f"已有区域，不要添加新的主体元素。"
+        f"把这张图片向左右两侧扩展成一张连续的宽幅画面，在左右两侧的空白区域"
+        f"继续绘制延伸出去的自然场景，使总宽度约为原来的{times}倍。延续画面中"
+        f"同样的地形、植被、天空、水流和笔触，保持透视、光照、色彩风格与原来"
+        f"完全一致，让新增部分与原有画面无缝衔接。"
     )
 
 
 async def extend_horizontal_ai(
     img: Image.Image,
     times: int = 2,
-    blend: int = 6,
+    blend: int = 16,
     *,
     steps: Optional[int] = None,
     seed: Optional[int] = None,
@@ -190,9 +197,20 @@ async def extend_horizontal_ai(
     res = np.asarray(out, dtype=np.float32).copy()
     orig_arr = np.asarray(src, dtype=np.float32)
     _, W = res.shape[:2]
-    b = max(1, blend // 2)
+    # 过渡带宽度：模型续画的边界色与原图边缘色常有 30~70 级色差，6px 的窄带
+    # 会留下一条可见竖线（实测每列跳变约 10 级）。带宽取 blend，并夹住不让
+    # 它吃掉原图太多或越过贴回区。
+    b = max(1, int(blend))
+    b = min(b, max(1, w // 4), max(1, pad))
 
-    def _seam_band(x0: int) -> None:
+    def _seam_band(x0: int, to_orig: bool) -> None:
+        """在接缝两侧做线性交叉淡化。
+
+        to_orig=True（左接缝）：带宽左半是新内容、右半是原图，向原图过渡；
+        to_orig=False（右接缝）：带宽左半是原图、右半是新内容，反向过渡。
+        两侧方向不同，套同一个公式会在右接缝内侧硬切一刀，并把贴回区末尾
+        的列色横涂成一条竖带——这正是旧版残留的那条可见竖线的来源。
+        """
         x_lo, x_hi = max(0, x0 - b), min(W, x0 + b)
         if x_hi <= x_lo:
             return
@@ -201,15 +219,22 @@ async def extend_horizontal_ai(
         # 越界（接缝外侧的新内容区）clamp 到原图边缘色
         xi = np.clip(np.arange(x_lo, x_hi) - pad, 0, w - 1)
         orig_cols = orig_arr[:, xi, :]
-        res[:, x_lo:x_hi] = res[:, x_lo:x_hi] * (1.0 - ramp) + orig_cols * ramp
+        blend_now = res[:, x_lo:x_hi]
+        if to_orig:
+            res[:, x_lo:x_hi] = blend_now * (1.0 - ramp) + orig_cols * ramp
+        else:
+            res[:, x_lo:x_hi] = orig_cols * (1.0 - ramp) + blend_now * ramp
 
-    _seam_band(pad)
-    _seam_band(pad + w)
+    _seam_band(pad, True)
+    _seam_band(pad + w, False)
     if w > 2 * b:
         res[:, pad + b:pad + w - b] = orig_arr[:, b:w - b]
     out = Image.fromarray(np.clip(res, 0, 255).astype(np.uint8), "RGB")
+    # run_edit 的 origSize 记的是「传进去的画布尺寸」，对延展链路没有意义：
+    # 这里还原成用户原图尺寸，并另外记录画布尺寸，便于前端/复现时判断。
     meta.update({"pipeline": "seamless_ai", "times": times, "pad": pad, "blend": blend,
-                 "mean_rgb": mean_rgb})
+                 "mean_rgb": mean_rgb, "sourceSize": [w, h],
+                 "origSize": [out.width, out.height], "canvasSize": [w + pad * 2, h]})
     return out, meta
 
 

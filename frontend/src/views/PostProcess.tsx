@@ -126,7 +126,7 @@ export default function PostProcess({ incoming }: Props) {
         const fd = new FormData()
         fd.append('file', file)
         fd.append('times', String(seamTimes))
-        fd.append('blend', '6')
+        fd.append('blend', '16')
         if (aiSeed) fd.append('seed', aiSeed)
         const res = await fetch('/api/pipeline/seamless/ai', { method: 'POST', body: fd }).then((r) => r.json())
         if (!res.asset) throw new Error(res.meta?.reason || res.detail || 'AI 延展失败')

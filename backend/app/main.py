@@ -334,7 +334,7 @@ async def pipeline_watermark_ai(
 async def pipeline_seamless_ai(
     file: UploadFile = File(...),
     times: int = Form(2),
-    blend: int = Form(6),
+    blend: int = Form(16),
     steps: Optional[int] = Form(None),
     seed: Optional[int] = Form(None),
 ):
