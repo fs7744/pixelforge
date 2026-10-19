@@ -278,8 +278,10 @@ const ThreeViewBoard = forwardRef<BoardHandle, Props>(function ThreeViewBoard(
         return next
       })
 
+      // 画布内部把最后一步叫 strip（节点键，也是 localStorage 的键，不轻易改），
+      // 但接口的规范名是 compose。这里显式映射，别指望后端猜。
       const base = {
-        view: key,
+        view: key === 'strip' ? ('compose' as const) : key,
         prompt: p.prompt,
         style: p.styleId || undefined,
         width: p.width,
@@ -295,7 +297,7 @@ const ThreeViewBoard = forwardRef<BoardHandle, Props>(function ThreeViewBoard(
             : { ...base, seed, baseAssetId: cur.front.asset!.id }
 
       try {
-        const data = await api.threeviewStep(body as any)
+        const data = await api.threeviewStep(body)
         const item: Asset = data.images[0]
         setNodes((prev) => ({
           ...prev,

@@ -546,6 +546,10 @@ async def pipeline_threeview_step(payload: ThreeViewStepPayload):
     from .pipelines import threeview as tv_pipe
 
     view = (payload.view or "front").strip().lower()
+    # 末步的规范名是 compose，但「拼板 / strip」是同一件事，别名直接兜住：
+    # 前端画布内部节点键、早前版本的客户端、手写的 curl 都可能写成 strip，
+    # 为此报「未知步骤」纯属自找麻烦。
+    view = {"strip": "compose", "sheet": "compose", "composite": "compose"}.get(view, view)
     kw: Dict[str, Any] = dict(
         style=payload.style, steps=payload.steps, cfg=payload.cfg,
         seed=payload.seed, width=payload.width, height=payload.height,
@@ -576,7 +580,10 @@ async def pipeline_threeview_step(payload: ThreeViewStepPayload):
         img, vmeta = await tv_pipe.run_derived(
             view, base, payload.prompt, max_side=payload.maxSide, **kw)
     else:
-        raise ValueError(f"未知步骤：{view}")
+        raise ValueError(
+            f"未知步骤：{view}。合法值：front（正视图）/ side（侧视图）/ "
+            f"back（背视图）/ compose（三视图拼板，别名 strip）"
+        )
 
     item = storage.save_asset(
         img, kind="generated", name=f"threeview-{vmeta['name']}",

@@ -462,6 +462,22 @@ r = client.post("/api/pipeline/threeview/step", json={
     "viewAssetIds": ["deadbeef0001", "deadbeef0002", "deadbeef0003"]})
 check("分步：拼板引用不存在的资产 → 404", r.status_code == 404, r.status_code)
 
+# 前端画布把末步叫 strip（节点键 + localStorage 键），后端规范名是 compose。
+# 两边对不上就是「未知步骤：strip」——别名必须兜住，不能报未知。
+r = client.post("/api/pipeline/threeview/step", json={
+    "view": "strip", "width": 240, "height": 360,
+    "viewAssetIds": ["deadbeef0001", "deadbeef0002", "deadbeef0003"]})
+check("分步：strip 是 compose 的别名（不报未知步骤）",
+      r.status_code == 404 and "未知步骤" not in str(r.json().get("detail", "")),
+      f"{r.status_code} {r.text[:80]}")
+r = client.post("/api/pipeline/threeview/step",
+                json={"view": "strip", "viewAssetIds": ["a", "b"]})
+check("分步：strip 别名仍校验张数",
+      r.status_code == 400 and "3 张" in str(r.json().get("detail", "")), r.text[:80])
+r = client.post("/api/pipeline/threeview/step", json={"view": "nope"})
+check("分步：未知步骤的报错列出合法值",
+      r.status_code == 400 and "compose" in str(r.json().get("detail", "")), r.text[:90])
+
 check("分步：run_front / run_derived 是独立入口",
       callable(tv.run_front) and callable(tv.run_derived)
       and "engines" in inspect.signature(tv.run_front).parameters)
