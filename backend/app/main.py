@@ -35,6 +35,15 @@ app.add_middleware(
 )
 
 
+@app.exception_handler(ValueError)
+async def _value_error(request, exc: ValueError):
+    """管线里的 ValueError 都是「用户参数不对」（未知画风、无帧可合成等），
+    统一按 400 返回；否则 FastAPI 会当 500 并抛出整页堆栈。"""
+    from fastapi.responses import JSONResponse
+
+    return JSONResponse(status_code=400, content={"detail": str(exc)})
+
+
 # ---------- 基础 ----------
 @app.get("/api/health")
 async def health():
