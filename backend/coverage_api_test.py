@@ -679,6 +679,87 @@ check("转换：缺图报错说清两种输入方式",
 _r = client.post("/api/pipeline/restyle", data={"style": "hd2d", "refAssetId": "nope"})
 check("转换：资产不存在 → 404", _r.status_code == 404, _r.status_code)
 
+print("== 人物像素化（三档程度 + 背景处理） ==")
+# 三档变的是「造型语言」（头身比/眼睛/简化程度），不是颗粒大小；
+# 颗粒密度用「横向格数」描述，与输入分辨率无关。
+from backend.app.pipelines import charpixel as cp  # noqa: E402
+
+r = client.get("/api/pipeline/char-pixel/levels")
+check("档位接口可用", r.status_code == 200)
+lvj = r.json()
+check("三档齐全且顺序固定",
+      [x["id"] for x in lvj["levels"]] == ["fine", "mid", "chibi"],
+      str([x["id"] for x in lvj["levels"]]))
+check("档位密度递减（写实最细、Q 版最粗）",
+      lvj["levels"][0]["grid"] > lvj["levels"][1]["grid"] > lvj["levels"][2]["grid"],
+      str([x["grid"] for x in lvj["levels"]]))
+check("档位带头身比与色数",
+      all(x.get("heads") and x.get("colors") for x in lvj["levels"]))
+check("背景三选一（保留/绿幕/透明）",
+      {b["id"] for b in lvj["backgrounds"]} == {"keep", "green", "alpha"},
+      str([b["id"] for b in lvj["backgrounds"]]))
+check("档位提示词以重绘动作开头",
+      all(x_id and cp.get_level(x_id)["prompt"].startswith("把这张照片重绘成")
+          for x_id in ("fine", "mid", "chibi")))
+check("Q 版档写明 2 头身与大眼", "2 头身" in cp.get_level("chibi")["prompt"]
+      and "三分之一" in cp.get_level("chibi")["prompt"])
+
+_p_keep = cp.build_prompt(cp.get_level("mid"), "戴红帽子", "keep")
+_p_alpha = cp.build_prompt(cp.get_level("mid"), "戴红帽子", "alpha")
+check("保留原图：不铺绿幕", "#00FF00" not in _p_keep and "像素化处理" in _p_keep)
+check("绿幕/透明：指令钉死纯绿底（无渐变无纹理）",
+      all(k in _p_alpha for k in ("#00FF00", "无渐变", "无纹理")))
+check("用户补充要求拼在指令末尾", "补充要求：戴红帽子" in _p_keep)
+check("留空不拼空补充段", "补充要求" not in cp.build_prompt(cp.get_level("mid"), ""))
+try:
+    cp.get_level("nope")
+    _lv_err = ""
+except ValueError as e:
+    _lv_err = str(e)
+check("未知档位报错列出合法值", "chibi" in _lv_err, _lv_err[:60])
+
+# 横向格数 → 像素块：1024 宽 168 格 ≈ 6px 一格；分辨率无关是设计核心
+check("格数换算：1024/168 → 6px", cp.block_for(1024, 168) == 6, cp.block_for(1024, 168))
+check("格数换算：512/168 → 3px（同档位密度一致）", cp.block_for(512, 168) == 3,
+      cp.block_for(512, 168))
+check("格数换算：极小图不炸（至少 1px）", cp.block_for(16, 168) == 1, cp.block_for(16, 168))
+
+_src = Image.new("RGB", (128, 128), (200, 120, 90))
+_d = ImageDraw.Draw(_src)
+_d.rectangle([40, 30, 90, 100], fill=(30, 60, 200))
+_px_out, _px_meta = cp.apply_pixels(_src, 64, 8)
+check("apply_pixels：横向格数命中请求值",
+      abs(_px_meta["grid"][0] - 64) <= 1, str(_px_meta["grid"]))
+check("apply_pixels：色数被限制", _px_meta["colors"] <= 8, str(_px_meta["colors"]))
+check("apply_pixels：尺寸不变", _px_out.size == _src.size)
+
+# 透明背景 = 绿幕 + 色键：纯绿底上一块「角色」，抠完四角透、中间留
+_green = Image.new("RGB", (96, 96), (0, 255, 0))
+_d = ImageDraw.Draw(_green)
+_d.rectangle([24, 24, 71, 71], fill=(180, 40, 40))
+_cut, _cut_meta = cp.cut_out(_green)
+check("cut_out：强制走色键（确定性）", _cut_meta["method"] == "key", _cut_meta["method"])
+check("cut_out：绿底被抠透", _cut.getpixel((2, 2))[3] == 0, str(_cut.getpixel((2, 2))))
+check("cut_out：角色保留", _cut.getpixel((48, 48))[3] == 255, str(_cut.getpixel((48, 48))))
+
+_rp_out, _rp_meta = cp.repixel(_px_out, 32, 4)
+check("repixel：标记为复用原稿（没重跑 AI）", _rp_meta["reusedDraft"] is True)
+check("repixel：新格数生效", _rp_meta["grid"] == 32, str(_rp_meta))
+
+check("像素化：未知档位 → 400",
+      client.post("/api/pipeline/char-pixel", data={"level": "nope"}).status_code == 400)
+check("像素化：没有输入照片 → 400",
+      client.post("/api/pipeline/char-pixel", data={"level": "mid"}).status_code == 400)
+check("像素化：缺图报错说清两种输入方式",
+      "refAssetId" in str(client.post("/api/pipeline/char-pixel",
+                                      data={"level": "mid"}).json().get("detail", "")))
+check("重新像素化：缺原稿 id → 400",
+      client.post("/api/pipeline/char-pixel/repixel",
+                  json={"draftAssetId": "", "grid": 64, "colors": 8}).status_code == 400)
+check("重新像素化：原稿不存在 → 404",
+      client.post("/api/pipeline/char-pixel/repixel",
+                  json={"draftAssetId": "nope", "grid": 64, "colors": 8}).status_code == 404)
+
 # 模板里写死画风 = 选择器失效。这几个是**编辑/提取类**指令，要求「参考原图、
 # 画风不变」，它们本来就不参与画风切换，所以不计入、也不给默认画风。
 NO_DEFAULT_STYLE = {

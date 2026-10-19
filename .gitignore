@@ -34,6 +34,8 @@ data/*
 # 画风示例图是静态资产（gen_style_samples.py 生成，约 3MB），随仓库分发，
 # 保证新克隆画风 tooltip 开箱即有图；删除此行则需本地跑一次生成脚本
 !data/style_samples/
+# 人物像素化档位示例图（gen_char_pixel_samples.py 生成），随仓库分发
+!data/char_pixel_samples/
 
 # ---------- 冒烟测试与临时产物 ----------
 smoke-*.png

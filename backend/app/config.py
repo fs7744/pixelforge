@@ -10,6 +10,8 @@ DATA_DIR = ROOT / "data"
 ASSETS_DIR = DATA_DIR / "assets"
 # 画风示例图（画风 chip 悬浮 tooltip 用），由 backend/gen_style_samples.py 生成
 STYLE_SAMPLES_DIR = DATA_DIR / "style_samples"
+# 人物像素化三档示例图（档位卡片用），由 backend/gen_char_pixel_samples.py 生成
+CHAR_PIXEL_SAMPLES_DIR = DATA_DIR / "char_pixel_samples"
 SETTINGS_PATH = DATA_DIR / "settings.json"
 
 DEFAULT_SETTINGS: Dict[str, Any] = {

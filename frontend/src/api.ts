@@ -87,6 +87,20 @@ export type StyleInfo = {
   sample?: string | null
 }
 
+/** 人物像素化的一档：造型语言（头身比）+ 像素密度 + 色数 */
+export type CharPixelLevel = {
+  id: string
+  name: string
+  short: string
+  hint: string
+  heads: string
+  /** 成品横向格数（分辨率无关的像素密度） */
+  grid: number
+  colors: number
+  /** 档位示例图（gen_char_pixel_samples.py 生成过才有） */
+  sample?: string | null
+}
+
 export type ProviderInfo = {
   id: string
   label: string
@@ -334,6 +348,56 @@ export const api = {
     if (file) fd.append('file', file)
     return fetch('/api/pipeline/restyle', { method: 'POST', body: fd }).then(json)
   },
+  /** 人物像素化三档（写实比例 / 半 Q 版 / Q 版）+ 背景处理选项 */
+  charPixelLevels: (): Promise<{
+    levels: CharPixelLevel[]
+    backgrounds: { id: string; name: string; hint: string }[]
+  }> => fetch('/api/pipeline/char-pixel/levels').then(json),
+  /**
+   * 人物照片 → 像素角色：AI 按档位重绘 + 确定性像素化。
+   * 返回 { asset: 像素化成品, draft: AI 原稿 }；原稿留着给「重新像素化」用。
+   */
+  charPixel: (
+    payload: {
+      level: string
+      prompt?: string
+      assetId?: string
+      steps?: number
+      seed?: number | null
+      maxSide?: number
+      grid?: number
+      colors?: number
+      /** keep 保留原图 / green 绿幕 / alpha 透明（生成时就要定，改了得重生成） */
+      background?: string
+    },
+    file?: File | null,
+  ) => {
+    const fd = new FormData()
+    fd.append('level', payload.level)
+    if (payload.prompt) fd.append('prompt', payload.prompt)
+    if (payload.assetId) fd.append('refAssetId', payload.assetId)
+    if (payload.steps) fd.append('steps', String(payload.steps))
+    if (payload.seed != null) fd.append('seed', String(payload.seed))
+    if (payload.maxSide) fd.append('maxSide', String(payload.maxSide))
+    if (payload.grid) fd.append('grid', String(payload.grid))
+    if (payload.colors) fd.append('colors', String(payload.colors))
+    fd.append('background', payload.background || 'keep')
+    if (file) fd.append('file', file)
+    return fetch('/api/pipeline/char-pixel', { method: 'POST', body: fd }).then(json)
+  },
+  /** 只对 AI 原稿重新像素化（毫秒级，不占 GPU） */
+  charRepixel: (payload: {
+    draftAssetId: string
+    grid: number
+    colors: number
+    dither?: boolean
+    background?: string
+  }) =>
+    fetch('/api/pipeline/char-pixel/repixel', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    }).then(json),
   pixelize: (file: File, colors: number, pixelSize: number, dither: boolean, palette: string) => {
     const fd = new FormData()
     fd.append('file', file)

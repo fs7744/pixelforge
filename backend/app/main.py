@@ -18,7 +18,8 @@ from PIL import Image
 from pydantic import BaseModel
 
 from . import storage, styles, templates
-from .config import ASSETS_DIR, DATA_DIR, ROOT, STYLE_SAMPLES_DIR, load_settings, save_settings
+from .config import (ASSETS_DIR, CHAR_PIXEL_SAMPLES_DIR, DATA_DIR, ROOT,
+                     STYLE_SAMPLES_DIR, load_settings, save_settings)
 from .pipelines import matte as matte_pipe
 from .pipelines import resize as resize_pipe
 from .pipelines import sheet as sheet_pipe
@@ -584,6 +585,100 @@ async def pipeline_restyle(
     return {"asset": item, "meta": {"pipeline": "restyle", **meta}}
 
 
+# ---------- 人物像素化（照片 → 像素角色，三档造型程度） ----------
+@app.get("/api/pipeline/char-pixel/levels")
+async def char_pixel_levels():
+    """三档像素化程度：写实比例 / 半 Q 版 / Q 版。
+
+    档位是「造型语言」而不是「颗粒大小」：头身比、眼睛大小、阴影层数一起变，
+    只调 block 大小做不出 Q 版——那是 AI 重绘那一步的事。
+    """
+    from .pipelines import charpixel
+
+    return {"levels": charpixel.list_levels(), "backgrounds": charpixel.BACKGROUNDS}
+
+
+@app.post("/api/pipeline/char-pixel")
+async def pipeline_char_pixel(
+    level: str = Form("mid"),
+    prompt: str = Form(""),
+    file: Optional[UploadFile] = File(None),
+    refAssetId: str = Form(""),
+    steps: Optional[int] = Form(None),
+    seed: Optional[int] = Form(None),
+    maxSide: int = Form(1024),
+    # 不填则用档位预设；填了就是「在档位造型上微调像素密度」
+    grid: Optional[int] = Form(None),
+    colors: Optional[int] = Form(None),
+    # 背景处理：keep 保留原图 / green 绿幕 / alpha 透明（绿幕→色键去背）
+    background: str = Form("keep"),
+):
+    """人物照片 → 像素角色立绘：AI 按档位重绘，再确定性像素化收尾。
+
+    返回两套资产：
+    - asset：像素化成品（kind=charpixel）；
+    - draft：AI 原稿（未像素化）。留着它，用户调像素密度/色数时可以只重跑
+      毫秒级的像素化，而不是再等 2-4 分钟的 40 步编辑。
+    """
+    from .pipelines import charpixel
+
+    lv = charpixel.get_level(level)   # 未知档位先报错，别白读一遍图
+    if file is not None:
+        img = (await _read_image(file)).convert("RGB")
+    elif refAssetId:
+        img = _load_asset_image(refAssetId)
+    else:
+        raise ValueError("需要一张人物照片（上传 file 或指定 refAssetId）")
+
+    draft, out, meta = await charpixel.run(
+        img, lv["id"], prompt, steps=steps, seed=seed,
+        max_side=maxSide, grid=grid, colors=colors, background=background)
+
+    draft_item = storage.save_asset(
+        draft, kind="generated", name=f"人物像素化-{lv['short']}-AI原稿",
+        meta={"pipeline": "char-pixel", "role": "draft", "level": lv["id"],
+              "background": meta.get("background"),
+              "instruction": meta.get("instruction"), "sourceAssetId": refAssetId or None},
+        ai_label=False,
+    )
+    item = storage.save_asset(
+        out, kind="charpixel", name=f"人物像素化-{lv['short']}",
+        meta={**meta, "draftAssetId": draft_item["id"], "sourceAssetId": refAssetId or None},
+    )
+    return {"asset": item, "draft": draft_item,
+            "meta": {**meta, "draftAssetId": draft_item["id"]}}
+
+
+class CharRepixelPayload(BaseModel):
+    """对 AI 原稿重新像素化：只改像素密度/色数/背景处理，不重新生成。
+
+    background 允许 keep / green / alpha；但原稿本身是保留原图背景时，
+    alpha/green 只会把照片背景啃掉一块——这条由前端禁用，后端照做。
+    """
+
+    draftAssetId: str
+    grid: int = 120
+    colors: int = 24
+    dither: bool = False
+    background: str = "keep"
+
+
+@app.post("/api/pipeline/char-pixel/repixel")
+async def pipeline_char_pixel_repixel(payload: CharRepixelPayload):
+    from .pipelines import charpixel
+
+    if not payload.draftAssetId:
+        raise ValueError("需要 AI 原稿的资产 id（draftAssetId）")
+    draft = _load_asset_image(payload.draftAssetId)
+    out, meta = charpixel.repixel(
+        draft, payload.grid, payload.colors, payload.dither, payload.background)
+    item = storage.save_asset(
+        out, kind="charpixel", name=f"人物像素化-{payload.grid}格",
+        meta={**meta, "draftAssetId": payload.draftAssetId},
+    )
+    return {"asset": item, "meta": meta}
+
+
 # ---------- 角色三视图（正/侧/背独立生成 + 拼板） ----------
 class ThreeViewPayload(BaseModel):
     prompt: str
@@ -896,6 +991,11 @@ app.mount("/files", StaticFiles(directory=str(ASSETS_DIR)), name="files")
 # 画风示例图：gen_style_samples.py 生成后才挂载，避免目录不存在启动报错
 if STYLE_SAMPLES_DIR.is_dir():
     app.mount("/style-samples", StaticFiles(directory=str(STYLE_SAMPLES_DIR)), name="style-samples")
+
+# 人物像素化档位示例图：同样按需挂载
+if CHAR_PIXEL_SAMPLES_DIR.is_dir():
+    app.mount("/char-pixel-samples", StaticFiles(directory=str(CHAR_PIXEL_SAMPLES_DIR)),
+              name="char-pixel-samples")
 
 EXPORTS_DIR = DATA_DIR / "exports"
 EXPORTS_DIR.mkdir(parents=True, exist_ok=True)

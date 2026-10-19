@@ -5,15 +5,17 @@ import Workbench from './views/Workbench'
 import WorkflowView from './views/Workflow'
 import PostProcess from './views/PostProcess'
 import Restyle from './views/Restyle'
+import CharPixel from './views/CharPixel'
 import Library from './views/Library'
 import SettingsView from './views/Settings'
 import PreviewOverlay from './Preview'
 
-type Tab = 'workbench' | 'restyle' | 'workflow' | 'post' | 'library' | 'settings'
+type Tab = 'workbench' | 'restyle' | 'charpixel' | 'workflow' | 'post' | 'library' | 'settings'
 
 const TABS: { id: Tab; label: string }[] = [
   { id: 'workbench', label: '生成工作台' },
   { id: 'restyle', label: '画风转换' },
+  { id: 'charpixel', label: '人物像素化' },
   { id: 'workflow', label: '工作流' },
   { id: 'post', label: '后处理' },
   { id: 'library', label: '素材库' },
@@ -104,6 +106,7 @@ function Shell() {
           }}
         />
       )}
+      {tab === 'charpixel' && <CharPixel incoming={pendingRestyle} />}
       {tab === 'workflow' && <WorkflowView />}
       {tab === 'restyle' && (
         <Restyle

@@ -31,6 +31,7 @@ KIND_LABELS: Dict[str, str] = {
     "tile": "瓦片",
     "watermark": "水印",
     "restyled": "换画风",
+    "charpixel": "像素角色",
     "frame": "帧",
     "sheet": "精灵表",
 }
@@ -48,6 +49,7 @@ PIPELINE_LABELS: Dict[str, str] = {
     "seamless": "无缝",
     "seamless_ai": "无缝 · AI",
     "restyle": "换画风",
+    "char-pixel": "人物像素化",
     "watermark": "水印",
     "watermark_ai": "水印 · AI",
 }
