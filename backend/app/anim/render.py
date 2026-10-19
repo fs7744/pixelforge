@@ -378,6 +378,129 @@ def _sample_warp(track: Dict[str, Any], frame: int) -> List[List[float]]:
     return ks[-1]["warp"]
 
 
+def _dist_to_segment(px: float, py: float, x1: float, y1: float,
+                     x2: float, y2: float) -> float:
+    dx, dy = x2 - x1, y2 - y1
+    l2 = dx * dx + dy * dy
+    if l2 < 1e-6:
+        return math.hypot(px - x1, py - y1)
+    t = max(0.0, min(1.0, ((px - x1) * dx + (py - y1) * dy) / l2))
+    return math.hypot(px - (x1 + t * dx), py - (y1 + t * dy))
+
+
+def _skin_mesh(src: Image.Image, proj: Dict[str, Any], track: Dict[str, Any],
+               frame: int) -> list:
+    """骨骼权重蒙皮：网格顶点按「到骨段的距离」自动刷权重，再做线性混合。
+
+    为什么自动算权重而不是让用户刷：逐顶点手刷需要一整套权重笔刷 UI 与
+    存储格式，而这里的典型素材是「一条尾巴/一块布/一条手臂」——离骨段越近
+    跟得越紧这个规律已经够用。权重不落盘，渲染时现算，结果确定、可复现。
+
+    变换链：先把顶点按「静止位」摆到画布上（p_rest），再让每根骨骼用它相对
+    静止位的位移去拉这个点（M_i = world_i · T(-rest_i)），按权重加权。
+    所有骨骼都不动时 M_i 是单位阵，结果与原图逐像素一致——这条恒等式
+    就是最有力的回归测试。
+    """
+    skin = track.get("skin") or {}
+    grid = int(skin.get("grid") or 8)
+    falloff = float(skin.get("falloff") or 60)
+    bones = {b["id"]: b for b in proj.get("bones") or []}
+    ids = [i for i in (skin.get("bones") or []) if i in bones]
+    if len(ids) < 1:
+        return None
+
+    w, h = src.size
+    bind = track.get("bone") or "root"
+    k = _sample(track.get("keyframes") or [], frame)
+    px, py = track.get("pivot") or [w / 2, h / 2]
+    bind_rest = _T(bones[bind]["x"], bones[bind]["y"]) if bind in bones else np.eye(3)
+    place = bind_rest @ _T(k["x"], k["y"]) @ _R(k["rot"]) @ _S(k["scale"]) @ _T(-px, -py)
+
+    worlds = bone_world(proj, frame)
+    deltas = {}
+    for bid in ids:
+        b = bones[bid]
+        deltas[bid] = (worlds.get(bid, np.eye(3)) @ _T(-b["x"], -b["y"]), b)
+
+    verts = []
+    for j in range(grid + 1):
+        row = []
+        for i in range(grid + 1):
+            p_rest = place @ np.array([w * i / grid, h * j / grid, 1.0])
+            rx, ry = float(p_rest[0]), float(p_rest[1])
+            scores = []
+            for bid, (_m, b) in deltas.items():
+                d = _dist_to_segment(rx, ry, b["x"], b["y"],
+                                     b["x"] + float(b.get("len") or 60), b["y"])
+                # 距离归一化到 falloff：越近权重越大；平方让影响衰减得更利落
+                scores.append((1.0 / ((d / max(1.0, falloff)) ** 2 + 1.0), bid))
+            scores.sort(reverse=True)
+            top = scores[:2]
+            tot = sum(sc for sc, _ in top) or 1.0
+            acc = np.zeros(2)
+            for sc, bid in top:
+                m = deltas[bid][0]
+                p = m @ np.array([rx, ry, 1.0])
+                acc += (sc / tot) * p[:2]
+            row.append((float(acc[0]), float(acc[1])))
+        verts.append(row)
+
+    return verts
+
+
+def _blit_triangle(out: np.ndarray, src: np.ndarray,
+                   src_tri, dst_tri) -> None:
+    """把源三角形仿射贴到目标三角形上（只看目标包围盒，避免整幅重采样）。"""
+    xs = [p[0] for p in dst_tri]
+    ys = [p[1] for p in dst_tri]
+    H, W = out.shape[:2]
+    x0 = max(0, int(math.floor(min(xs))) - 1)
+    x1 = min(W, int(math.ceil(max(xs))) + 2)
+    y0 = max(0, int(math.floor(min(ys))) - 1)
+    y1 = min(H, int(math.ceil(max(ys))) + 2)
+    if x1 - x0 < 1 or y1 - y0 < 1:
+        return
+    # warpAffine 的 M 是「源 → 目标」，内部自己求逆；传反了会采到图外，
+    # 结果整块透明（还会把相邻三角写出来的像素擦掉）。
+    m = cv2.getAffineTransform(
+        np.float32(src_tri),
+        np.float32([(p[0] - x0, p[1] - y0) for p in dst_tri]))
+    roi = cv2.warpAffine(src, m, (x1 - x0, y1 - y0), flags=cv2.INTER_LINEAR,
+                         borderMode=cv2.BORDER_CONSTANT, borderValue=(0, 0, 0, 0))
+    mask = np.zeros((y1 - y0, x1 - x0), np.uint8)
+    cv2.fillConvexPoly(mask, np.int32([(p[0] - x0, p[1] - y0) for p in dst_tri]), 255)
+    sub = out[y0:y1, x0:x1]
+    sel = mask.astype(bool)
+    sub[sel] = roi[sel]
+
+
+def _warp_grid(src: Image.Image, verts: List[List[Tuple[float, float]]],
+               grid: int, canvas: Tuple[int, int]) -> Image.Image:
+    """按「顶点网格」把贴图撕成三角形逐片仿射贴回去。
+
+    为什么不用 PIL 的 Image.MESH：它的语义是「源四边形 → 目标**包围盒**」，
+    形变信息只能体现在包围盒上，四边形内部怎么歪完全丢掉——蒙皮的弯曲会
+    退化成方块拼接。三角形分片仿射是精确的（片内仿射，片间连续）。
+    """
+    if cv2 is None:  # pragma: no cover
+        raise RuntimeError("骨骼蒙皮需要 opencv-python：pip install opencv-python")
+    sw, sh = src.size
+    arr = np.asarray(src.convert("RGBA"))
+    cw, ch = canvas
+    out = np.zeros((ch, cw, 4), np.uint8)
+    for j in range(grid):
+        for i in range(grid):
+            s00 = (sw * i / grid, sh * j / grid)
+            s10 = (sw * (i + 1) / grid, sh * j / grid)
+            s11 = (sw * (i + 1) / grid, sh * (j + 1) / grid)
+            s01 = (sw * i / grid, sh * (j + 1) / grid)
+            d00, d10 = verts[j][i], verts[j][i + 1]
+            d11, d01 = verts[j + 1][i + 1], verts[j + 1][i]
+            _blit_triangle(out, arr, (s00, s10, s11), (d00, d10, d11))
+            _blit_triangle(out, arr, (s00, s11, s01), (d00, d11, d01))
+    return Image.fromarray(out, "RGBA")
+
+
 def render_frame(proj: Dict[str, Any], frame: int,
                  loader) -> Image.Image:
     """渲染单帧。loader(asset_id) -> PIL.Image（由调用方决定怎么取图）。"""
@@ -394,15 +517,21 @@ def render_frame(proj: Dict[str, Any], frame: int,
             continue
         src = src.convert("RGBA")
         src = warp_image(src, _sample_warp(t, frame))
+        # 关键帧采样在两条路径（蒙皮 / 普通）都要用，提前算，别在分支里各算一次
         k = _sample(t.get("keyframes") or [], frame)
-        px, py = t.get("pivot") or [src.width / 2, src.height / 2]
-        world = worlds.get(t.get("bone") or "root", iw)
-        # pivot 的语义是「贴图上这一点落在骨骼原点上」：先把它平移到原点，
-        # 再旋转/缩放，最后按关键帧位移。写成 T(p)…T(-p) 的话，rotation=0、
-        # scale=1 时两段平移互相抵消，pivot 就完全失效了（贴图左上角贴到骨骼）。
-        m = (world @ _T(k["x"], k["y"]) @ _R(k["rot"])
-             @ _S(k["scale"]) @ _T(-px, -py))
-        placed = _apply_matrix(src, m, (cw, ch))
+        if t.get("skin"):
+            verts = _skin_mesh(src, proj, t, frame)
+            placed = (_warp_grid(src, verts, int(t["skin"].get("grid") or 8), (cw, ch))
+                      if verts else Image.new("RGBA", (cw, ch), (0, 0, 0, 0)))
+        else:
+            px, py = t.get("pivot") or [src.width / 2, src.height / 2]
+            world = worlds.get(t.get("bone") or "root", iw)
+            # pivot 的语义是「贴图上这一点落在骨骼原点上」：先把它平移到原点，
+            # 再旋转/缩放，最后按关键帧位移。写成 T(p)…T(-p) 的话，rotation=0、
+            # scale=1 时两段平移互相抵消，pivot 就完全失效了（贴图左上角贴到骨骼）。
+            m = (world @ _T(k["x"], k["y"]) @ _R(k["rot"])
+                 @ _S(k["scale"]) @ _T(-px, -py))
+            placed = _apply_matrix(src, m, (cw, ch))
         base = _blend(base, placed, t.get("blend") or "normal",
                       float(t.get("opacity", 1.0)) * k["opacity"])
         if t.get("fx"):

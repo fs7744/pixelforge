@@ -131,6 +131,23 @@ def _num(v: Any, default: float = 0.0) -> float:
     return f if f == f and abs(f) != float("inf") else default
 
 
+def _skin(v: Any, bone_ids: set) -> Optional[Dict[str, Any]]:
+    """骨骼蒙皮配置：参与骨骼 + 影响半径 + 网格密度。
+
+    权重不存盘：按顶点到骨段的距离在渲染时现算（确定性），
+    省掉一个「权重图」编辑器和一堆同步问题。
+    """
+    if not isinstance(v, dict):
+        return None
+    ids = [str(x) for x in (v.get("bones") or [])][:8]
+    ids = [i for i in ids if i in bone_ids]
+    if not ids:
+        return None
+    return {"bones": ids,
+            "falloff": max(8.0, min(round(_num(v.get("falloff"), 60), 1), 400.0)),
+            "grid": max(3, min(int(_num(v.get("grid"), 8)), 20))}
+
+
 def _bez(v: Any) -> Optional[List[float]]:
     """cubic-bezier 控制点：只收 4 个数，x 夹到 [0,1]（CSS 同样约束）。
 
@@ -302,6 +319,7 @@ def normalize(proj: Dict[str, Any]) -> Dict[str, Any]:
             "pivot": [round(_num(pivot[0]), 2), round(_num(pivot[1]), 2)],
             "warp": warp,
             "warpKeys": [wdedup[i] for i in sorted(wdedup)],
+            "skin": _skin(t.get("skin"), ids),
             "keyframes": [dedup[i] for i in sorted(dedup)],
             "fx": fx,
             "opacity": max(0.0, min(round(_num(t.get("opacity"), 1.0), 4), 1.0)),

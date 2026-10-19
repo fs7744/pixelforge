@@ -1229,6 +1229,70 @@ export default function Editor() {
               <option value="add">相加</option>
               <option value="multiply">正片叠底</option>
             </select>
+            <div className="label" style={{ marginTop: 10 }}>骨骼蒙皮</div>
+            <label className="hint" style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
+              <input
+                type="checkbox"
+                checked={!!track.skin}
+                onChange={(e) => update((p) => {
+                  const t = p.tracks.find((v: any) => v.id === track.id)
+                  if (!e.target.checked) {
+                    t.skin = null
+                    return
+                  }
+                  // 默认把「绑定的骨骼 + 它的父骨骼」放进来：一根骨骼带不动形状，
+                  // 至少两节才能看出弯曲
+                  const bind = p.bones.find((x: any) => x.id === t.bone)
+                  const ids = [t.bone]
+                  if (bind?.parent) ids.push(bind.parent)
+                  t.skin = { bones: ids, falloff: 60, grid: 8 }
+                })}
+              />
+              自动权重（按顶点到骨段的距离）
+            </label>
+
+            {track.skin && (
+              <>
+                <div className="label" style={{ marginTop: 6 }}>参与骨骼</div>
+                <div className="chips">
+                  {bones.map((b: any) => {
+                    const on = track.skin.bones.includes(b.id)
+                    return (
+                      <button key={b.id} className={`chip sm ${on ? 'on' : ''}`}
+                              onClick={() => update((p) => {
+                                const t = p.tracks.find((v: any) => v.id === track.id)
+                                const set = new Set<string>(t.skin.bones)
+                                if (set.has(b.id)) set.delete(b.id)
+                                else set.add(b.id)
+                                t.skin = { ...t.skin, bones: [...set] }
+                              })}>
+                        {b.name}
+                      </button>
+                    )
+                  })}
+                </div>
+                <div className="label" style={{ marginTop: 8 }}>
+                  影响半径 {Math.round(track.skin.falloff)}px
+                </div>
+                <input type="range" min={10} max={200} value={track.skin.falloff}
+                       style={{ width: '100%' }}
+                       onChange={(e) => update((p) => {
+                         const t = p.tracks.find((v: any) => v.id === track.id)
+                         t.skin = { ...t.skin, falloff: +e.target.value }
+                       })} />
+                <div className="label" style={{ marginTop: 6 }}>网格 {track.skin.grid}×{track.skin.grid}</div>
+                <input type="range" min={4} max={16} value={track.skin.grid}
+                       style={{ width: '100%' }}
+                       onChange={(e) => update((p) => {
+                         const t = p.tracks.find((v: any) => v.id === track.id)
+                         t.skin = { ...t.skin, grid: +e.target.value }
+                       })} />
+                <div className="hint">
+                  网格越密越贴合骨骼，但片间折痕也越明显；12 以上一般够用。
+                </div>
+              </>
+            )}
+
             <button className="btn btn-ghost btn-block" style={{ marginTop: 8 }}
                     onClick={() => update((p) => {
                       const t = p.tracks.find((v: any) => v.id === track.id)

@@ -450,6 +450,60 @@ async def main() -> None:
     assert anim_render._sample_warp(wproj["tracks"][0], 0)[4][0] == 0
     print(f"[9i] warpKey → 中间帧控制点 dx={midw[4][0]:.1f}（0→10 的一半）OK")
 
+    # 蒙皮：静止位必须与原图一致（M_i 都是单位阵），转动一节只弯自己那片
+    band = Image.new("RGBA", (160, 40), (0, 0, 0, 0))
+    db = ImageDraw.Draw(band)
+    db.rectangle((0, 0, 159, 39), fill=(80, 160, 220, 255))
+    for x in range(0, 160, 16):
+        db.rectangle((x, 0, x + 6, 39), fill=(240, 230, 120, 255))
+    ta = storage.save_asset(band, kind="generated", name="smoke-skin-band")
+
+    def _skin_proj(rot2: float, with_skin: bool):
+        tr = {"id": "t1", "assetId": ta["id"], "bone": "b1", "pivot": [20, 20],
+              "keyframes": [{"frame": 0, "scale": 1}]}
+        if with_skin:
+            tr["skin"] = {"bones": ["b1", "b2"], "falloff": 40, "grid": 10}
+        return anim_model.normalize({
+            "id": "abcdef012350", "name": "skin", "canvas": [240, 120], "frames": 1,
+            "bones": [
+                {"id": "b1", "parent": None, "x": 20, "y": 20, "len": 60},
+                {"id": "b2", "parent": "b1", "x": 80, "y": 20, "len": 60,
+                 "keys": [{"frame": 0, "rot": rot2}]},
+            ],
+            "tracks": [tr],
+        })
+
+    tex = {ta["id"]: band}.get
+    still_plain = anim_render.render_frame(_skin_proj(0, False), 0, tex)
+    still_skin = anim_render.render_frame(_skin_proj(0, True), 0, tex)
+    a1 = np.asarray(still_plain.convert("RGB"), dtype=np.int16)
+    a2 = np.asarray(still_skin.convert("RGB"), dtype=np.int16)
+    still_mad = float(np.abs(a1 - a2).mean())
+    assert still_mad < 3.0, f"静止位应与普通渲染一致，MAD={still_mad:.1f}"
+
+    bent = anim_render.render_frame(_skin_proj(45, True), 0, tex)
+
+    def _alpha_diff(img):
+        return np.abs(np.asarray(img.convert("RGBA"))[..., 3].astype(np.int16)
+                      - np.asarray(still_skin.convert("RGBA"))[..., 3].astype(np.int16))
+
+    def _centroid_y(img):
+        ys, _xs = np.where(np.asarray(img.convert("RGBA"))[..., 3] > 40)
+        return float(ys.mean())
+
+    da = _alpha_diff(bent)
+    left = float(da[:, :60].sum())
+    right = float(da[:, 110:].sum())
+    dy = _centroid_y(bent) - _centroid_y(still_skin)
+    # 权重是按距离混合的，左段也会被带动一点；但弯曲量应该明显集中在右段，
+    # 而且整体质心要往下（b2 从 +X 转向 +X+Y）
+    assert right > left * 2, f"右段形变应明显大于左段：左 {left:.0f} 右 {right:.0f}"
+    assert dy > 3, f"弯下去后质心应下移，实际 {dy:.1f}px"
+    print(f"[9j] skin    → 静止位与原渲染 MAD={still_mad:.2f}；转 45° 后 "
+          f"右段形变 {right / max(1.0, left):.1f}× 左段，质心下移 {dy:.1f}px OK")
+    storage.delete_asset(ta["id"])
+
+
 
     for it in (a_bar, a_blk):
         storage.delete_asset(it["id"])
