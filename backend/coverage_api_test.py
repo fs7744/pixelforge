@@ -16,8 +16,10 @@ import inspect
 import io
 import json
 import os
+import shutil
 import signal
 import sys
+import time
 import zipfile
 from pathlib import Path
 
@@ -41,6 +43,7 @@ created = []
 # 只靠 created 列表会漏：多图响应（sheet/split 的 frames、sprite/compose 的
 # frames、threeview 的 4 张）经常只记得第一张，库会被测试跑胖。
 _baseline_ids = {a["id"] for a in storage.list_assets()}
+_START_TS = int(time.time())
 
 
 def check(name, cond, detail=""):
@@ -89,6 +92,7 @@ def cleanup_assets(verbose: bool = False) -> None:
     if verbose:
         check("测试资产已清理", removed == len(created), f"{removed}/{len(created)}")
     try:
+        storage._INDEX_CACHE = None      # noqa: SLF001 —— 快照必须反映磁盘真身
         leaked = {a["id"] for a in storage.list_assets()} - _baseline_ids - set(created)
     except Exception:
         leaked = set()
@@ -101,6 +105,39 @@ def cleanup_assets(verbose: bool = False) -> None:
             pass
     if verbose:
         check("快照兜底无泄漏", leaked_removed == len(leaked), f"{leaked_removed}/{len(leaked)}")
+
+    # 最后一道兜底：本轮开始之后创建的资产一律清掉。
+    # 登记表会漏（工作流步骤产物、多图响应），快照差集也会漏——storage 的
+    # 索引有进程内缓存，测试直接读盘核对时看到的和缓存不是同一份。
+    # 所以这里先作废缓存再扫，按「创建时间 >= 本轮起点」判定，不依赖登记。
+    try:
+        storage._INDEX_CACHE = None      # noqa: SLF001 —— 测试收尾，必须看到磁盘真身
+        leftovers = [a for a in storage.list_assets()
+                     if a["id"] not in _baseline_ids and a["createdAt"] >= _START_TS]
+    except Exception:
+        leftovers = []
+    # 工作流产物的名字是「runId-步骤」，run 文件被测试删掉后它们就成了孤儿；
+    # 按「meta.runId 在 data/runs 里已不存在」补一刀，不依赖时间戳。
+    try:
+        live_runs = {p.stem for p in (Path("data/runs")).glob("*.json")}
+        for a in storage.list_assets():
+            rid = (a.get("meta") or {}).get("runId")
+            if rid and rid not in live_runs:
+                leftovers.append(a)
+    except Exception:
+        pass
+    for a in leftovers:
+        # 逐个 try：某个资产的图片已被前一步删掉时 delete_asset 会抛，
+        # 整段包一个 try 会让后面的残留全留下来（实测就是这样漏了 57 个）
+        try:
+            storage.delete_asset(a["id"])
+        except Exception:
+            pass
+    if verbose:
+        check("时间戳兜底无残留",
+              not [a for a in storage.list_assets()
+                   if a["id"] not in _baseline_ids and a["createdAt"] >= _START_TS],
+              f"余 {len(storage.list_assets())}")
 
 
 atexit.register(cleanup_assets)
@@ -1546,6 +1583,102 @@ check("取消端点：不存在任务 ok=False",
 _tid4 = prog_mod.register()
 _r = client.post(f"/api/tasks/{_tid4}/cancel")
 check("取消端点：已注册任务 ok=True", _r.status_code == 200 and _r.json().get("ok") is True)
+
+print("== 场景语义分层（decompose 打桩） ==")
+from backend.app.pipelines import layers as _layers_mod  # noqa: E402
+
+_orig_decompose = _layers_mod.decompose
+
+
+async def _fake_decompose(image, *, layers=4, resolution=640, **kw):
+    w, h = image.size
+    out = []
+    for i in range(layers):
+        im = Image.new("RGBA", (w, h), (0, 0, 0, 0))
+        bw = w if i == 0 else max(2, w // (i + 2))
+        ImageDraw.Draw(im).rectangle((0, 0, bw, h), fill=(60, 90, 120, 255))
+        out.append(im)
+    covs = [1.0] + [round(max(2, w // (i + 2)) / w, 4) for i in range(1, layers)]
+    order = sorted(range(layers), key=lambda i: covs[i], reverse=True)
+    return out, {"pipeline": "scene-layers", "layerCount": layers, "size": [w, h],
+                 "coverage": covs, "order": order, "warnings": []}
+
+
+_layers_mod.decompose = _fake_decompose
+try:
+    _src_l = Image.new("RGB", (200, 120), (30, 30, 30))
+    _buf_l = io.BytesIO()
+    _src_l.save(_buf_l, "PNG")
+    _r = client.post(
+        "/api/pipeline/scene/layers",
+        files={"file": ("scene.png", _buf_l.getvalue(), "image/png")},
+        data={"layers": "4"},
+    )
+    check("scene/layers 200", _r.status_code == 200, _r.text[:120])
+    _j = _r.json() if _r.status_code == 200 else {}
+    _items = _j.get("layers") or []
+    for _it in _items:
+        remember(_it)
+    check("分出 4 层", len(_items) == 4, str(len(_items)))
+    check("图层都是 layer kind", all(i.get("kind") == "layer" for i in _items),
+          str([i.get("kind") for i in _items]))
+    check("meta 带覆盖率与排序", len(_j.get("meta", {}).get("coverage") or []) == 4
+          and len(_j.get("meta", {}).get("order") or []) == 4,
+          str(_j.get("meta"))[:120])
+
+    check("scene/layers 层数超限 → 400",
+          client.post("/api/pipeline/scene/layers",
+                      files={"file": ("s.png", _buf_l.getvalue(), "image/png")},
+                      data={"layers": "9"}).status_code == 400)
+    check("scene/layers 非法分辨率 → 400",
+          client.post("/api/pipeline/scene/layers",
+                      files={"file": ("s.png", _buf_l.getvalue(), "image/png")},
+                      data={"layers": "4", "resolution": "800"}).status_code == 400)
+    check("scene/layers 无输入 → 400",
+          client.post("/api/pipeline/scene/layers", data={"layers": "4"}).status_code == 400)
+
+    # 视差工作流的「语义分层」步骤：上一步一张基准图 → 按远→近重排后落产物
+    _rp = client.post("/api/workflows/parallax/runs",
+                      json={"input": "桩测试山谷", "params": {}}).json()
+    _rp_path = Path("data/runs") / f"{_rp['id']}.json"
+    _rp_state = json.loads(_rp_path.read_text(encoding="utf-8"))
+    _base = storage.save_asset(Image.new("RGB", (180, 100), (25, 25, 35)),
+                               kind="generated", name="stub-parallax-base")
+    remember(_base)
+    _rp_state["steps"][0]["status"] = "done"
+    _rp_state["steps"][0]["artifacts"] = [_base["id"]]
+    _rp_path.write_text(json.dumps(_rp_state), encoding="utf-8")
+    _r = client.post(f"/api/runs/{_rp['id']}/steps/layers/run", json={})
+    if _r.status_code == 200:
+        _st = _r.json()["steps"][1]
+        _arts = _st.get("artifacts") or []
+        check("视差分层步骤出 4 层", len(_arts) == 4, str(len(_arts)))
+        check("分层 meta 带 order/coverage",
+              len(_st.get("meta", {}).get("order") or []) == 4, str(_st.get("meta"))[:120])
+        check("产物按覆盖率降序落盘",
+              all(_st["meta"]["coverage"][a] >= _st["meta"]["coverage"][b]
+                  for a, b in zip(_st["meta"]["order"], _st["meta"]["order"][1:])),
+              str(_st["meta"]["order"]))
+        for _aid in _arts:
+            _it = storage.get_asset(_aid)
+            if _it:
+                remember(_it)
+    else:
+        check("视差分层步骤 200", False, f"{_r.status_code} {_r.text[:120]}")
+    _rp_path.unlink(missing_ok=True)
+finally:
+    _layers_mod.decompose = _orig_decompose
+
+# 分层底座识别：只看 model_index.json 的 _class_name
+import tempfile  # noqa: E402
+
+_with_tmp = tempfile.mkdtemp()
+Path(_with_tmp, "model_index.json").write_text(
+    json.dumps({"_class_name": "QwenImageLayeredPipeline"}), encoding="utf-8")
+from backend.app.providers.diffusers_local import detect_family as _df  # noqa: E402
+
+check("detect_family 认 Layered", _df(_with_tmp) == "qwen_layered", _df(_with_tmp))
+shutil.rmtree(_with_tmp, ignore_errors=True)
 
 print("== 清理测试资产 ==")
 cleanup_assets(verbose=True)

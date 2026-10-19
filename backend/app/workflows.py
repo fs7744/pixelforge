@@ -249,7 +249,7 @@ WORKFLOWS: List[Dict[str, Any]] = [
         "id": "parallax",
         "name": "视差图层工作流",
         "tag": "PARALLAX",
-        "desc": "参考图 → 分层提取 → 同尺寸规整 → scroll_scale 参数表 + 打包",
+        "desc": "参考图 → 语义分层 → 同尺寸规整 → scroll_scale 参数表 + 打包",
         "inputHint": "场景描述（如：日式幻想山谷，城堡与远山）",
         "steps": [
             {
@@ -262,12 +262,11 @@ WORKFLOWS: List[Dict[str, Any]] = [
             },
             {
                 "id": "layers",
-                "name": "图层提取",
-                "type": "generate",
-                "desc": "按层次提取 4 个图层（MVP 用独立生成模拟）",
-                "prompt": "只保留{input}中的{layer}，其余元素移除，统一暗紫色纯色背景 #2A153F，同尺寸同坐标。",
-                "n": 4,
-                "layerNames": ["远景天空与雪山", "中景丘陵与城堡", "近景地面与道路", "前景植物遮挡层"],
+                "name": "语义分层",
+                "type": "scene_layers",
+                "desc": "把基准图拆成 4 张同坐标 RGBA 图层（拆同一张图，不是各画一遍）",
+                "layers": 4,
+                "steps": 50,
             },
             {
                 "id": "normalize",
@@ -1037,6 +1036,40 @@ async def _run_step_locked(run_id: str, step_id: str, overrides: Optional[Dict[s
                     meta={"runId": run["id"], "step": step_id, "index": i},
                 )["id"])
             meta = smeta
+
+        elif stype == "scene_layers":
+            src = overrides.get("artifacts") or _prev_artifacts(run, index)
+            if len(src) != 1:
+                raise RuntimeError(
+                    f"语义分层需要恰好一张基准场景图，上一步给了 {len(src)} 张。"
+                    "请先用单图步骤生成场景，或在上一步把 n 改成 1。")
+            from .pipelines import layers as layers_pipe
+
+            base = _load(src[0])
+            imgs, lmeta = await layers_pipe.decompose(
+                base,
+                layers=int(overrides.get("layers") or step_def.get("layers", 4)),
+                steps=step_def.get("steps"),
+                seed=run.get("params", {}).get("seed"),
+                resolution=int(step_def.get("resolution", 640)),
+                task_id=task_id,
+            )
+            # 落产物前按「远→近」重排：视差导出按产物顺序分配 scroll_scale，
+            # 顺序反了整张地图的远近关系就颠倒了。模型原序不做保证，
+            # 覆盖率降序是启发式（背景铺满、前景物件小），meta 里已写明。
+            artifacts = []
+            labels = []
+            for rank, li in enumerate(lmeta["order"]):
+                item = _save_asset(
+                    imgs[li], kind="workflow",
+                    name=f"{run['id']}-{step_id}-{rank:02d}",
+                    meta={"runId": run["id"], "step": step_id, "index": rank,
+                          "layerIndex": li, "coverage": lmeta["coverage"][li],
+                          "label": f"layer {li}（覆盖 {lmeta['coverage'][li]:.0%}）"},
+                )
+                artifacts.append(item["id"])
+                labels.append(f"layer {li}")
+            meta = {**lmeta, "labels": labels, "sourceAssetId": src[0]}
 
         elif stype == "normalize":
             src = overrides.get("artifacts") or _prev_artifacts(run, index)

@@ -102,6 +102,8 @@ def run_doctor() -> Dict[str, Any]:
          "bash backend/fetch_qwen_edit.sh", False),
         ("model-wan", "models/wan2.2-ti2v-5b", "视频底座 Wan2.2 TI2V-5B",
          "PYTHONPATH=. python backend/fetch_wan22.py", False),
+        ("model-layered", "models/qwen-image-layered", "分层底座 Qwen-Image-Layered",
+         "PYTHONPATH=. python backend/fetch_qwen_layered.py", False),
     ]
     for cid, rel, label, fix, required in models:
         p = _model_dir(rel)

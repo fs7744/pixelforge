@@ -12,6 +12,7 @@ const PIPELINES = [
   { id: 'matte', name: '连通域抠图', tag: 'FLOOD-FILL', desc: '只删与边缘连通的同色背景，不误删内部同色像素' },
   { id: 'video', name: '视频/GIF 导入', tag: 'EXTRACT', desc: '录像/GIF 拆成帧资产，可选逐帧抠图（绿幕直接可用）' },
   { id: 'refnorm', name: '参考图规范化', tag: 'NORMALIZE', desc: '裁主体 → 方形画布 → 底部对齐基线，参考图几何一致重跑才可比' },
+  { id: 'layers', name: '场景语义分层', tag: 'LAYERED', desc: '一张场景图拆成 N 张同坐标 RGBA 图层，视差与前景替换直接用' },
   { id: 'resize', name: '尺寸规整', tag: 'NEAREST', desc: '最近邻硬缩放 / 等比留白 / RPGMaker 一键' },
   { id: 'sheet', name: 'Sprite Sheet 拆分', tag: 'N×M', desc: '按行列拆帧并生成引擎索引 JSON' },
   { id: 'pixelize', name: '像素化对齐', tag: 'PALETTE', desc: '分块单色 + 限定调色板，把 AI 图变成规整像素风' },
@@ -23,8 +24,10 @@ const PIPELINES = [
 ]
 
 // AI 管线（Qwen-Image-Edit-2511 指令式编辑）：单次 40 步 2-4 分钟
+// 分层用的是 Qwen-Image-Layered（50 步），同样慢，同样要进度条
 const isAiPipeline = (p: string, wmMode: string) =>
-  p === 'seamless_ai' || p === 'restyle' || (p === 'watermark' && wmMode === 'ai')
+  p === 'seamless_ai' || p === 'restyle' || p === 'layers' ||
+  (p === 'watermark' && wmMode === 'ai')
 
 export default function PostProcess({ incoming }: Props) {
   const [file, setFile] = useState<File | null>(null)
@@ -62,6 +65,12 @@ export default function PostProcess({ incoming }: Props) {
   const [refSize, setRefSize] = useState(0)
   const [refPad, setRefPad] = useState(6)
   const [refBase, setRefBase] = useState(94)
+  // 场景语义分层：产物是多张同尺寸图层，meta 带覆盖率/远近距离序/警告
+  const [layerItems, setLayerItems] = useState<Asset[]>([])
+  const [layerMeta, setLayerMeta] = useState<any>(null)
+  const [layN, setLayN] = useState(4)
+  const [laySteps, setLaySteps] = useState(50)
+  const [layRes, setLayRes] = useState(640)
   const [styles, setStyles] = useState<StyleInfo[]>([])
   const [restyleId, setRestyleId] = useState('')
   const [aiSeed, setAiSeed] = useState('')
@@ -93,6 +102,8 @@ export default function PostProcess({ incoming }: Props) {
     setBefore(URL.createObjectURL(f))
     setOut(null)
     setFrames([])
+    setLayerItems([])
+    setLayerMeta(null)
     setIndex(null)
     setError('')
     setNote('')
@@ -147,6 +158,8 @@ export default function PostProcess({ incoming }: Props) {
     setNote('')
     setOut(null)
     setFrames([])
+    setLayerItems([])
+    setLayerMeta(null)
     // 只有 AI 管线有逐步进度；确定性管线秒级完成，不占 SSE 连接
     const aiRun = isAiPipeline(pipeline, wmMode)
     const taskId = aiRun ? newTaskId() : ''
@@ -168,6 +181,25 @@ export default function PostProcess({ incoming }: Props) {
         setNote(
           `${res.meta.canvas[0]}×${res.meta.canvas[1]} · 主体 ${res.meta.subjectSize.join('×')}` +
           ` · 缩放 ${Math.round(res.meta.scale * 100)}% · 底色${bg} ${res.meta.background}`,
+        )
+      } else if (pipeline === 'layers') {
+        const res = await api.sceneLayers(
+          {
+            layers: layN,
+            steps: laySteps,
+            resolution: layRes,
+            seed: aiSeed ? Number(aiSeed) : null,
+            taskId,
+          },
+          file,
+        )
+        if (!res.layers?.length) throw new Error(res.detail || '没有拆出图层')
+        setLayerItems(res.layers)
+        setLayerMeta(res.meta)
+        const cov = (res.meta.coverage || []).map((c: number) => Math.round(c * 100)).join(' / ')
+        const warn = res.meta.warnings?.length ? ` · ${res.meta.warnings.join('；')}` : ''
+        setNote(
+          `${res.meta.layerCount} 层 · ${res.meta.size[0]}×${res.meta.size[1]} · 覆盖率 ${cov}%${warn}`,
         )
       } else if (pipeline === 'video') {
         const res = await api.videoFrames(
@@ -523,6 +555,61 @@ export default function PostProcess({ incoming }: Props) {
           </>
         )}
 
+        {pipeline === 'layers' && (
+          <>
+            <div className="label">层数 {layN}</div>
+            <div className="chips mt8">
+              {[2, 3, 4, 5, 6].map((n) => (
+                <button key={n} className={`chip ${layN === n ? 'on' : ''}`} onClick={() => setLayN(n)}>
+                  {n}
+                </button>
+              ))}
+            </div>
+            <div className="row" style={{ marginTop: 10 }}>
+              <div className="grow">
+                <div className="label">步数 {laySteps}</div>
+                <input
+                  type="range"
+                  min={20}
+                  max={60}
+                  step={5}
+                  value={laySteps}
+                  onChange={(e) => setLaySteps(+e.target.value)}
+                  style={{ width: '100%' }}
+                />
+              </div>
+              <div className="grow">
+                <div className="label">分辨率</div>
+                <div className="chips mt8">
+                  {[640, 1024].map((r) => (
+                    <button key={r} className={`chip sm ${layRes === r ? 'on' : ''}`} onClick={() => setLayRes(r)}>
+                      {r}
+                    </button>
+                  ))}
+                </div>
+              </div>
+            </div>
+            <div className="label" style={{ marginTop: 8 }}>种子（留空随机；同种子同图重跑结果一致）</div>
+            <input
+              className="input"
+              value={aiSeed}
+              placeholder="留空随机"
+              onChange={(e) => setAiSeed(e.target.value.replace(/[^0-9]/g, ''))}
+            />
+            <div className="hint">
+              50 步、CFG 4 是官方推荐档（640 分桶质量最稳，1024 更清晰但更慢）。
+              层数给多了会出现几乎全透明的空层：那一层没有内容，减一层重跑即可。
+              层序按「主体底边越靠上越远」推算（横版 2.5D 的通行约定，铺满画布的背景层固定最远），
+              面积大小不参与判断；毕竟真实场景里一堵近处的墙比远处的城堡大得多。导出前仍建议看一眼缩略图。
+            </div>
+            <div className="hint">
+              与「生成四遍再抠纯色键」的区别：这是拆**同一张**图，透视和轮廓天然对齐，
+              每层自带 alpha，叠起来没有接缝。需要 Qwen-Image-Layered 底座（约 57.7GB，
+              未下载时提示 PYTHONPATH=. python backend/fetch_qwen_layered.py）。
+            </div>
+          </>
+        )}
+
         {pipeline === 'sheet' && (
           <>
             <div className="row">
@@ -761,10 +848,15 @@ export default function PostProcess({ incoming }: Props) {
                 </button>
               </>
             )}
+            {layerItems.length > 0 && (
+              <button className="btn" onClick={() => api.exportZip(layerItems.map((l) => l.id))}>
+                导出图层 ZIP
+              </button>
+            )}
           </div>
         </div>
 
-        <div style={{ display: 'grid', gridTemplateColumns: out || frames.length ? '1fr 32px 1fr' : '1fr', gap: 16, alignItems: 'center' }}>
+        <div style={{ display: 'grid', gridTemplateColumns: out || frames.length || layerItems.length ? '1fr 32px 1fr' : '1fr', gap: 16, alignItems: 'center' }}>
           <div>
             <div className="hint" style={{ marginBottom: 6 }}>BEFORE</div>
             <div className="thumb checker" style={{ height: 380, borderColor: 'rgba(255,255,255,0.35)' }}>
@@ -784,7 +876,7 @@ export default function PostProcess({ incoming }: Props) {
               )}
             </div>
           </div>
-          {(out || frames.length > 0) && (
+          {(out || frames.length > 0 || layerItems.length > 0) && (
             <>
               <div style={{ textAlign: 'center', color: '#00FF88', fontSize: 20 }}>→</div>
               <div>
@@ -797,6 +889,28 @@ export default function PostProcess({ incoming }: Props) {
                       style={{ cursor: 'zoom-in' }}
                       onClick={() => openPreview(out.url, out.name || '处理后')}
                     />
+                  </div>
+                ) : layerItems.length ? (
+                  <div className="grid" style={{ maxHeight: 380, overflowY: 'auto', padding: 4 }}>
+                    {layerItems.map((l, i) => (
+                      <div
+                        key={l.id}
+                        className="thumb checker"
+                        style={{ aspectRatio: '1 / 1', borderColor: 'rgba(0,255,136,0.5)' }}
+                        onClick={() => openPreview(l.url, l.name)}
+                      >
+                        <img src={l.url} alt={l.name} style={{ cursor: 'zoom-in' }} />
+                        <span
+                          style={{
+                            position: 'absolute', left: 0, bottom: 0, padding: '1px 4px',
+                            background: 'rgba(0,0,0,0.7)', fontSize: 10,
+                            fontFamily: 'Silkscreen, monospace', color: '#00FF88',
+                          }}
+                        >
+                          {i + 1} · {Math.round((layerMeta?.coverage?.[i] ?? 0) * 100)}%
+                        </span>
+                      </div>
+                    ))}
                   </div>
                 ) : (
                   <div className="grid" style={{ maxHeight: 380, overflowY: 'auto', padding: 4 }}>
@@ -816,6 +930,35 @@ export default function PostProcess({ incoming }: Props) {
             </>
           )}
         </div>
+
+        {pipeline === 'layers' && layerMeta && (
+          <div className="card" style={{ marginTop: 10 }}>
+            <div className="row between">
+              <div className="label">图层顺序（远 → 近，按主体底边高度推算）</div>
+              <button
+                className="btn btn-ghost"
+                onClick={() => navigator.clipboard.writeText(JSON.stringify(layerMeta, null, 2))}
+              >
+                复制 meta
+              </button>
+            </div>
+            <div style={{ fontSize: 13, lineHeight: 1.7, marginTop: 4 }}>
+              {layerMeta.order?.map((li: number, rank: number) => (
+                <span key={li} style={{ marginRight: 12 }}>
+                  {rank + 1}. 第 {li + 1} 层 · 覆盖 {Math.round((layerMeta.coverage?.[li] ?? 0) * 100)}%
+                </span>
+              ))}
+            </div>
+            <div className="hint">
+              顺序按主体底边高度推：脚踩得越低越近，铺满画布的背景层固定最远。这只是启发式——
+              悬浮物件（云、飞鸟）没有「脚」，按面积排曾经把近处的墙排到城堡后面，所以这里不再用面积判断。
+              导出前按缩略图确认一遍。层数给多了会出现接近全透明的空层——那层没有内容，减一层重跑更快。
+            </div>
+            {layerMeta.warnings?.length > 0 && (
+              <div className="err">{layerMeta.warnings.join('；')}</div>
+            )}
+          </div>
+        )}
 
         {pipeline === 'video' && frames.length > 1 && !out && (
           <div className="card" style={{ marginTop: 10 }}>

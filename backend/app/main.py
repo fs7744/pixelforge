@@ -766,6 +766,63 @@ async def pipeline_refnorm(
     return {"asset": item, "meta": meta}
 
 
+@app.post("/api/pipeline/scene/layers")
+async def pipeline_scene_layers(
+    file: Optional[UploadFile] = File(None),
+    refAssetId: str = Form(""),
+    layers: int = Form(4),
+    steps: Optional[int] = Form(None),
+    seed: Optional[int] = Form(None),
+    resolution: int = Form(640),
+    taskId: str = Form(""),
+):
+    """场景语义分层（移植自 FrameBaker 的 imageLayers）：一张图 → N 张 RGBA 图层。
+
+    与视差工作流原方案的差别：原方案把同一场景生成 N 遍再抠纯色键，四次推理
+    的透视与轮廓对不上；这里是拆同一张图，层与层天然同坐标。
+    """
+    from .pipelines import layers as layers_pipe
+
+    if not (layers_pipe.MIN_LAYERS <= int(layers) <= layers_pipe.MAX_LAYERS):
+        raise HTTPException(
+            400, f"层数需在 {layers_pipe.MIN_LAYERS}-{layers_pipe.MAX_LAYERS} 之间，收到 {layers}")
+    if int(resolution) not in layers_pipe.RESOLUTIONS:
+        raise HTTPException(400, f"分辨率只支持 {list(layers_pipe.RESOLUTIONS)}，收到 {resolution}")
+
+    if file is not None:
+        img = await _read_image(file)
+        source_id = None
+    elif refAssetId:
+        img = _load_asset_image(refAssetId)
+        source_id = refAssetId
+    else:
+        raise HTTPException(400, "需要一张场景图（上传 file 或指定 refAssetId）")
+
+    task_id = progress_mod.register(taskId or None)
+    try:
+        imgs, meta = await guarded(task_id, layers_pipe.decompose(
+            img, layers=layers, steps=steps, seed=seed, resolution=resolution,
+            task_id=task_id,
+        ))
+    except HTTPException:
+        raise
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    except Exception as e:
+        raise HTTPException(502, str(e))
+
+    items = [
+        storage.save_asset(
+            im, kind="layer", name=f"图层 {i + 1}",
+            meta={"pipeline": "scene-layers", "layerIndex": i,
+                  "layerCount": len(imgs), "coverage": meta["coverage"][i],
+                  "sourceAssetId": source_id},
+        )
+        for i, im in enumerate(imgs)
+    ]
+    return {"layers": items, "meta": meta}
+
+
 @app.post("/api/pipeline/tile")
 async def pipeline_tile(
     file: UploadFile = File(...),

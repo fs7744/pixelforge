@@ -193,6 +193,63 @@ async def main() -> None:
     (godot_export.EXPORTS_DIR / finfo["zip"].rsplit("/", 1)[-1]).unlink(missing_ok=True)
     print(f"[7g] fourdir  → 四向包 {len(znames)} 文件，清单校验通过 OK")
 
+    # 场景语义分层（移植自 FrameBaker imageLayers）：注入假 provider 跑纯逻辑
+    from backend.app.pipelines import layers as layers_pipe
+
+    class _FakeLayered:
+        """顶掉 57GB 底座：只验拆完之后的覆盖率/排序/尺寸对齐/校验。"""
+
+        async def generate_layers(self, image, *, model=None, layers=4, steps=None,
+                                  resolution=640, seed=None, task_id=None):
+            w, h = image.size
+            out = []
+            for i in range(layers):
+                canvas = Image.new("RGBA", (w, h), (0, 0, 0, 0))
+                bw = w if i == 0 else max(2, w // (i + 2))   # 背景铺满，其余越来越窄
+                ImageDraw.Draw(canvas).rectangle(
+                    (0, 0, bw, h), fill=(40 + i * 20, 90, 120, 255))
+                out.append(canvas)
+            return out, {"steps": steps or 50, "family": "qwen_layered",
+                         "layers": layers, "resolution": resolution}
+
+    lay_src = Image.new("RGB", (240, 160), (20, 20, 20))
+    limgs, lmeta = await layers_pipe.decompose(lay_src, layers=4, provider=_FakeLayered())
+    assert len(limgs) == 4 and all(i.size == (240, 160) for i in limgs), [i.size for i in limgs]
+    # 覆盖率必须严格递减（背景 100%，后面越来越窄），排序第一层是背景
+    assert lmeta["coverage"] == sorted(lmeta["coverage"], reverse=True), lmeta["coverage"]
+    assert lmeta["order"][0] == 0 and lmeta["coverage"][0] == 1.0, lmeta
+    assert lmeta["pipeline"] == "scene-layers" and lmeta["size"] == [240, 160]
+    try:
+        await layers_pipe.decompose(lay_src, layers=9, provider=_FakeLayered())
+        raise AssertionError("层数超限应报错")
+    except ValueError:
+        pass
+    try:
+        await layers_pipe.decompose(lay_src, resolution=800, provider=_FakeLayered())
+        raise AssertionError("非法分辨率应报错")
+    except ValueError:
+        pass
+    print(f"[7h] layers   → 4 层 {limgs[0].size} · 覆盖率 {lmeta['coverage']} · "
+          f"远→近 {lmeta['order']} OK")
+
+    # 层序启发式：面积大小不能当深度（真实场景里石墙 31% 会比城堡 2.8% 更靠前）
+    class _FakeDepth:
+        async def generate_layers(self, image, *, layers=3, **kw):
+            w, h = image.size
+            out = [
+                Image.new("RGBA", (w, h), (0, 0, 0, 255)),          # 0 背景
+                Image.new("RGBA", (w, h), (0, 0, 0, 0)),            # 1 小且高（远）
+                Image.new("RGBA", (w, h), (0, 0, 0, 0)),            # 2 大且低（近）
+            ]
+            ImageDraw.Draw(out[1]).rectangle((10, 20, 60, 100), fill=(200, 60, 60, 255))
+            ImageDraw.Draw(out[2]).rectangle((0, 300, w, h), fill=(60, 200, 60, 255))
+            return out, {"steps": 50}
+
+    _, _dm = await layers_pipe.decompose(Image.new("RGB", (200, 400), (0, 0, 0)),
+                                         layers=3, provider=_FakeDepth())
+    assert _dm["order"] == [0, 1, 2], _dm["order"]   # 背景 → 高处小物件 → 低处大遮挡
+    print(f"[7i] layers   → 层序按底边高度：{_dm['order']}（面积大≠更近）OK")
+
     png = io.BytesIO()
     rpg.save(png, "PNG")
     print(f"[8] export   → rpgmaker png {len(png.getvalue())} bytes")

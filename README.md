@@ -79,6 +79,9 @@ bash backend/fetch_qwen_edit.sh
 # 4. 视频底座：Wan2.2 TI2V-5B（约 32GB，可选；「动画工作流 · 视频生成」要用）
 #    走 ModelScope（huggingface.co 在本机代理下不通），支持断点续传
 PYTHONPATH=. python backend/fetch_wan22.py
+
+# 5. 分层底座：Qwen-Image-Layered（约 57.7GB，可选；场景语义分层、视差工作流要用）
+PYTHONPATH=. python backend/fetch_qwen_layered.py
 ```
 
 > **为什么 torch 不随 `start.sh` 一起装**：它单独就占 2.9GB，而抠图、像素化、延展
@@ -88,11 +91,11 @@ PYTHONPATH=. python backend/fetch_wan22.py
 下载都支持断点续传，中断后重跑即可接着下。装完在「设置 → 内置推理服务」里确认模型路径，
 点「测试连接」。模型目录换了位置就改这里的路径，不用改代码。
 
-| | Z-Image-Turbo | Qwen-Image-Edit-2511 | Wan2.2 TI2V-5B |
-|---|---|---|---|
-| 分工 | 文生图（一句话 → 角色/场景） | 参考图生成 / 指令式编辑 | 图生视频（角色图 + 动作 → 连续帧） |
-| 规模 | 6B · 8 步蒸馏 · 约 5s/张 | 20B · 40 步 · 约 3-4 分钟/张 | 5B · 30 步 · 33 帧约 60-90 秒 |
-| 显存 | bf16 全载约 21GB | fp8 权重约 20GB | transformer fp8 9.3GB + umT5 fp8 5.3GB + VAE 2.6GB |
+| | Z-Image-Turbo | Qwen-Image-Edit-2511 | Wan2.2 TI2V-5B | Qwen-Image-Layered |
+|---|---|---|---|---|
+| 分工 | 文生图（一句话 → 角色/场景） | 参考图生成 / 指令式编辑 | 图生视频（角色图 + 动作 → 连续帧） | 单图拆语义层（一张场景 → N 张 RGBA） |
+| 规模 | 6B · 8 步蒸馏 · 约 5s/张 | 20B · 40 步 · 约 3-4 分钟/张 | 5B · 30 步 · 33 帧约 60-90 秒 | 20B · 50 步 · 4 层约 1-2 分钟 |
+| 显存 | bf16 全载约 21GB | fp8 权重约 20GB | transformer fp8 9.3GB + umT5 fp8 5.3GB + VAE 2.6GB | fp8 权重约 20.5GB |
 
 视频底座解决的是「逐帧编辑帧间不连续」：Qwen-Edit 一帧一帧改姿势，每帧独立推理，
 快速动作会抖；Wan 一次生成整段动作，肢体路径天然连贯，抽帧后就是现成的循环素材
@@ -130,6 +133,7 @@ mkdir -p ~/.u2net && curl -L -o ~/.u2net/u2net.onnx \
 | 视频/GIF 导入 | 录像/GIF 拆成帧资产（GIF 原生 / MP4 走 ffmpeg），可选逐帧抠图，绿幕录像直接得到透明帧 |
 | 循环段选择 | 拆帧结果里取 [start, stop) 连续段合成精灵表：不插帧、不跳帧、不改时长，附审查图 |
 | 参考图规范化 | 裁主体 → 方形画布 → 底部对齐统一基线，参考图几何一致后重跑结果才可比 |
+| 场景语义分层 | 一张场景图拆成 N 张**同坐标** RGBA 图层（拆同一张图，不是各画一遍），每层带 alpha；给出覆盖率与「远→近」启发式排序，可在导图前肉眼确认 |
 | 帧审查图 | 逐帧合成时附帧网格图：序号 + 逐帧差异 + 循环接缝标色，和指标数字配成一套 |
 | 生成进度 / 取消 | 所有 AI 生成实时显示「第 x/y 步 + 已用时长」，可随时取消（在下一个推理步生效；模型加载与文本编码阶段不可中断） |
 | 图片预览 | 点击任意图片全屏查看，滚轮缩放、拖拽平移，放大 ≥2 倍用最近邻渲染（像素不糊） |
@@ -140,7 +144,7 @@ mkdir -p ~/.u2net && curl -L -o ~/.u2net/u2net.onnx \
 | 瓦片修补 | 偏移-修复法，保留图案结构只修接缝 |
 | 分表 / 合表 | N×M 拆帧 + 引擎索引 JSON |
 | 去水印 | 反向 Alpha 混合（需掩码）+ AI 修补（无需掩码，按周围内容补全） |
-| 工作流 | 场景（3 步）/ 动画（7 步）/ 动画 · 视频生成（7 步）/ 四方向行走（3 步）/ 视差（5 步），单步重跑、产物自动传递、状态落盘；插帧默认走双向光流，精灵表合成默认全局锁色并输出一致性指标 |
+| 工作流 | 场景（3 步）/ 动画（7 步）/ 动画 · 视频生成（7 步）/ 四方向行走（3 步）/ 视差（5 步：基准图 → 语义分层 → 规整 → 无缝 → 工程导出），单步重跑、产物自动传递、状态落盘；插帧默认走双向光流，精灵表合成默认全局锁色并输出一致性指标 |
 | Godot 导出 | `SpriteFrames` + `AnimatedSprite2D` 场景 + 索引 + 说明 + SHA256SUMS 清单；四方向工作流另出四向包（4 组动画 + 方向控制器脚本） |
 | AI 标识 | 默认关闭；下载时可用 `?label=1` 临时补角标 |
 
@@ -203,6 +207,7 @@ POST /api/pipeline/threeview      # 一次性跑完四步（工作流 / 脚本�
 | 界面空白 / 打不开 | 装 Node.js 18+ 后重跑 `./start.sh`；也可 `cd frontend && npm install && npm run build` |
 | 端口被占用 | 默认自动顺延；也可 `--port 9000` |
 | 生成报错「模型不存在」 | 按上面下载模型，并在设置页确认路径 |
+| 分层报错「未找到 Qwen-Image-Layered 底座」 | 这张图要用分层能力，先跑 `PYTHONPATH=. python backend/fetch_qwen_layered.py`（约 57.7GB）；其它功能不受影响 |
 | 生成报错 `No module named 'torch'` | 只装了 Web 依赖，没装推理依赖。跑 `./start.sh --gpu`（Windows `start.bat --gpu`） |
 | MP4 导入提示找不到 ffmpeg | `winget install ffmpeg`（或 https://ffmpeg.org/download.html）；GIF 不需要 ffmpeg |
 | 抠图边缘有杂色 | 确认 `~/.u2net/u2net.onnx` 存在（深度抠图）；否则是 GrabCut 兜底 |

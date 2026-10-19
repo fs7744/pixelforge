@@ -24,7 +24,7 @@ import asyncio
 import gc
 import json
 import os
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from .base import BaseProvider, ProviderResult
 from ..config import resolve_path
@@ -126,10 +126,13 @@ def _read_json(path: str) -> Dict[str, Any]:
 
 
 def detect_family(model_id: str) -> str:
-    """模型族识别：zimage / qwen_edit / unknown。
+    """模型族识别：zimage / qwen_edit / qwen_layered / wan / unknown。
 
     先读 model_index.json 的 _class_name（最可靠），再看目录名兜底；
     认不出来返回 "unknown"（不再默认当 SD 处理，由调用方报错）。
+
+    Layered 必须排在 qwen_edit 之前判：两者都是 Qwen-Image 系、transformer
+    组件类名也相同（QwenImageTransformer2DModel），只有管线类名不同。
     """
     if model_id in _FAMILY:
         return _FAMILY[model_id]
@@ -139,6 +142,8 @@ def detect_family(model_id: str) -> str:
         cls = str(idx.get("_class_name") or "")
         if "ZImage" in cls:
             family = "zimage"
+        elif "QwenImageLayered" in cls:
+            family = "qwen_layered"
         elif "QwenImageEdit" in cls:
             family = "qwen_edit"
         elif "Wan" in cls:
@@ -147,6 +152,8 @@ def detect_family(model_id: str) -> str:
         name = os.path.basename(model_id.rstrip("/\\")).lower()
         if "z-image" in name or "zimage" in name:
             family = "zimage"
+        elif "qwen-image-layered" in name or "qwen_image_layered" in name:
+            family = "qwen_layered"
         elif "qwen-image-edit" in name or "qwen_image_edit" in name:
             family = "qwen_edit"
         elif "wan" in name:
@@ -158,7 +165,7 @@ def detect_family(model_id: str) -> str:
 # 单卡 24GB 的现实：Z-Image bf16 约 21GB、Qwen-Image-Edit fp8 前向峰值 20.3GB、
 # Wan2.2 TI2V-5B（transformer fp8 + umT5 fp8 + VAE）常驻约 17GB，
 # 任两个模型族在同进程共存都可能 OOM 或被 WDDM 挤到共享内存，必须互斥驻留。
-_BIG_FAMILIES = {"zimage", "qwen_edit", "wan"}
+_BIG_FAMILIES = {"zimage", "qwen_edit", "qwen_layered", "wan"}
 
 
 def _evict_other_families(incoming: str) -> None:
@@ -300,7 +307,7 @@ def _torch_status() -> Dict[str, Any]:
 # Z-Image 19.3GB、Qwen-Edit fp8 前向峰值 20.3GB、Wan2.2 TI2V-5B（transformer
 # fp8 9.3GB + umT5 fp8 5.3GB + VAE 2.6GB ≈ 17GB 常驻，视频前向另有激活）。
 # 留 1GB 余量给 CUDA context。
-_NEED_GB = {"zimage": 20.5, "qwen_edit": 21.0, "wan": 19.0}
+_NEED_GB = {"zimage": 20.5, "qwen_edit": 21.0, "qwen_layered": 22.0, "wan": 19.0}
 
 
 def _vram_note(family: str) -> Optional[str]:
@@ -332,6 +339,43 @@ def _vram_note(family: str) -> Optional[str]:
         return None
 
 
+def _resolve_layered_model(explicit: Optional[str] = None) -> str:
+    """解析 Qwen-Image-Layered 底座路径，解析不到就抛带下载指引的错误。
+
+    顺序：显式参数 → 环境变量 → 设置里配的 qwen_layered provider →
+    models/qwen-image-layered。分层底座是「可选能力」，不配也能用其它功能，
+    所以这里不静默回退到 Z-Image（那会拆出一堆不相干的东西）。
+    """
+    if explicit:
+        hit = resolve_path(explicit)
+        if os.path.isdir(hit):
+            return hit
+    env = (os.environ.get("PIXELFORGE_LAYERED_MODEL") or "").strip()
+    if env:
+        hit = resolve_path(env)
+        if os.path.isdir(hit):
+            return hit
+    try:
+        from ..config import load_settings
+
+        for cfg in (load_settings().get("providers") or {}).values():
+            if not isinstance(cfg, dict):
+                continue
+            mid = resolve_path(str(cfg.get("model") or ""))
+            if mid and os.path.isdir(mid) and detect_family(mid) == "qwen_layered":
+                return mid
+    except Exception:
+        pass
+    default = resolve_path("models/qwen-image-layered")
+    if os.path.isdir(default):
+        return default
+    raise RuntimeError(
+        "未找到 Qwen-Image-Layered 底座（约 57.7GB）。请先下载：\n"
+        "  PYTHONPATH=. python backend/fetch_qwen_layered.py\n"
+        "或在设置里配置一个 qwen_layered 族的本地模型路径。"
+    )
+
+
 class DiffusersProvider(BaseProvider):
     id = "diffusers"
     label = "本地双底座（Z-Image / Qwen-Edit）"
@@ -358,6 +402,8 @@ class DiffusersProvider(BaseProvider):
         _evict_other_families(family)
         if family == "zimage":
             return self._load_zimage(model_id)
+        if family == "qwen_layered":
+            return self._load_qwen_layered(model_id)
         if family == "wan":
             return self._load_wan(model_id)
         return self._load_qwen_edit(model_id)
@@ -462,6 +508,166 @@ class DiffusersProvider(BaseProvider):
         _CAPS[model_id] = caps
         _CACHE[model_id] = pipe
         return pipe
+
+    # ---------- Qwen-Image-Layered：单图语义分层 ----------
+
+    def _load_qwen_layered(self, model_id: str):
+        """Qwen-Image-Layered：把一张场景图拆成语义图层（每层一张 RGBA）。
+
+        与 Qwen-Edit 的关系：同为 Qwen-Image 系，transformer 组件类名也一样
+        （QwenImageTransformer2DModel），区别只在管线——它输出的是 layers 张
+        图而不是一张图。所以显存策略、fp8 量化、落盘缓存三条全部照搬
+        _load_qwen_edit：transformer 40.9GB bf16 → fp8 约 20.5GB + cpu offload。
+
+        为什么值得引入：视差工作流原先把同一场景**生成四遍**，四次独立推理
+        的透视和轮廓对不上，只能靠纯色键硬抠。语义分层是拆同一张图，天然
+        坐标对齐。
+        """
+        try:
+            import torch
+        except Exception as e:  # pragma: no cover
+            raise RuntimeError(_TORCH_HINT) from e
+        try:
+            from diffusers import QwenImageLayeredPipeline
+        except Exception as e:  # pragma: no cover
+            raise RuntimeError(
+                "Qwen-Image-Layered 需要较新版本的 diffusers（含 QwenImageLayeredPipeline）。"
+                "请执行：\n"
+                "  ./start.sh --gpu      （Windows：start.bat --gpu）\n"
+                "或  pip install -U diffusers\n"
+                f"原始错误：{e}"
+            ) from e
+        torch.backends.cudnn.benchmark = True
+        if not torch.cuda.is_available():
+            raise RuntimeError(
+                "Qwen-Image-Layered 是 20B DiT，需要 CUDA GPU（如 RTX 4090）；CPU 推理不可行。"
+            )
+        use_fp8 = os.environ.get("PIXELFORGE_QWEN_FP8", "1") != "0"
+        transformer = None
+        if use_fp8:
+            try:
+                transformer = self._load_qwen_transformer_fp8(model_id)
+            except Exception as e:
+                print(f"[pixelforge] fp8 transformer 快速路径失败（{e}），退回完整加载", flush=True)
+                transformer = None
+        if transformer is not None:
+            pipe = QwenImageLayeredPipeline.from_pretrained(
+                model_id, torch_dtype=torch.bfloat16, transformer=transformer)
+        else:
+            pipe = QwenImageLayeredPipeline.from_pretrained(
+                model_id, torch_dtype=torch.bfloat16)
+            if use_fp8:
+                self._quantize_fp8(pipe.transformer, "qwen_layered.transformer")
+        pipe.enable_model_cpu_offload()
+        pipe.set_progress_bar_config(disable=True)
+        _CAPS[model_id] = {
+            "family": "qwen_layered",
+            "notes": ["Qwen-Image-Layered：单图拆语义层，输出 N 张 RGBA；fp8 + cpu offload"],
+        }
+        _CACHE[model_id] = pipe
+        return pipe
+
+    def _run_layers(self, model_id: str, image: Any, layers: int, steps: Optional[int],
+                    resolution: int, seed: Optional[int], generator: Any,
+                    task_id: Optional[str] = None):
+        """单次推理拆层。返回（[RGBA...], meta）。
+
+        输出形状容易踩坑：管线返回的 ``out.images`` 是**按 batch 分组的二维
+        列表**（每个 batch 一项、每项是 layers 张图），不是一维图列表。取
+        ``out.images[0]`` 才是「这张图的 N 层」。
+        """
+        import torch
+
+        pipe = self._load(model_id)
+        use_steps = 50 if not steps else max(10, min(int(steps), 60))
+        n_layers = max(2, min(int(layers), 8))
+        # 必须是 RGBA：该管线的 VAE 按 4 通道（RGB + alpha）编码输入，给 RGB
+        # 会直接崩在 encode 的 Conv3d 上（weight [96,4,3,3,3] vs input 3 通道）。
+        # 不透明场景 alpha 全 255，等价于「这一层是原图内容」。
+        src = image.convert("RGBA")
+
+        # 自动图像描述必须在 CPU 上跑，不能交给管线内部做：
+        # get_image_caption() 把输入张量 .to(device)，而 enable_model_cpu_offload
+        # 下 text_encoder 的权重此刻还在 CPU —— 实测直接崩在 Qwen2.5-VL 的
+        # patch_embed Conv3d：「Input type (CUDABFloat16Type) and weight type
+        # (CPUBFloat16Type) should be the same」。这里先自己拿到描述再传 prompt，
+        # 管线就不会再走那条内部路径。
+        progress_mod.report(task_id, 0, use_steps, "生成图像描述…")
+        caption = ""
+        try:
+            caption = pipe.get_image_caption(src.convert("RGB"), use_en_prompt=True, device="cpu")
+        except Exception as e:
+            print(f"[pixelforge] 自动图像描述失败（{type(e).__name__}: {e}），用通用描述兜底",
+                  flush=True)
+            caption = "A detailed game scene with distinct background, midground and foreground elements."
+
+        kwargs: Dict[str, Any] = dict(
+            image=src,
+            prompt=caption,
+            layers=n_layers,
+            num_inference_steps=use_steps,
+            true_cfg_scale=4.0,
+            # 负向词必须给（哪怕一个空格）：true_cfg_scale=4 的 CFG 只在有
+            # negative_prompt 时生效，否则管线只打一句 warning 就退回单分支，
+            # 出图质量与官方参数不是一回事。
+            negative_prompt=" ",
+            resolution=int(resolution),
+            # 官方 README 的推荐组合：cfg_normalize=True 稳定对比强度。
+            # use_en_prompt 在这里不再生效（prompt 已经给定了）。
+            cfg_normalize=True,
+            generator=generator,
+            callback_on_step_end=progress_mod.make_step_callback(
+                task_id, use_steps, label=f"拆 {n_layers} 层"),
+        )
+        out = pipe(**kwargs)
+        first = out.images[0]
+        raw = first if isinstance(first, (list, tuple)) else [first]
+        images = [im.convert("RGBA") for im in raw]
+        return images, {"steps": use_steps, "trueCfg": 4.0, "family": "qwen_layered",
+                        "layers": len(images), "resolution": int(resolution),
+                        "seed": seed, "caption": caption,
+                        "model": os.path.basename(model_id.rstrip("/\\"))}
+
+    async def generate_layers(
+        self,
+        image: Any,
+        *,
+        model: Optional[str] = None,
+        layers: int = 4,
+        steps: Optional[int] = None,
+        resolution: int = 640,
+        seed: Optional[int] = None,
+        task_id: Optional[str] = None,
+    ) -> Tuple[List[Any], Dict[str, Any]]:
+        """场景图 → 语义图层列表（不经过 generate()）。
+
+        与 generate() 分开：输入是一张图、输出是 N 张图，语义是「分解」而不是
+        「生成」，塞进同一个方法只会让调用方猜返回结构。
+        """
+        _require_torch()
+        model_id = resolve_path(model) if model else _resolve_layered_model()
+        if detect_family(model_id) != "qwen_layered":
+            raise RuntimeError(
+                f"当前模型不是分层底座：{model_id}。"
+                "请先下载 Qwen-Image-Layered：PYTHONPATH=. python backend/fetch_qwen_layered.py"
+            )
+        import torch
+
+        generator = None
+        if seed is not None:
+            generator = torch.Generator(
+                device="cuda" if torch.cuda.is_available() else "cpu").manual_seed(int(seed))
+        progress_mod.check_cancel(task_id)
+        async with _LOCK:
+            progress_mod.check_cancel(task_id)
+            images, meta = await asyncio.to_thread(
+                self._run_layers, model_id, image, layers, steps, resolution,
+                seed, generator, task_id,
+            )
+        note = _vram_note("qwen_layered")
+        if note:
+            meta["vramWarning"] = note
+        return images, meta
 
     # ---------- Wan2.2 TI2V-5B：图生视频（角色参考图 + 动作提示词 → 帧序列） ----------
 
@@ -989,9 +1195,15 @@ class DiffusersProvider(BaseProvider):
                 "Wan 是视频底座，请走 generate_video()（参考图 + 提示词 → 帧序列），"
                 "不要走 generate()。"
             )
+        elif family == "qwen_layered":
+            raise RuntimeError(
+                "Qwen-Image-Layered 是分层底座，请走 generate_layers()"
+                "（一张场景图 → N 张语义图层），不要走 generate()。"
+            )
         else:
             raise RuntimeError(
-                f"不支持的模型族：{model_id}。只支持 Z-Image-Turbo 与 Qwen-Image-Edit-2511。"
+                f"不支持的模型族：{model_id}。只支持 Z-Image-Turbo / "
+                "Qwen-Image-Edit-2511 / Qwen-Image-Layered / Wan2.2 TI2V-5B。"
             )
         if vram_note:
             meta["vramWarning"] = vram_note

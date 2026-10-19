@@ -315,6 +315,28 @@ export const api = {
     fd.append('tolerance', String(payload.tolerance ?? 24))
     return fetch('/api/pipeline/refnorm', { method: 'POST', body: fd }).then(json)
   },
+  /** 场景语义分层：一张场景图 → N 张同坐标 RGBA 图层（Qwen-Image-Layered） */
+  sceneLayers: (
+    payload: {
+      layers?: number
+      steps?: number
+      seed?: number | null
+      resolution?: number
+      taskId?: string
+      assetId?: string
+    } = {},
+    file?: File | null,
+  ) => {
+    const fd = new FormData()
+    if (file) fd.append('file', file)
+    if (payload.assetId) fd.append('refAssetId', payload.assetId)
+    fd.append('layers', String(payload.layers ?? 4))
+    fd.append('resolution', String(payload.resolution ?? 640))
+    if (payload.steps) fd.append('steps', String(payload.steps))
+    if (payload.seed != null) fd.append('seed', String(payload.seed))
+    if (payload.taskId) fd.append('taskId', payload.taskId)
+    return fetch('/api/pipeline/scene/layers', { method: 'POST', body: fd }).then(json)
+  },
   /** 循环段选择（h3 select）：取 [start, stop) 连续帧合成精灵表 + 审查图 */
   spriteSelect: (payload: {
     frameAssetIds: string[]

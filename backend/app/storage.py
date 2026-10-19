@@ -42,6 +42,7 @@ KIND_LABELS: Dict[str, str] = {
     "charpixel": "像素角色",
     "frame": "帧",
     "sheet": "精灵表",
+    "layer": "图层",
 }
 
 # 管线标签：三视图这类「同 kind 不同来源」的东西只能靠它区分——
@@ -61,6 +62,7 @@ PIPELINE_LABELS: Dict[str, str] = {
     "char-pixel": "人物像素化",
     "watermark": "水印",
     "watermark_ai": "水印 · AI",
+    "scene-layers": "场景分层",
 }
 
 # meta 里没有 pipeline 的记录（/api/generate 直接出图）统一归到这个虚拟管线，
