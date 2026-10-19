@@ -215,6 +215,11 @@ export const api = {
     return fetch(`/api/assets${q ? `?${q}` : ''}`).then(json)
   },
   assetFacets: (): Promise<AssetFacets> => fetch('/api/assets/facets').then(json),
+  /**
+   * 缩略图地址：等比缩放、不裁切，所以三视图那种 3:1 的宽条在列图里也是宽条。
+   * 直接用 <img src>，不要 fetch——后端带 long immutable 缓存，浏览器会自己复用。
+   */
+  assetThumb: (id: string, w: 96 | 160 | 320 = 160) => `/api/assets/${id}/thumb?w=${w}`,
   delAsset: (id: string) => fetch(`/api/assets/${id}`, { method: 'DELETE' }).then(json),
   matte: (file: File, tolerance: number, feather: number) => {
     const fd = new FormData()

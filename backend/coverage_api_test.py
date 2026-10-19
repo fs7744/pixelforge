@@ -348,6 +348,29 @@ check("三视图的来源标签是中文",
       any(p["id"] == "threeview" and p["label"] == "三视图" for p in
           client.get("/api/assets/facets").json()["pipelines"]))
 
+print("== 资产缩略图（素材库列图 / 图生图取图区） ==")
+# 取图区原来直接铺原图：150+ 张 PNG 一次几百 MB，而且 object-fit: cover 会把
+# 三视图拼板（3:1）裁成中间一团，看上去和单视图没区别。缩略图必须等比缩。
+wide = storage.save_asset(Image.new("RGBA", (600, 200), (20, 60, 90)), kind="generated",
+                          name="thumb-wide", meta={"pipeline": "threeview"})
+r = client.get(f"/api/assets/{wide['id']}/thumb?w=160")
+th = Image.open(io.BytesIO(r.content))
+check("缩略图：200 且是 PNG", r.status_code == 200 and th.format == "PNG", r.status_code)
+check("缩略图：等比缩放不裁切（宽条仍是宽条）", th.size == (160, 53), str(th.size))
+check("缩略图：带长缓存头", "immutable" in r.headers.get("cache-control", ""),
+      r.headers.get("cache-control", ""))
+r2 = client.get(f"/api/assets/{wide['id']}/thumb?w=9999")
+big = Image.open(io.BytesIO(r2.content))
+check("缩略图：超大宽度收敛到最大档（320）",
+      big.size[0] == 320 and abs(big.size[1] - 320 / 3) <= 1, str(big.size))
+check("缩略图：不同宽度各自缓存，不互相覆盖",
+      len(list(storage.THUMB_DIR.glob(f"{wide['id']}-*.png"))) == 2)
+check("缩略图：不存在的资产 → 404",
+      client.get("/api/assets/nonexistent01/thumb").status_code == 404)
+client.delete(f"/api/assets/{wide['id']}")
+check("删除资产时缩略图缓存一并清理",
+      not list(storage.THUMB_DIR.glob(f"{wide['id']}-*.png")))
+
 print("== 工作流 run 错误路径 ==")
 run = client.post("/api/workflows/scene/runs", json={"input": "测试场景", "params": {}}).json()
 run_id = run["id"]

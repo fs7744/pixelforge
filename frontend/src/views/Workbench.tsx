@@ -1,7 +1,8 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
-import { api, Asset, ProviderInfo, StyleInfo, Template } from '../api'
+import { api, Asset, AssetFacets, ProviderInfo, StyleInfo, Template } from '../api'
 import { openPreview } from '../Preview'
+import { RefPicker } from '../RefPicker'
 import { Splitter } from '../split'
 import TextTaskPanel from '../TextTaskPanel'
 import ThreeViewBoard, { type BoardHandle } from '../ThreeViewBoard'
@@ -188,6 +189,8 @@ export default function Workbench({ onSendToPost }: Props) {
   const [refAssetIds, setRefAssetIds] = useState<string[]>([])
   const [pickerOpen, setPickerOpen] = useState(false)
   const [library, setLibrary] = useState<Asset[]>([])
+  // 取图区的「来源」筛选要中文标签和数量，跟资产库同源（后端 facets 派生）
+  const [libFacets, setLibFacets] = useState<AssetFacets | null>(null)
   // 三视图流程画布：四步分开跑，单步可重跑。hasFront/boardBusy 只用来同步左栏按钮
   const boardRef = useRef<BoardHandle>(null)
   const [boardState, setBoardState] = useState({ hasFront: false, busy: false })
@@ -274,12 +277,17 @@ export default function Workbench({ onSendToPost }: Props) {
   const openPicker = () => {
     const next = !pickerOpen
     setPickerOpen(next)
-    if (next && !library.length) {
-      api
-        .assets()
-        .then((d) => setLibrary(d.assets.slice(0, 24)))
-        .catch(() => setLibrary([]))
-    }
+    if (!next) return
+    // 每次展开都重新拉：只拉一次的话，刚生成的图在取图区里永远看不到，
+    // 必须整页刷新才行（原来就是这么写的）。
+    api
+      .assets()
+      .then((d) => setLibrary(d.assets))
+      .catch(() => setLibrary([]))
+    api
+      .assetFacets()
+      .then(setLibFacets)
+      .catch(() => setLibFacets(null))
   }
 
   const toggleAsset = (id: string) => {
@@ -559,8 +567,12 @@ export default function Workbench({ onSendToPost }: Props) {
             {refAssetIds.map((id, i) => {
               const a = library.find((x) => x.id === id)
               return (
-                <div className="ref-thumb" key={id}>
-                  {a ? <img src={a.url} alt={a.name} /> : <div className="ref-miss">?</div>}
+                <div className="ref-thumb" key={id} title={a?.name}>
+                  {a ? (
+                    <img src={api.assetThumb(a.id, 160)} alt={a.name} />
+                  ) : (
+                    <div className="ref-miss">?</div>
+                  )}
                   <span className="ref-idx">{refItems.length + i + 1}</span>
                   <button className="ref-del" title="移除" onClick={() => toggleAsset(id)}>
                     ×
@@ -586,25 +598,14 @@ export default function Workbench({ onSendToPost }: Props) {
           </div>
 
           {pickerOpen && (
-            <div className="ref-picker">
-              {library.length === 0 && <div className="hint">资产库还是空的</div>}
-              {library.map((a) => {
-                const on = refAssetIds.includes(a.id)
-                const full = !on && totalRefs >= MAX_REFS
-                return (
-                  <button
-                    key={a.id}
-                    className={`ref-pick ${on ? 'on' : ''}`}
-                    disabled={full}
-                    title={a.name}
-                    onClick={() => toggleAsset(a.id)}
-                  >
-                    <img src={a.url} alt={a.name} />
-                    {on && <span className="ref-idx">{refAssetIds.indexOf(a.id) + 1}</span>}
-                  </button>
-                )
-              })}
-            </div>
+            <RefPicker
+              library={library}
+              facets={libFacets}
+              selected={refAssetIds}
+              usedSlots={refItems.length}
+              maxRefs={MAX_REFS}
+              onToggle={toggleAsset}
+            />
           )}
 
           <div className="hint" style={{ marginTop: 6 }}>

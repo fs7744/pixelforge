@@ -189,6 +189,41 @@ def asset_path(item: Dict[str, Any]) -> Path:
     return ASSETS_DIR / item["file"]
 
 
+THUMB_DIR = ASSETS_DIR / "thumbs"
+
+# 缩略图宽度做档位而不是任意值：前端只用 96/160/320 三档，
+# 否则每个宽高比 × 任意宽都会生成一份缓存，thumbs 目录很快就失控。
+THUMB_WIDTHS = (96, 160, 320)
+
+
+def thumb_path(item: Dict[str, Any], width: int) -> Path:
+    return THUMB_DIR / f"{item['id']}-{width}.png"
+
+
+def ensure_thumb(item: Dict[str, Any], width: int = 160) -> Path:
+    """按宽度取缩略图，没有就地生成并缓存。
+
+    为什么需要：资产库和图生图的取图区一次要列上百张，直接铺原图意味着
+    几百 MB 的 PNG 全下到浏览器；而且三视图拼板是 1560×512，用原图当缩略图
+    既慢又浪费。缩略图保持宽高比（thumbnail 按长边等比缩），所以
+    「宽条 = 三视图拼板」在列图里一眼就能看出来，不会被裁成方图。
+    """
+    width = min(THUMB_WIDTHS, key=lambda w: abs(w - int(width)))
+    p = thumb_path(item, width)
+    if p.is_file():
+        return p
+
+    src = asset_path(item)
+    if not src.is_file():
+        raise FileNotFoundError(str(src))
+
+    THUMB_DIR.mkdir(parents=True, exist_ok=True)
+    img = Image.open(src).convert("RGBA")
+    img.thumbnail((width, width), Image.LANCZOS)
+    img.save(p, "PNG", optimize=True)
+    return p
+
+
 def delete_asset(asset_id: str) -> bool:
     items = _load_index()
     keep = []
@@ -200,6 +235,9 @@ def delete_asset(asset_id: str) -> bool:
                 (ASSETS_DIR / item["file"]).unlink(missing_ok=True)
             except Exception:
                 pass
+            # 缩略图缓存跟着删，否则同一个 id 被复用时会拿到旧图
+            for p in THUMB_DIR.glob(f"{asset_id}-*.png"):
+                p.unlink(missing_ok=True)
         else:
             keep.append(item)
     if removed:

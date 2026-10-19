@@ -342,7 +342,9 @@ button, input, textarea, select { font-family: inherit; }
   position: relative; width: 72px; height: 72px;
   border: 1px solid var(--line); background: #111;
 }
-.ref-thumb img { width: 100%; height: 100%; object-fit: cover; display: block; }
+/* 已选参考图：用 contain 而不是 cover —— 三视图拼板是 3:1，cover 会把它裁成
+   中间一团，看起来跟单视图一模一样，选了什么都看不出来 */
+.ref-thumb img { width: 100%; height: 100%; object-fit: contain; display: block; background: #101010; }
 .ref-idx {
   position: absolute; left: 2px; top: 2px; padding: 0 4px;
   font-size: 10px; line-height: 15px; font-family: var(--chip);
@@ -363,19 +365,58 @@ button, input, textarea, select { font-family: inherit; }
   width: 100%; height: 100%; display: flex; align-items: center; justify-content: center;
   color: var(--muted); font-size: 18px;
 }
+/* ---------- 资产库取图区（图生图） ---------- */
+.ref-picker-wrap { margin-top: 8px; }
+.ref-picker-head { margin-bottom: 6px; }
+/* 来源 chips 压小一号：取图区在左栏里，太高的 chip 会把列图挤下去 */
+.ref-chips { gap: 5px; }
+.ref-chips .chip { height: 24px; padding: 0 8px; font-size: 12px; }
+
 .ref-picker {
-  display: grid; grid-template-columns: repeat(5, 1fr); gap: 5px;
-  margin-top: 8px; padding: 7px; border: 1px solid var(--line); background: #0f0f0f;
-  max-height: 168px; overflow-y: auto;
+  display: grid; grid-template-columns: repeat(auto-fill, minmax(84px, 1fr)); gap: 6px;
+  padding: 7px; border: 1px solid var(--line); background: #0f0f0f;
+  max-height: 264px; overflow-y: auto;
 }
 .ref-pick {
-  position: relative; padding: 0; cursor: pointer; aspect-ratio: 1;
-  border: 1px solid transparent; background: #111;
+  position: relative; padding: 0; cursor: pointer; display: flex; flex-direction: column;
+  border: 1px solid transparent; background: #111; overflow: hidden;
 }
-.ref-pick img { width: 100%; height: 100%; object-fit: cover; display: block; }
+/* 缩略图保持宽高比：宽条 = 三视图拼板，竖条 = 单视图，不用点开就能区分 */
+.ref-pick-box { display: grid; place-items: center; aspect-ratio: 1; background: #101010; }
+.ref-pick img { width: 100%; height: 100%; object-fit: contain; display: block; }
+.ref-pick-cap {
+  display: block; width: 100%; padding: 2px 4px; text-align: left;
+  font-size: 11px; line-height: 1.5; color: var(--muted);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  border-top: 1px solid var(--line);
+}
 .ref-pick:hover:not(:disabled) { border-color: var(--line); }
+.ref-pick:hover:not(:disabled) .ref-pick-cap { color: var(--white); }
 .ref-pick.on { border-color: var(--green); }
+.ref-pick.on .ref-pick-cap { color: var(--green); }
 .ref-pick:disabled { opacity: 0.35; cursor: not-allowed; }
+
+/* 悬停大图预览：fixed 定位，逃出 .ref-picker 的 overflow 裁剪 */
+.ref-pop {
+  position: fixed; z-index: 90; width: 320px; pointer-events: none;
+  padding: 8px; border: 2px solid var(--white); background: #0b0b0e;
+  box-shadow: 6px 6px 0 rgba(0, 0, 0, 0.55);
+}
+.ref-pop-img {
+  display: grid; place-items: center; max-height: 240px; overflow: hidden;
+}
+.ref-pop-img img {
+  max-width: 100%; max-height: 240px; object-fit: contain;
+  image-rendering: auto; display: block;
+}
+.ref-pop-name {
+  margin-top: 6px; font-size: 13px; color: var(--white);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.ref-pop-meta {
+  margin-top: 3px; display: flex; align-items: center; gap: 6px;
+  font-size: 12px; color: var(--muted);
+}
 
 /* ---------- 三视图流程画布 ---------- */
 .tv-wrap {
@@ -500,3 +541,6 @@ button, input, textarea, select { font-family: inherit; }
   font-size: 13px; color: var(--white); line-height: 1.5;
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
+
+/* 缩略图是 LANCZOS 缩过的，别再按像素画风放大（.thumb img 默认 pixelated） */
+.thumb img.smooth { image-rendering: auto; }

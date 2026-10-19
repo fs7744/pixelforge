@@ -626,6 +626,25 @@ async def asset_facets():
     return storage.asset_facets()
 
 
+@app.get("/api/assets/{asset_id}/thumb")
+async def asset_thumb(asset_id: str, w: int = 160):
+    """缩略图（等比缩到 w 宽，不裁切）。
+
+    列图用原图会一次拉几百 MB，而且三视图拼板 1560×512 被当成方图裁切后
+    只剩中间一团，完全看不出是拼板。这里保持宽高比，宽条自然就是宽条。
+    资产 id 唯一且内容不可变，所以可以长期缓存。
+    """
+    item = storage.get_asset(asset_id)
+    if not item:
+        raise HTTPException(404, "资产不存在")
+    try:
+        p = storage.ensure_thumb(item, w)
+    except FileNotFoundError:
+        raise HTTPException(404, "文件缺失")
+    return FileResponse(str(p), media_type="image/png",
+                        headers={"Cache-Control": "public, max-age=31536000, immutable"})
+
+
 @app.get("/api/assets/{asset_id}/download")
 async def download_asset(asset_id: str, label: Optional[int] = None):
     """单张下载。

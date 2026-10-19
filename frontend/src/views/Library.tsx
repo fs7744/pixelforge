@@ -231,7 +231,7 @@ export default function Library() {
                   onClick={() => toggle(a.id)}
                   onDoubleClick={() => setDetail(a)}
                 >
-                  <img src={a.url} alt={a.name} />
+                  <img className="smooth" src={api.assetThumb(a.id, 320)} alt={a.name} loading="lazy" />
                   <div className="cap">{badgeOf(a)}</div>
                 </div>
                 <div className="lib-name" title={a.name}>
