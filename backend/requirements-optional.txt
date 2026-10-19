@@ -1,0 +1,11 @@
+# 可选增强依赖：u2net 深度抠图（rembg + onnxruntime，约 200MB）
+#
+# 不装也能用：matte 会自动退到 GrabCut 图割，只是灰底灰角色、软投影的效果略差。
+# 启动脚本会尽力安装这一份，失败只提示不中断。
+#
+# 权重仍需手动放到 ~/.u2net/u2net.onnx（脚本不联网拉权重）：
+#   curl -L -o ~/.u2net/u2net.onnx \
+#     "https://modelscope.cn/models/AI-ModelScope/u2net/resolve/master/u2net.onnx"
+
+rembg>=2.0
+onnxruntime>=1.16

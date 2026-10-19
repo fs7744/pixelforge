@@ -6,7 +6,8 @@ set -u
 MODEL="Qwen/Qwen-Image-Edit-2511"
 REV="master"
 BASE="https://modelscope.cn/models/$MODEL/resolve/$REV"
-DEST="D:/code/pixelforge/models/qwen-image-edit-2511"
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+DEST="$ROOT/models/qwen-image-edit-2511"
 
 FILES=(
   "model_index.json"

@@ -4,7 +4,8 @@ set -u
 MODEL="Tongyi-MAI/Z-Image-Turbo"
 REV="master"
 BASE="https://modelscope.cn/models/$MODEL/resolve/$REV"
-DEST="D:/code/pixelforge/models/z-image-turbo"
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+DEST="$ROOT/models/z-image-turbo"
 
 FILES=(
   "model_index.json"

@@ -13,7 +13,8 @@ set -u
 MODEL="lightx2v/Qwen-Image-Edit-2511-Lightning"
 REV="master"
 BASE="https://modelscope.cn/models/$MODEL/resolve/$REV"
-DEST="D:/code/pixelforge/models/qwen-image-edit-2511-lightning"
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+DEST="$ROOT/models/qwen-image-edit-2511-lightning"
 
 FILES=(
   "Qwen-Image-Edit-2511-Lightning-4steps-V1.0-bf16.safetensors"
