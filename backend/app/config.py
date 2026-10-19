@@ -7,7 +7,9 @@ from pathlib import Path
 from typing import Any, Dict
 
 ROOT = Path(__file__).resolve().parents[2]
-DATA_DIR = ROOT / "data"
+# 数据目录可被环境变量覆盖：测试跑在临时目录里，绝不碰用户素材库。
+# 之前测试直接写 data/assets，靠收尾删除兜着，漏一次就污染几十张。
+DATA_DIR = Path(os.environ.get("PIXELFORGE_DATA_DIR") or (ROOT / "data"))
 ASSETS_DIR = DATA_DIR / "assets"
 # 画风示例图（画风 chip 悬浮 tooltip 用），由 backend/gen_style_samples.py 生成
 STYLE_SAMPLES_DIR = DATA_DIR / "style_samples"

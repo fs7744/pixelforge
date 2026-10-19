@@ -8,6 +8,7 @@ GPU 相关（/api/generate、AI 编辑、工作流步骤）由 e2e_gpu_test.py �
 """
 import io
 import json
+import os
 import sys
 import zipfile
 from pathlib import Path
@@ -19,11 +20,27 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from fastapi.testclient import TestClient
 from PIL import Image
 
+# 测试数据落临时目录：绝不碰用户素材库（详见 coverage_api_test.py 同一段注释）
+import tempfile  # noqa: E402
+
+_TMP_DATA = Path(tempfile.mkdtemp(prefix="pf-test-data-"))
+os.environ["PIXELFORGE_DATA_DIR"] = str(_TMP_DATA)
+
+import atexit  # noqa: E402
+import shutil  # noqa: E402
+
+atexit.register(lambda: shutil.rmtree(_TMP_DATA, ignore_errors=True))
+
 from backend.app.main import app
 from backend.app import storage
 
 client = TestClient(app)
 _BASE = {a["id"] for a in storage.list_assets()}
+# 数据目录现在跑在临时目录里，库是空的；先造三张图，
+# 后面的「资产列表 / 下载 / ZIP 导出 / 删除」才有对象可测。
+for _i in range(3):
+    storage.save_asset(Image.new("RGB", (64, 64), (200 - _i * 40, 60, 60)),
+                       kind="generated", name=f"e2e-seed-{_i}")
 
 ok = 0
 fail = 0

@@ -27,6 +27,14 @@ from pathlib import Path
 # 没有仓库根，`import backend.app.main` 会失败。与 smoke_test.py 同一做法。
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+# 必须在 import backend.app.* **之前**设好：config 在导入时就把 DATA_DIR 定下来了。
+# 这样整套测试（资产、runs、动画工程、settings）都落在临时目录，跑多少次都不会
+# 污染用户的 data/。之前靠「收尾按基线删」兜底，缓存/时序一漏就往库里灌几十张。
+import tempfile  # noqa: E402
+
+_TMP_DATA = Path(tempfile.mkdtemp(prefix="pf-test-data-"))
+os.environ["PIXELFORGE_DATA_DIR"] = str(_TMP_DATA)
+
 import numpy as np
 
 from fastapi.testclient import TestClient
@@ -34,6 +42,7 @@ from PIL import Image, ImageDraw
 
 from backend.app.main import app
 from backend.app import storage
+from backend.app.config import DATA_DIR
 
 client = TestClient(app)
 ok = 0
@@ -120,7 +129,7 @@ def cleanup_assets(verbose: bool = False) -> None:
     # 工作流产物的名字是「runId-步骤」，run 文件被测试删掉后它们就成了孤儿；
     # 按「meta.runId 在 data/runs 里已不存在」补一刀，不依赖时间戳。
     try:
-        live_runs = {p.stem for p in (Path("data/runs")).glob("*.json")}
+        live_runs = {p.stem for p in (DATA_DIR / "runs").glob("*.json")}
         for a in storage.list_assets():
             rid = (a.get("meta") or {}).get("runId")
             if rid and rid not in live_runs:
@@ -141,6 +150,7 @@ def cleanup_assets(verbose: bool = False) -> None:
 
 
 atexit.register(cleanup_assets)
+atexit.register(lambda: shutil.rmtree(_TMP_DATA, ignore_errors=True))
 signal.signal(signal.SIGTERM, lambda *_: sys.exit(143))
 
 
@@ -398,7 +408,7 @@ _r = client.post(f"/api/runs/{_run4['id']}/steps/walk/run", json={})
 check("四向：缺立绘点行走帧 → 400",
       _r.status_code == 400 and "上一步" in str(_r.json().get("detail", "")),
       f"{_r.status_code} {_r.text[:80]}")
-Path("data/runs", f"{_run4['id']}.json").unlink(missing_ok=True)
+(DATA_DIR / "runs" / f"{_run4['id']}.json").unlink(missing_ok=True)
 
 # 四方向编排全链路（桩替 run_frame，不碰 GPU）：立绘 meta → 每方向 4 帧
 # → 横排精灵表 + 审查图 → Godot 四向包
@@ -418,7 +428,7 @@ _sl.run_frame = _fake_rf
 try:
     _r4 = client.post("/api/workflows/walk_4dir/runs",
                       json={"input": "桩测试", "params": {}}).json()
-    _p4 = Path("data/runs") / f"{_r4['id']}.json"
+    _p4 = DATA_DIR / "runs" / f"{_r4['id']}.json"
     _st4 = json.loads(_p4.read_text(encoding="utf-8"))
     _dirs4 = []
     for d in ("down", "up", "left", "right"):
@@ -450,10 +460,10 @@ try:
     check("Godot 四向包导出", _r.status_code == 200 and _gm.get("kind") == "godot_fourdir"
           and _gm.get("directions") == ["down", "up", "left", "right"], str(_gm)[:110])
     if _gm.get("zip"):
-        (Path("data/exports") / _gm["zip"].rsplit("/", 1)[-1]).unlink(missing_ok=True)
+        (DATA_DIR / "exports" / _gm["zip"].rsplit("/", 1)[-1]).unlink(missing_ok=True)
 finally:
     _sl.run_frame = _orig_rf
-    Path("data/runs", f"{_r4['id']}.json").unlink(missing_ok=True)
+    (DATA_DIR / "runs" / f"{_r4['id']}.json").unlink(missing_ok=True)
 
 # 硬 alpha 保留「描边 + 键色」的抗锯齿混色：绿幕底实测边缘环 51% 偏绿。
 # clean_edge_spill 只改 RGB 不动 alpha，把它洗成内侧颜色。
@@ -1523,7 +1533,7 @@ check("params 超深嵌套 → 400/422", _r.status_code in (400, 422), f"{_r.sta
 # 启动恢复（FrameBaker queue.ts）：running 步骤在「新进程」里应被标回 failed。
 # 这里直接调 recover_interrupted_runs() 模拟启动那一刻
 _r3 = wf_mod.create_run("animation_video", "恢复测试")
-_p = Path("data/runs") / f"{_r3['id']}.json"
+_p = DATA_DIR / "runs" / f"{_r3['id']}.json"
 _st = json.loads(_p.read_text(encoding="utf-8"))
 _st["steps"][1]["status"] = "running"
 _p.write_text(json.dumps(_st), encoding="utf-8")
@@ -1640,7 +1650,7 @@ try:
     # 视差工作流的「语义分层」步骤：上一步一张基准图 → 按远→近重排后落产物
     _rp = client.post("/api/workflows/parallax/runs",
                       json={"input": "桩测试山谷", "params": {}}).json()
-    _rp_path = Path("data/runs") / f"{_rp['id']}.json"
+    _rp_path = DATA_DIR / "runs" / f"{_rp['id']}.json"
     _rp_state = json.loads(_rp_path.read_text(encoding="utf-8"))
     _base = storage.save_asset(Image.new("RGB", (180, 100), (25, 25, 35)),
                                kind="generated", name="stub-parallax-base")

@@ -11,6 +11,7 @@ import asyncio
 import io
 import math
 import json
+import os
 import sys
 import zipfile
 from pathlib import Path
@@ -19,6 +20,17 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import numpy as np
 from PIL import Image, ImageDraw
+
+# 测试数据落临时目录：绝不碰用户素材库（详见 coverage_api_test.py 同一段注释）
+import tempfile  # noqa: E402
+
+_TMP_DATA = Path(tempfile.mkdtemp(prefix="pf-test-data-"))
+os.environ["PIXELFORGE_DATA_DIR"] = str(_TMP_DATA)
+
+import atexit  # noqa: E402
+import shutil  # noqa: E402
+
+atexit.register(lambda: shutil.rmtree(_TMP_DATA, ignore_errors=True))
 
 from backend.app import storage  # noqa: E402
 from backend.app import godot_export  # noqa: E402
