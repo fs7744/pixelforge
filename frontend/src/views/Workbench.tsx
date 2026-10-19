@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 import { api, Asset, ProviderInfo, StyleInfo, Template } from '../api'
 import { openPreview } from '../Preview'
+import { Splitter } from '../split'
 
 type Props = { onSendToPost: (asset: Asset) => void }
 
@@ -328,7 +329,7 @@ export default function Workbench({ onSendToPost }: Props) {
         <div>
           <div className="label">模型服务</div>
           <div className="card" style={{ padding: '8px 10px' }}>
-            <div style={{ fontSize: 12, fontWeight: 600 }}>
+            <div style={{ fontSize: 14, fontWeight: 600 }}>
               {providers.find((p) => p.active)?.label || '本地双底座'}
             </div>
             <div className="hint" style={{ marginTop: 4 }}>
@@ -404,7 +405,7 @@ export default function Workbench({ onSendToPost }: Props) {
             <div className="label" style={{ marginBottom: 0 }}>
               参考图 · 图生图（可选，最多 {MAX_REFS} 张）
             </div>
-            <button className="btn btn-ghost" style={{ padding: '2px 8px', fontSize: 11 }} onClick={openPicker}>
+            <button className="btn btn-ghost" style={{ padding: '2px 8px', fontSize: 13 }} onClick={openPicker}>
               {pickerOpen ? '收起资产库' : '从资产库选'}
             </button>
           </div>
@@ -534,6 +535,8 @@ export default function Workbench({ onSendToPost }: Props) {
         {error && <div className="err">{error}</div>}
       </aside>
 
+      <Splitter side="left" />
+
       <main className="stage">
         <div className="row between">
           <div className="section-title">生成结果</div>
@@ -588,6 +591,8 @@ export default function Workbench({ onSendToPost }: Props) {
         )}
       </main>
 
+      <Splitter side="right" />
+
       <aside className="panel right">
         <div className="section-title">
           历史记录 <span className="tag">HISTORY</span>
@@ -611,7 +616,7 @@ export default function Workbench({ onSendToPost }: Props) {
                 <img src={r.url} style={{ width: '100%', height: '100%', objectFit: 'contain', imageRendering: 'pixelated' }} />
               </div>
               <div>
-                <div style={{ fontSize: 11 }}>{r.meta?.templateId || r.kind}</div>
+                <div style={{ fontSize: 13 }}>{r.meta?.templateId || r.kind}</div>
                 <div className="hint">{new Date(r.createdAt * 1000).toLocaleTimeString()}</div>
               </div>
             </div>
@@ -620,8 +625,8 @@ export default function Workbench({ onSendToPost }: Props) {
         </div>
 
         <div className="card-white">
-          <div style={{ fontFamily: 'Silkscreen, monospace', fontSize: 9, marginBottom: 4 }}>EXPORT</div>
-          <div style={{ fontSize: 11, lineHeight: 1.6 }}>
+          <div style={{ fontFamily: 'Silkscreen, monospace', fontSize: 10, marginBottom: 4 }}>EXPORT</div>
+          <div style={{ fontSize: 13, lineHeight: 1.6 }}>
             选中结果可下载 PNG ZIP。默认不烧 AI 角标（角标会污染后续抠图/合成）；
             需要合规标识时到「模型设置」打开「下载时补 AI 标识」。
           </div>

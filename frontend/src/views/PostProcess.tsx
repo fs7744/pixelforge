@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState } from 'react'
 import { api, Asset, StyleInfo } from '../api'
 import { StyleChip } from './Workbench'
 import { openPreview } from '../Preview'
+import { Splitter } from '../split'
 
 type Props = { incoming?: Asset | null }
 
@@ -488,7 +489,7 @@ export default function PostProcess({ incoming }: Props) {
                 <input
                   type="file"
                   accept="image/png"
-                  style={{ marginTop: 6, fontSize: 11, color: 'var(--muted)' }}
+                  style={{ marginTop: 6, fontSize: 13, color: 'var(--muted)' }}
                   onChange={(e) => setMask(e.target.files?.[0] ?? null)}
                 />
                 <div className="label" style={{ marginTop: 8 }}>水印尺寸 {wmSize}px</div>
@@ -511,6 +512,8 @@ export default function PostProcess({ incoming }: Props) {
         {note && <div className="ok">{note}</div>}
         {error && <div className="err">{error}</div>}
       </aside>
+
+      <Splitter side="left" />
 
       <main className="stage">
         <div className="row between">
@@ -587,12 +590,14 @@ export default function PostProcess({ incoming }: Props) {
                 复制
               </button>
             </div>
-            <pre className="mono" style={{ margin: 0, maxHeight: 160, overflow: 'auto', fontSize: 13, color: 'var(--muted)' }}>
+            <pre className="mono" style={{ margin: 0, maxHeight: 160, overflow: 'auto', fontSize: 15, color: 'var(--muted)' }}>
               {JSON.stringify(index, null, 2)}
             </pre>
           </div>
         )}
       </main>
+
+      <Splitter side="right" />
 
       <aside className="panel right">
         <div className="section-title">
@@ -600,12 +605,12 @@ export default function PostProcess({ incoming }: Props) {
         </div>
         <div className="card">
           <div className="label">当前管线</div>
-          <div style={{ fontSize: 13, fontWeight: 600 }}>{active.name}</div>
+          <div style={{ fontSize: 15, fontWeight: 600 }}>{active.name}</div>
           <div className="hint">{active.desc}</div>
         </div>
         <div className="card-white">
-          <div style={{ fontFamily: 'Silkscreen, monospace', fontSize: 9, marginBottom: 4 }}>SPEC</div>
-          <div style={{ fontSize: 11, lineHeight: 1.7 }}>
+          <div style={{ fontFamily: 'Silkscreen, monospace', fontSize: 10, marginBottom: 4 }}>SPEC</div>
+          <div style={{ fontSize: 13, lineHeight: 1.7 }}>
             · 抠图：边缘连通 flood fill，容差 80 / 羽化 5
             <br />· 硬缩放：最近邻，禁止插值
             <br />· RPGMaker：144² + 底部扩 48px

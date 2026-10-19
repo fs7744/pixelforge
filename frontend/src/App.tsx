@@ -1,5 +1,6 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useState, type CSSProperties } from 'react'
 import { api } from './api'
+import { SplitProvider, useSplit } from './split'
 import Workbench from './views/Workbench'
 import WorkflowView from './views/Workflow'
 import PostProcess from './views/PostProcess'
@@ -18,9 +19,18 @@ const TABS: { id: Tab; label: string }[] = [
 ]
 
 export default function App() {
+  return (
+    <SplitProvider>
+      <Shell />
+    </SplitProvider>
+  )
+}
+
+function Shell() {
   const [tab, setTab] = useState<Tab>('workbench')
   const [activeLabel, setActiveLabel] = useState('连接中…')
   const [pending, setPending] = useState<any>(null)
+  const { left, right, dragging } = useSplit()
 
   useEffect(() => {
     Promise.all([api.health(), api.providers()])
@@ -31,8 +41,14 @@ export default function App() {
       .catch(() => setActiveLabel('后端未连接'))
   }, [tab])
 
+  // 分栏宽度走 CSS 变量，五个视图共用同一套，切换 tab 不跳变
+  const style = {
+    '--panel-left': `${left}px`,
+    '--panel-right': `${right}px`,
+  } as CSSProperties
+
   return (
-    <div className="app">
+    <div className={`app ${dragging ? 'dragging-col' : ''}`} style={style}>
       <header className="nav">
         <div className="logo">
           <div className="logo-mark">

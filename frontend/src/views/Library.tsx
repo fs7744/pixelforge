@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import { api, Asset } from '../api'
 import { openPreview } from '../Preview'
+import { Splitter } from '../split'
 
 const KINDS: [string, string][] = [
   ['全部', '全部'],
@@ -62,12 +63,14 @@ export default function Library() {
           </button>
         </div>
         <div className="card-white">
-          <div style={{ fontFamily: 'Silkscreen, monospace', fontSize: 9, marginBottom: 4 }}>LOCAL FIRST</div>
-          <div style={{ fontSize: 11, lineHeight: 1.7 }}>
+          <div style={{ fontFamily: 'Silkscreen, monospace', fontSize: 10, marginBottom: 4 }}>LOCAL FIRST</div>
+          <div style={{ fontSize: 13, lineHeight: 1.7 }}>
             所有资产保存在本机 data/assets，导出 ZIP 内含 index.json 索引。
           </div>
         </div>
       </aside>
+
+      <Splitter side="left" />
 
       <main className="stage">
         <div className="row between">
@@ -106,17 +109,17 @@ export default function Library() {
                 <div className="row">
                   <button
                     className="btn btn-ghost"
-                    style={{ height: 26, fontSize: 11 }}
+                    style={{ height: 32, fontSize: 13 }}
                     onClick={() => openPreview(a.url, a.name)}
                   >
                     放大
                   </button>
-                  <a className="btn btn-ghost" href={`/api/assets/${a.id}/download`} download={`${a.name}.png`} style={{ height: 26, fontSize: 11 }}>
+                  <a className="btn btn-ghost" href={`/api/assets/${a.id}/download`} download={`${a.name}.png`} style={{ height: 32, fontSize: 13 }}>
                     下载
                   </a>
                   <button
                     className="btn btn-ghost"
-                    style={{ height: 26, fontSize: 11 }}
+                    style={{ height: 32, fontSize: 13 }}
                     onClick={() => {
                       if (confirm('删除该资产？')) api.delAsset(a.id).then(load)
                     }}
@@ -129,6 +132,8 @@ export default function Library() {
           </div>
         )}
       </main>
+
+      <Splitter side="right" />
 
       <aside className="panel right">
         <div className="section-title">
@@ -153,7 +158,7 @@ export default function Library() {
             {detail.meta && Object.keys(detail.meta).length > 0 && (
               <div className="card">
                 <div className="label">元数据</div>
-                <pre className="mono" style={{ margin: 0, fontSize: 12, color: 'var(--muted)', whiteSpace: 'pre-wrap', maxHeight: 240, overflow: 'auto' }}>
+                <pre className="mono" style={{ margin: 0, fontSize: 14, color: 'var(--muted)', whiteSpace: 'pre-wrap', maxHeight: 240, overflow: 'auto' }}>
                   {JSON.stringify(detail.meta, null, 2)}
                 </pre>
               </div>

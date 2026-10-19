@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react'
 import { api, Settings } from '../api'
+import { Splitter } from '../split'
 
 /** 只有本地双底座，配置页也从「多 Provider 卡片网格」收敛成一张卡。 */
 export default function SettingsView() {
@@ -55,7 +56,7 @@ export default function SettingsView() {
           模型服务 <span className="tag pink">LOCAL</span>
         </div>
         <div className="card">
-          <div style={{ fontSize: 13, fontWeight: 600 }}>{cfg.label || '本地双底座'}</div>
+          <div style={{ fontSize: 15, fontWeight: 600 }}>{cfg.label || '本地双底座'}</div>
           <div className="hint" style={{ marginTop: 6 }}>
             生成底座：Z-Image-Turbo（文生图）
             <br />
@@ -69,18 +70,20 @@ export default function SettingsView() {
         </button>
         {msg && <div className={msg.startsWith('保存失败') ? 'err' : 'ok'}>{msg}</div>}
         <div className="card-white">
-          <div style={{ fontFamily: 'Silkscreen, monospace', fontSize: 9, marginBottom: 4 }}>LOCAL FIRST</div>
-          <div style={{ fontSize: 11, lineHeight: 1.7 }}>
+          <div style={{ fontFamily: 'Silkscreen, monospace', fontSize: 10, marginBottom: 4 }}>LOCAL FIRST</div>
+          <div style={{ fontSize: 13, lineHeight: 1.7 }}>
             全部推理在本机完成，素材存在 data/assets，不上传云端。
           </div>
         </div>
       </aside>
 
+      <Splitter side="left" />
+
       <main className="stage">
         <div className="section-title">本地底座</div>
         <div className="provider-card on">
           <div className="row between">
-            <div style={{ fontSize: 14, fontWeight: 600 }}>{cfg.label || '本地双底座'}</div>
+            <div style={{ fontSize: 16, fontWeight: 600 }}>{cfg.label || '本地双底座'}</div>
             <span className="status ok">默认</span>
           </div>
 
@@ -123,7 +126,7 @@ export default function SettingsView() {
           {testMsg && (
             <div
               className={testMsg.startsWith('OK') ? 'ok' : 'err'}
-              style={{ fontSize: 11 }}
+              style={{ fontSize: 13 }}
             >
               {testMsg}
             </div>
@@ -189,7 +192,7 @@ export default function SettingsView() {
         <div className="card">
           <div className="row between">
             <div>
-              <div style={{ fontSize: 13 }}>下载时补 AI 标识</div>
+              <div style={{ fontSize: 15 }}>下载时补 AI 标识</div>
               <div className="label">
                 默认关闭：角标画进像素后，后续抠图/合成会把它当画面内容带走。
                 存储与预览都不烧角标，只在下载瞬间按此开关叠加。
@@ -204,7 +207,7 @@ export default function SettingsView() {
           </div>
           <div className="row between" style={{ marginTop: 6 }}>
             <div>
-              <div style={{ fontSize: 13 }}>数据目录</div>
+              <div style={{ fontSize: 15 }}>数据目录</div>
               <div className="label">pixelforge/data/assets · 不上传云端</div>
             </div>
             <div className="hint">LOCAL</div>

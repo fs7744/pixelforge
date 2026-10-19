@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from 'react'
 import { api, Asset } from '../api'
 import { openPreview } from '../Preview'
+import { Splitter } from '../split'
 
 type StepDef = {
   id: string
@@ -212,6 +213,8 @@ export default function WorkflowView() {
         {error && <div className="err">{error}</div>}
       </aside>
 
+      <Splitter side="left" />
+
       <main className="stage">
         <div className="row between">
           <div className="section-title">
@@ -243,7 +246,7 @@ export default function WorkflowView() {
           <>
             <div className="card-hard">
               <div className="row between">
-                <div style={{ fontSize: 15, fontWeight: 600 }}>{stepDef?.name}</div>
+                <div style={{ fontSize: 16, fontWeight: 600 }}>{stepDef?.name}</div>
                 <span className="hint">{stepDef?.type?.toUpperCase()}</span>
               </div>
               <div className="label">{stepDef?.desc}</div>
@@ -284,8 +287,8 @@ export default function WorkflowView() {
 
               {(stepDef?.type === 'godot' || stepDef?.type === 'godot_parallax') && godotZip && (
                 <div className="card-white">
-                  <div style={{ fontFamily: 'Silkscreen, monospace', fontSize: 9, marginBottom: 4 }}>GODOT PACKAGE</div>
-                  <div style={{ fontSize: 12, lineHeight: 1.7 }}>
+                  <div style={{ fontFamily: 'Silkscreen, monospace', fontSize: 10, marginBottom: 4 }}>GODOT PACKAGE</div>
+                  <div style={{ fontSize: 14, lineHeight: 1.7 }}>
                     {currentStepMeta.kind === 'godot_parallax'
                       ? `图层 ${currentStepMeta.layers} · 画布 ${currentStepMeta.canvas?.join('×')} · scroll_scale ${JSON.stringify(currentStepMeta.scrollScale)}`
                       : `帧数 ${currentStepMeta.frames} · 帧尺寸 ${currentStepMeta.frameSize?.join('×')} · ${currentStepMeta.fps}fps`}
@@ -323,7 +326,7 @@ export default function WorkflowView() {
                       <div className="lib-meta">
                         <span>#{i + 1}</span>
                         {a && (
-                          <a href={a.url} download={`${a.name}.png`} style={{ color: 'var(--green)', fontSize: 10 }}>
+                          <a href={a.url} download={`${a.name}.png`} style={{ color: 'var(--green)', fontSize: 12 }}>
                             下载
                           </a>
                         )}
@@ -341,6 +344,8 @@ export default function WorkflowView() {
         )}
       </main>
 
+      <Splitter side="right" />
+
       <aside className="panel right">
         <div className="section-title">
           运行信息 <span className="tag">RUN</span>
@@ -351,7 +356,7 @@ export default function WorkflowView() {
               <div className="label">Run ID</div>
               <div className="mono">{run.id}</div>
               <div className="label" style={{ marginTop: 6 }}>输入</div>
-              <div style={{ fontSize: 12 }}>{run.input}</div>
+              <div style={{ fontSize: 14 }}>{run.input}</div>
             </div>
             <div className="card">
               <div className="label">步骤状态</div>
@@ -359,7 +364,7 @@ export default function WorkflowView() {
                 const info = statusOf(s)
                 return (
                   <div key={s.id} className="row between" style={{ marginTop: 4 }}>
-                    <span style={{ fontSize: 11 }}>
+                    <span style={{ fontSize: 13 }}>
                       {i + 1}. {s.name}
                     </span>
                     <span className={`status ${info.cls}`}>{info.label}</span>
@@ -368,8 +373,8 @@ export default function WorkflowView() {
               })}
             </div>
             <div className="card-white">
-              <div style={{ fontFamily: 'Silkscreen, monospace', fontSize: 9, marginBottom: 4 }}>TIPS</div>
-              <div style={{ fontSize: 11, lineHeight: 1.7 }}>
+              <div style={{ fontFamily: 'Silkscreen, monospace', fontSize: 10, marginBottom: 4 }}>TIPS</div>
+              <div style={{ fontSize: 13, lineHeight: 1.7 }}>
                 单步失败可单独重跑，不影响已完成步骤的产物。
                 <br />
                 导出 ZIP 直接解压进 Godot 项目即可播放动画。
