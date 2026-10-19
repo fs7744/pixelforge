@@ -8,6 +8,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import re
 import time
 import uuid
 from pathlib import Path
@@ -207,6 +208,9 @@ def get_workflow(wf_id: str) -> Dict[str, Any]:
 
 
 # ---------------- Run 持久化 ----------------
+_RUN_ID_RE = re.compile(r"^[0-9a-f]{12}$")
+
+
 def _run_path(run_id: str):
     RUNS_DIR.mkdir(parents=True, exist_ok=True)
     return RUNS_DIR / f"{run_id}.json"
@@ -231,14 +235,26 @@ def create_run(wf_id: str, input_text: str, params: Optional[Dict[str, Any]] = N
 
 
 def _save_run(run: Dict[str, Any]) -> None:
-    _run_path(run["id"]).write_text(json.dumps(run, ensure_ascii=False, indent=2), encoding="utf-8")
+    # 原子替换：run.json 是「跑了几分钟」的唯一进度记录，直接覆盖时
+    # 中断会留下半截 JSON，后面 get_run 解析失败，整个 run 等于废掉。
+    path = _run_path(run["id"])
+    tmp = path.with_suffix(".json.tmp")
+    tmp.write_text(json.dumps(run, ensure_ascii=False, indent=2), encoding="utf-8")
+    tmp.replace(path)
 
 
 def get_run(run_id: str) -> Optional[Dict[str, Any]]:
+    # run_id 直接拼进文件名，必须限死为 12 位 hex；否则 Windows 下
+    # "..\..\data\assets\index" 这类反斜杠路径能穿出 runs 目录。
+    if not _RUN_ID_RE.match(run_id or ""):
+        return None
     p = _run_path(run_id)
     if not p.exists():
         return None
-    return json.loads(p.read_text(encoding="utf-8"))
+    try:
+        return json.loads(p.read_text(encoding="utf-8"))
+    except Exception:
+        return None
 
 
 def list_runs(limit: int = 20) -> List[Dict[str, Any]]:
