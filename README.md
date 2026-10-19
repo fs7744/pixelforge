@@ -88,12 +88,14 @@ PYTHONPATH=. python backend/fetch_wan22.py
 | | Z-Image-Turbo | Qwen-Image-Edit-2511 | Wan2.2 TI2V-5B |
 |---|---|---|---|
 | 分工 | 文生图（一句话 → 角色/场景） | 参考图生成 / 指令式编辑 | 图生视频（角色图 + 动作 → 连续帧） |
-| 规模 | 6B · 8 步蒸馏 · 约 5s/张 | 20B · 40 步 · 约 3-4 分钟/张 | 5B · 30 步 · 81 帧约 5-15 分钟 |
+| 规模 | 6B · 8 步蒸馏 · 约 5s/张 | 20B · 40 步 · 约 3-4 分钟/张 | 5B · 30 步 · 33 帧约 60-90 秒 |
 | 显存 | bf16 全载约 21GB | fp8 权重约 20GB | transformer fp8 9.3GB + umT5 fp8 5.3GB + VAE 2.6GB |
 
 视频底座解决的是「逐帧编辑帧间不连续」：Qwen-Edit 一帧一帧改姿势，每帧独立推理，
 快速动作会抖；Wan 一次生成整段动作，肢体路径天然连贯，抽帧后就是现成的循环素材
-（h3-character-studio 用 MiniMax H3 是同一思路）。
+（h3-character-studio 用 MiniMax H3 是同一思路）。第一次加载会把 transformer 量化
+成 fp8 并落盘到 `models/wan2.2-ti2v-5b/transformer-fp8/`，之后冷启动直接命中，
+比重新量化快约 30 秒。
 
 两者不能同时驻留，Provider 会自动换出另一族，日志里能看到「显存换出」。
 

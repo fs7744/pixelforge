@@ -13,6 +13,8 @@
 """
 import inspect
 import io
+import json
+import os
 import zipfile
 from pathlib import Path
 
@@ -1024,6 +1026,132 @@ try:
 finally:
     DiffusersProvider._load_wan = _orig_load_wan
 check("_load 把 wan 分到 _load_wan（不是报不支持的模型）", _got is _sentinel, str(type(_got)))
+
+# 管线类必须是自己声明 image 入参的那支：仓库 model_index 写的是 WanPipeline
+# （纯 T2V），照它加载会在真机上报 unexpected keyword argument 'image'。
+from diffusers import WanImageToVideoPipeline as _WanI2V  # noqa: E402
+
+check("Wan 用 I2V 管线（__call__ 接受 image）",
+      "image" in inspect.signature(_WanI2V.__call__).parameters)
+# transformer 48 输入通道（16 噪声 + 32 图像 latent）是 I2V 的硬指标
+_wan_root = Path(__file__).resolve().parents[1] / "models" / "wan2.2-ti2v-5b"
+if (_wan_root / "transformer" / "config.json").is_file():
+    _wcfg = json.loads((_wan_root / "transformer" / "config.json").read_text())
+    check("Wan transformer in_channels=48（图像 latents 已并入）",
+          _wcfg.get("in_channels") == 48, _wcfg.get("in_channels"))
+else:
+    check("Wan transformer in_channels=48（未下载权重，跳过）", True)
+
+# Wan I2V 默认 output_type="np"（返回 ndarray 而非 PIL），拿 [0] 当 PIL 用会报
+# 'numpy.ndarray' object has no attribute 'convert'。归一化函数收全部结构。
+from backend.app.providers.diffusers_local import _frames_to_pil  # noqa: E402
+
+_a = Image.new("RGB", (8, 10), (10, 200, 30))
+_b = Image.new("RGB", (8, 10), (30, 40, 250))
+_np_hwc = np.stack([np.asarray(_a), np.asarray(_b)])          # [b][f][h][w][c]
+_np_chw = np.transpose(_np_hwc, (0, 3, 1, 2))                # [b][f][c][h][w]
+for _name, _src in (("PIL 列表", [[_a, _b]]), ("PIL 平铺", [_a, _b]),
+                    ("numpy HWC", [_np_hwc]), ("numpy CHW", [_np_chw]),
+                    ("裸 ndarray", _np_hwc)):
+    _got = _frames_to_pil(_src)
+    check(f"帧归一化 · {_name} → PIL RGBA 且尺寸/颜色正确",
+          len(_got) > 0 and _got[0].mode == "RGBA"
+          and _got[0].size == (8, 10)
+          and _got[0].getpixel((0, 0)) == (10, 200, 30, 255),
+          f"n={len(_got)} mode={_got[0].mode if _got else '-'} "
+          f"size={_got[0].size if _got else '-'}")
+# 小尺寸 HWC 图（8×10×3）不能被误当 CHW 转置：只用 shape[0] 判会转成 (3,8,10)
+check("帧归一化 · 小尺寸 HWC 不被误转置",
+      _frames_to_pil([np.asarray(_a)])[0].size == (8, 10),
+      str(_frames_to_pil([np.asarray(_a)])[0].size))
+# 灰度 2D 要真的复制成 3 通道；补一维 (h,w,1) PIL 不认
+check("帧归一化 · 灰度图补成三通道",
+      _frames_to_pil([np.asarray(_a.convert("L"))])[0].mode == "RGBA")
+
+# _load_component_fp8 漏 import torch 时会在真机上退化成「fp8 快速路径失败
+# （name 'torch' is not defined）」，静默走完整 bf16 加载（慢一倍、常驻翻倍）。
+# 这里用不存在的目录触发早期异常：如果 torch 没导入，抛的是 NameError。
+try:
+    DiffusersProvider({})._load_component_fp8(
+        "models/__no_such_dir__", "transformer", object, "test.tag")
+    _fp8_exc = ""
+except NameError as e:
+    _fp8_exc = f"NameError:{e}"
+except Exception as e:                       # 目录不存在 → OSError / ValueError 均可
+    _fp8_exc = type(e).__name__
+check("_load_component_fp8 用得到 torch（不抛 NameError）",
+      not _fp8_exc.startswith("NameError"), _fp8_exc)
+
+# ---- fp8 Linear 的 dtype 布局 ----
+# diffusers 用 next(iter(module.parameters())).dtype 推断计算精度（Wan 有两处硬依赖：
+# transformer_wan 的 time_embedder_dtype、pipeline 的 transformer_dtype）。
+# 若 fp8 权重自己是 Parameter，时间步张量会被转成 fp8 —— e4m3 上限 448、
+# 时间步 0-1000 直接溢出，报的是 "mul_cuda not implemented for Float8_e4m3fn"，
+# 与真正的量化问题毫无关联，极难定位。布局必须是：fp8 放 buffer w_fp8，
+# weight 置成 0 字节 bf16 Parameter。
+import torch  # noqa: E402  （fp8 Linear 的 dtype 布局测试要用）
+from backend.app.providers.diffusers_local import (  # noqa: E402
+    _get_fp8_linear_cls as _fp8_cls, _wrap_fp8_weight as _wrap8)
+
+if torch.cuda.is_available():
+
+    def _mk_fp8_linear(bias_=True):
+        torch.manual_seed(0)
+        lin = torch.nn.Linear(128, 64, bias=bias_)
+        ref = lin.weight.data.clone().cuda()
+        w = lin.weight.data.cuda()
+        s = w.abs().amax(dim=1, keepdim=True).clamp_(min=1e-12) / 448.0
+        lin.weight = torch.nn.Parameter(
+            ((w / s).clamp_(-448, 448).to(torch.float8_e4m3fn)).cpu(), requires_grad=False)
+        lin.register_buffer("w_scale", s.squeeze(1).float())   # 故意留在 CPU
+        lin.__class__ = _fp8_cls()
+        _wrap8(lin)
+        return lin, ref
+
+    _lin8, _ref8 = _mk_fp8_linear()
+    check("fp8 权重放 buffer w_fp8（不是 Parameter）",
+          _lin8.w_fp8.dtype == torch.float8_e4m3fn, str(_lin8.w_fp8.dtype))
+    check("weight 是 0 字节 bf16 Parameter（dtype 探针看到 bf16）",
+          _lin8.weight.dtype == torch.bfloat16 and _lin8.weight.numel() == 0,
+          f"{_lin8.weight.dtype} numel={_lin8.weight.numel()}")
+    check("diffusers 的 dtype 探针返回 bf16（不会把时间步转成 fp8）",
+          next(iter(_lin8.parameters())).dtype == torch.bfloat16,
+          str(next(iter(_lin8.parameters())).dtype))
+    # 真实失败模式：时间步 0-1000 过 fp8 Linear
+    _ts = torch.tensor([[0.0, 500.0, 999.9, 1000.0]], device="cuda")
+    _out_ts = _lin8(torch.nn.functional.pad(_ts, (0, 124)))
+    check("时间步 0-1000 能过 fp8 Linear 且有限（e4m3 上限 448，不溢出）",
+          bool(torch.isfinite(_out_ts).all()), str(_out_ts.dtype))
+    # 量化误差应在 fp8 预期范围内（实测 ~0.11）
+    _x = torch.randn(4, 128, device="cuda", dtype=torch.bfloat16)
+    _err = float((_lin8(_x).float()
+                  - torch.nn.functional.linear(_x.float(), _ref8)).abs().max())
+    check("fp8 前向与 bf16 误差在预期内（<0.5）", _err < 0.5, round(_err, 3))
+    # bias 为 None 与 fp32 输入都要能过（w_scale/bias 常驻 CPU 会撞 device mismatch）
+    _lin8_nb, _ = _mk_fp8_linear(bias_=False)
+    check("fp8 Linear 无 bias 可用",
+          tuple(_lin8_nb(torch.randn(2, 128, device="cuda",
+                                      dtype=torch.bfloat16)).shape) == (2, 64))
+    check("fp8 Linear 吃 fp32 输入（时间步探针可能是 fp32）",
+          tuple(_lin8(torch.zeros(2, 128, device="cuda")).shape) == (2, 64))
+    # 缓存路径：state_dict 里 w_fp8 存 fp8、空 weight 存空张量，safetensors 能往返
+    _sd = _lin8.state_dict()
+    check("state_dict 键含 w_fp8 / w_scale / 空 weight",
+          set(("w_fp8", "w_scale", "weight")) <= set(_sd)
+          and _sd["w_fp8"].dtype == torch.float8_e4m3fn
+          and _sd["weight"].numel() == 0,
+          str(sorted(_sd)))
+    import tempfile as _tf
+    from safetensors.torch import load_file as _lf, save_file as _sf
+
+    _dir = _tf.mkdtemp()
+    _sf({k: (v.data if hasattr(v, "data") else v).detach().contiguous()
+         for k, v in _sd.items()}, os.path.join(_dir, "m.safetensors"))
+    _back = _lf(os.path.join(_dir, "m.safetensors"))
+    check("fp8 缓存 safetensors 往返（fp8 原样存回）",
+          _back["w_fp8"].dtype == torch.float8_e4m3fn, str(_back["w_fp8"].dtype))
+else:
+    check("fp8 Linear 布局（无 GPU，跳过）", True)
 check("wan 与其他大族互斥驻留",
       "wan" in diffusers_local._BIG_FAMILIES, str(diffusers_local._BIG_FAMILIES))
 

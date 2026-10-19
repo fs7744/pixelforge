@@ -35,6 +35,10 @@ _LOCK = asyncio.Lock()
 
 _FP8_LINEAR_CLS: Any = None
 
+# fp8 缓存的布局版本号。改了 state_dict 的键布局（fp8 Parameter → fp8 buffer
+# w_fp8 + 空 weight）就必须换号，否则旧缓存会被误判成命中并在加载时 KeyError。
+_FP8_CACHE_FORMAT = "fp8-e4m3-rowwise-buf/v2"
+
 
 def _get_fp8_linear_cls() -> Any:
     """懒加载 _FP8Linear 类（本模块遵循「无 torch 也能 import」的设计）。
@@ -43,6 +47,20 @@ def _get_fp8_linear_cls() -> Any:
     成 bf16 再算。与 torchao Float8WeightOnlyConfig 数学等价，但权重是普通
     fp8 张量（safetensors 0.4.2+ 原生支持、bit 级往返一致），因此可落盘缓存；
     量化在 GPU 上逐层完成（峰值显存=单层），20B 模型约 10s（CPU 全量 58s）。
+
+    为什么 fp8 权重不能直接放 weight Parameter：
+
+    diffusers 到处用「取第一个 Parameter 的 dtype」来推断该子模块的计算精度——
+    Wan 里就有两处硬依赖：
+      - transformer_wan.py: time_embedder_dtype = next(iter(parameters())).dtype
+      - pipeline_wan_i2v.py: transformer_dtype = self.transformer.dtype
+    如果 weight 本身就是 fp8 Parameter，这两个地方会把时间步张量也转成 fp8；
+    而 float8_e4m3fn 的上限只有 448，时间步是 0-1000，一转就溢出成 inf/NaN，
+    正向时直接报 "mul_cuda not implemented for Float8_e4m3fn"（真实踩过）。
+    另有一层：自定义 Tensor 子类无法包成 Parameter（detach() 返回基类即报错）。
+
+    所以布局是：真数据放 buffer ``w_fp8``，weight 置成一个 0 字节的 bf16
+    Parameter 专供上面那些 dtype 探针读取。代价是 0（空张量不占内存）。
     """
     global _FP8_LINEAR_CLS
     if _FP8_LINEAR_CLS is None:
@@ -50,15 +68,51 @@ def _get_fp8_linear_cls() -> Any:
         import torch.nn.functional as F
 
         class _FP8Linear(torch.nn.Linear):
+            """权重存 fp8 buffer（w_fp8）+ 一个 bf16 空 Parameter 当 dtype 探针。"""
+
             def forward(self, x):  # type: ignore[override]
-                w = self.weight.to(x.dtype)
+                w_fp8 = getattr(self, "w_fp8", None)
+                if w_fp8 is None:                    # 非量化路径（理论上不会到）
+                    w = self.weight.to(x.dtype)
+                    return F.linear(x, w, self.bias)
+                # 计算 dtype 只认 bf16/fp16：fp32 会让 F.linear 在 mixed dtype
+                # 上报错，而 x 的 dtype 是上游（可能 fp32 的时间步）决定的。
+                dt = x.dtype if x.dtype in (torch.bfloat16, torch.float16) else torch.bfloat16
+                if x.dtype != dt:
+                    x = x.to(dt)
+                # w_scale 与 bias 都是量化/构建时留在 CPU 的常驻 buffer，而权重
+                # 会被 cpu offload 搬到 GPU，直接相乘/相加会撞 device mismatch。
+                w = w_fp8.to(device=x.device, dtype=dt)
                 scale = getattr(self, "w_scale", None)
                 if scale is not None:
-                    w = w * scale.to(x.dtype)[:, None]
-                return F.linear(x, w, self.bias)
+                    w = w * scale.to(device=w.device, dtype=dt)[:, None]
+                b = self.bias
+                if b is not None:
+                    b = b.to(device=w.device, dtype=dt)
+                return F.linear(x, w, b)
 
         _FP8_LINEAR_CLS = _FP8Linear
     return _FP8_LINEAR_CLS
+
+
+def _wrap_fp8_weight(linear: "torch.nn.Linear") -> None:
+    """把 Linear 的裸 fp8 weight 转成 fp8 buffer + bf16 空 Parameter。
+
+    调用前提：weight 已是 float8_e4m3fn。转换后 state_dict 里会出现
+    ``w_fp8``（真数据）与空的 ``weight``（仅供 dtype 探针），缓存读写两侧
+    都按这个约定处理。
+    """
+    import torch
+
+    w = linear.weight
+    if isinstance(w, torch.nn.Parameter):
+        w = w.data
+    if not isinstance(w, torch.Tensor) or w.dtype != torch.float8_e4m3fn:
+        return
+    linear.register_buffer("w_fp8", w)
+    # 空 weight（0 字节）只用于让 next(iter(parameters())).dtype 返回 bf16
+    linear.weight = torch.nn.Parameter(
+        torch.empty(0, dtype=torch.bfloat16, device=w.device), requires_grad=False)
 
 
 def _read_json(path: str) -> Dict[str, Any]:
@@ -146,6 +200,49 @@ def _normalize_refs(ref=None, refs=None) -> List[Any]:
     if refs:
         out.extend([r for r in refs if r is not None])
     return out[:MAX_REFS]
+
+
+def _frames_to_pil(frames: Any) -> List[Any]:
+    """把管线的输出统一成一维 PIL 列表（RGBA）。
+
+    Wan I2V 的输出结构随 output_type 变：output_type="pil" 是 [batch][frame] 的
+    PIL 列表，="np" 是 numpy 数组 [batch][frame][h][w][c]。这里两种都收，
+    免得为了换输出类型去改调用点——类型差异不是业务逻辑该操心的事。
+
+    顺带解决了一个真实踩坑：把 [0]（取 batch 0）后的结果当成 PIL 用，
+    在默认 np 模式下会报 'numpy.ndarray' object has no attribute 'convert'。
+    """
+    import numpy as np
+    from PIL import Image
+
+    seq = frames[0] if (hasattr(frames, "__len__") and len(frames)
+                        and isinstance(frames[0], (list, tuple))) else frames
+    # numpy 输出带 batch 维（[b][f][h][w][c]）。这里把所有前置 batch 维压掉：
+    # 判据是「单个元素的维度 ≥ 4」——只有帧数据才有 5 维，灰度图只有 2 维、
+    # 单帧 HWC 只有 3 维，不会被误当 batch。逐元素 isinstance 判断既啰嗦又易错。
+    if not hasattr(seq, "ndim") and len(seq) and hasattr(seq[0], "ndim"):
+        if seq[0].ndim >= 4:          # [b][f][h][w][c]
+            seq = [seq[b] for b in range(len(seq))]
+    out: List[Any] = []
+    for f in seq:
+        if isinstance(f, Image.Image):
+            out.append(f.convert("RGBA"))
+        else:
+            arr = np.asarray(f)
+            if arr.ndim >= 4:          # 残留 batch 维（单个视频对象）
+                arr = arr[0]
+            # 只在「最后一维明显不是通道」时才转置。必须同时满足首末维都是
+            # 小通道数（3/4）才算 CHW——只用 shape[0] 判会把 HWC 的小尺寸图
+            # （比如 8×10×3）误转置成 (3,8,10) 再喂给 fromarray，直接抛 TypeError。
+            if (arr.ndim == 3 and arr.shape[-1] not in (3, 4)
+                    and arr.shape[0] in (3, 4)):
+                arr = np.transpose(arr, (1, 2, 0))   # CHW → HWC
+            if arr.ndim == 2:
+                # 灰度图：必须真的复制成 3 通道。用 arr[:, :, None] 补一维会得到
+                # (h, w, 1)，PIL 的 fromarray 不认（KeyError (1,1,1)）。
+                arr = np.repeat(arr[:, :, None], 3, axis=2)
+            out.append(Image.fromarray(arr.astype("uint8")).convert("RGBA"))
+    return out
 
 
 # torch 不在 backend/requirements.txt 里：它是 2.9GB 的推理依赖，只有真要出图才需要，
@@ -366,12 +463,18 @@ class DiffusersProvider(BaseProvider):
     # ---------- Wan2.2 TI2V-5B：图生视频（角色参考图 + 动作提示词 → 帧序列） ----------
 
     def _load_wan(self, model_id: str):
-        """Wan2.2 TI2V-5B：5B DiT + umT5-xxl + Wan VAE，diffusers WanPipeline。
+        """Wan2.2 TI2V-5B：5B DiT + umT5-xxl + Wan VAE，diffusers WanImageToVideoPipeline。
 
         为什么用视频底座做精灵：逐帧编辑（Qwen-Edit 一帧一帧改姿势）每帧都是
         独立推理，帧间没有运动连续性，快速动作会抖；视频底座一次生成整段动作，
         肢体路径天然连贯，抽帧后就是现成的循环素材。h3-character-studio 用的
         MiniMax H3 是同一思路（首帧 = 方向母版，27 帧加中间引导）。
+
+        管线类必须用 I2V 版：仓库的 model_index.json 写的是 ``WanPipeline``（纯文生
+        视频，__call__ 不接受 image），但 TI2V-5B 的 transformer 是
+        ``in_channels=48``（16 噪声 + 32 图像 latent），只有 WanImageToVideoPipeline
+        会把参考图编码进第一帧的 latent 通道。照 model_index 加载会直接报
+        ``unexpected keyword argument 'image'``。
 
         显存策略（照 Qwen-Edit 的作业）：
         - transformer bf16 18.6GB → GPU 逐层 fp8（约 9.3GB），落盘缓存
@@ -387,12 +490,23 @@ class DiffusersProvider(BaseProvider):
         except Exception as e:  # pragma: no cover
             raise RuntimeError(_TORCH_HINT) from e
         try:
-            from diffusers import WanPipeline, WanTransformer3DModel
+            from diffusers import WanImageToVideoPipeline, WanTransformer3DModel
         except Exception as e:
             raise RuntimeError(
-                "Wan2.2 视频生成需要 diffusers ≥ 0.36（含 WanPipeline / "
-                "WanTransformer3DModel）。请执行 pip install -U diffusers。\n"
+                "Wan2.2 视频生成需要 diffusers ≥ 0.36（含 "
+                "WanImageToVideoPipeline / WanTransformer3DModel）。"
+                "请执行 pip install -U diffusers。\n"
                 f"原始错误：{e}"
+            ) from e
+        # ftfy 是 encode_prompt → prompt_clean 的硬依赖，但 diffusers 不默认带它。
+        # 缺了会在真正开始去噪时才炸（NameError 埋在 diffusers 内部，位置很难找），
+        # 所以在这里拦一次并说清楚装什么。
+        try:
+            import ftfy  # noqa: F401
+        except ImportError as e:
+            raise RuntimeError(
+                "缺 ftfy：Wan 的提示词编码器会调用 ftfy.fix_text 清洗文本。\n"
+                "请执行：pip install ftfy（或重跑 bash backend/install_gpu_deps.sh）"
             ) from e
         torch.backends.cudnn.benchmark = True
         if not torch.cuda.is_available():
@@ -408,11 +522,14 @@ class DiffusersProvider(BaseProvider):
                       flush=True)
                 transformer = None
 
+        # WanImageToVideoPipeline 与 WanPipeline 的组件字段一致，可以直接复用
+        # 仓库里的 config/权重；不存在的 transformer_2/transformer_3 传 None。
         if transformer is not None:
-            pipe = WanPipeline.from_pretrained(
+            pipe = WanImageToVideoPipeline.from_pretrained(
                 model_id, torch_dtype=torch.bfloat16, transformer=transformer)
         else:
-            pipe = WanPipeline.from_pretrained(model_id, torch_dtype=torch.bfloat16)
+            pipe = WanImageToVideoPipeline.from_pretrained(
+                model_id, torch_dtype=torch.bfloat16)
             if os.environ.get("PIXELFORGE_QWEN_FP8", "1") != "0":
                 self._quantize_fp8(pipe.transformer, "wan.transformer")
         # umT5-xxl 10.6GB：fp8 后约 5.3GB，offload 会在编码完成后把它搬出显存
@@ -468,8 +585,11 @@ class DiffusersProvider(BaseProvider):
             num_inference_steps=use_steps,
             guidance_scale=5.0,
             generator=generator,
+            # Wan 的 I2V 管线默认 output_type="np"（返回 ndarray），不是 "pil"。
+            # 显式要 PIL：下游统一按 Image 处理，少一层 numpy 往返也少一处错位风险。
+            output_type="pil",
         )
-        imgs = [f.convert("RGBA") for f in out.frames[0]]
+        imgs = _frames_to_pil(out.frames)
         return imgs, {
             "steps": use_steps, "cfg": 5.0, "family": "wan",
             "mode": "i2v", "frames": len(imgs), "fps": fps,
@@ -533,6 +653,10 @@ class DiffusersProvider(BaseProvider):
             return False
         try:
             meta = json.loads((cache_dir / "fp8_cache_meta.json").read_text())
+            # 布局变了（fp8 Parameter → fp8 buffer + 空 weight）就必须重建：
+            # 源权重指纹没变，光看源文件会误判成命中，然后用旧布局加载直接 KeyError。
+            if meta.get("format") != _FP8_CACHE_FORMAT:
+                return False
             for name, (size, mtime) in meta.get("files", {}).items():
                 f = model_dir / subdir / name
                 if not f.is_file() or f.stat().st_size != size or int(f.stat().st_mtime) != mtime:
@@ -554,7 +678,8 @@ class DiffusersProvider(BaseProvider):
         from safetensors.torch import save_file
 
         cache_dir.mkdir(parents=True, exist_ok=True)
-        sd = {k: v.detach().contiguous() for k, v in transformer.state_dict().items()}
+        sd = {k: (v.data if hasattr(v, "data") else v).detach().contiguous()
+              for k, v in transformer.state_dict().items()}
         save_file(sd, str(cache_dir / "model.safetensors"))
         shutil.copy(str(model_dir / subdir / "config.json"),
                     str(cache_dir / "config.json"))
@@ -564,7 +689,8 @@ class DiffusersProvider(BaseProvider):
             st = f.stat()
             files[f.name] = [st.st_size, int(st.st_mtime)]
         (cache_dir / "fp8_cache_meta.json").write_text(json.dumps(
-            {"source": str(model_dir), "format": "fp8-e4m3-rowwise", "files": files},
+            {"source": str(model_dir), "format": _FP8_CACHE_FORMAT,
+             "files": files},
             ensure_ascii=False, indent=1))
 
     @staticmethod
@@ -586,6 +712,15 @@ class DiffusersProvider(BaseProvider):
         fp8_cls = _get_fp8_linear_cls()
         config = cls.load_config(str(cache_dir / "config.json"))
         sd = load_file(str(cache_dir / "model.safetensors"))
+        # 缓存里的量化 Linear 权重存两处：w_fp8（fp8 裸张量，真数据）和
+        # weight（0 字节 bf16，只为运行时 dtype 探针）。骨架是纯 nn.Linear，
+        # 它要满尺寸 weight，两者形状对不上——必须先把 weight 从待加载字典里
+        # 拿掉，否则 load_state_dict(assign=True) 会报 size mismatch 直接失败。
+        fp8_targets = {k[: -len(".w_fp8")] for k in sd if k.endswith(".w_fp8")}
+        # 这些 Linear 的 weight 会被换成 0 字节 bf16，对应的 state_dict 键
+        # 正好是 <模块路径>.weight —— 加载前先剔除，否则 assign 时形状不匹配。
+        fp8_weight_keys = {f"{k}.weight" for k in fp8_targets}
+        sd = {k: v for k, v in sd.items() if k not in fp8_weight_keys}
         try:
             with init_empty_weights():
                 model = cls.from_config(config)
@@ -593,19 +728,27 @@ class DiffusersProvider(BaseProvider):
             # meta 路径失败时退回普通 from_config（CPU 上空张量，仅多耗内存）
             model = cls.from_config(config)
         missing, unexpected = model.load_state_dict(sd, strict=False, assign=True)
-        # unexpected 必须全部是 .w_scale（骨架无此 buffer）；missing 必须为空
-        scales = [k for k in unexpected if k.endswith(".w_scale")]
-        if missing or len(scales) != len(unexpected):
+        # unexpected 只允许 w_scale / w_fp8（骨架没有这两个 buffer）。
+        # missing 里必然有一批 .weight：那正是上面剔除掉的量化 Linear 权重，
+        # 骨架是满尺寸 nn.Linear 却没有真数据（真数据在 w_fp8），后面统一换成
+        # 0 字节 bf16。除这些以外不允许再有缺失——那才是缓存损坏。
+        extras = [k for k in unexpected if k.endswith((".w_scale", ".w_fp8"))]
+        stray = [k for k in missing if k not in fp8_weight_keys]
+        if stray or len(extras) != len(unexpected):
             raise RuntimeError(
-                f"缓存键不匹配（missing={len(missing)} unexpected={len(unexpected)}），"
-                f"删除 {cache_dir.name}/ 可重建")
-        for key in scales:
-            mod = model.get_submodule(key[: -len(".w_scale")])
-            mod.register_buffer("w_scale", sd[key])
+                f"缓存键不匹配（missing={len(missing)} stray={len(stray)} "
+                f"unexpected={len(unexpected)}），删除 {cache_dir.name}/ 可重建")
+        for key in unexpected:
+            mod = model.get_submodule(key.rsplit(".", 1)[0])
+            mod.register_buffer(key.rsplit(".", 1)[1], sd[key])
         n = 0
         for mod in model.modules():
-            if isinstance(mod, torch.nn.Linear) and getattr(mod, "w_scale", None) is not None:
+            if isinstance(mod, torch.nn.Linear) and getattr(mod, "w_fp8", None) is not None:
                 mod.__class__ = fp8_cls
+                # weight 换成 0 字节 bf16：让 diffusers 的 dtype 探针看到 bf16
+                mod.weight = torch.nn.Parameter(
+                    torch.empty(0, dtype=torch.bfloat16, device=mod.w_fp8.device),
+                    requires_grad=False)
                 n += 1
         if n == 0:
             raise RuntimeError("缓存中没有任何 fp8 Linear，格式可能损坏")
@@ -619,6 +762,8 @@ class DiffusersProvider(BaseProvider):
         """
         import time
         from pathlib import Path
+
+        import torch
 
         model_dir = Path(model_id)
         cache_dir = model_dir / f"{subdir}-fp8"
@@ -664,6 +809,9 @@ class DiffusersProvider(BaseProvider):
             mod.weight = torch.nn.Parameter(wq.to("cpu"), requires_grad=False)
             mod.register_buffer("w_scale", scale.squeeze(1).to("cpu").float())
             mod.__class__ = fp8_cls
+            # 包成 _FP8Weight：对外报 bf16，避免 diffusers 的 dtype 探针把
+            # 时间步张量也转成 fp8（e4m3 上限 448，时间步 0-1000 会溢出）
+            _wrap_fp8_weight(mod)
             n += 1
         if n != n_linear:  # 理论上相等；不等说明有 Linear 子类，日志可见
             print(f"[pixelforge] 警告：{n_linear} 个 Linear 中仅量化 {n} 个", flush=True)

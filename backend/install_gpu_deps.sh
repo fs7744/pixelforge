@@ -48,7 +48,10 @@ echo "== [4/4] AI 依赖 =="
 # - >=0.18 用 torch.utils._pytree.register_constant（torch 2.7+ 才有）→ ImportError
 # - <0.16 缺 FqnToConfig 崩 diffusers 0.41 导入链；且 peft>=0.21 的 is_torchao_available() 也要求 >=0.16
 # 0.16.x 是唯一交集；cpp 扩展会跳过（走 Python 回退内核，速度实测可接受）
-"$PY" -m pip install diffusers transformers accelerate safetensors huggingface_hub -i "$MIRROR" "${RETRY[@]}"
+# ftfy 是 diffusers 视频管线（WanImageToVideoPipeline.encode_prompt）的硬依赖：
+# prompt_clean() 里直接 ftfy.fix_text(text)，缺了会在生成视频时报 NameError，
+# 而它默认不随 diffusers 一起装。
+"$PY" -m pip install diffusers transformers accelerate safetensors huggingface_hub ftfy -i "$MIRROR" "${RETRY[@]}"
 "$PY" -m pip install peft -i "$MIRROR" "${RETRY[@]}"
 "$PY" -m pip install "torchao==0.16.0" -i "$MIRROR" "${RETRY[@]}"
 
@@ -62,8 +65,10 @@ echo "== 验证 =="
 "$PY" -c "import torchao; print('TORCHAO OK', torchao.__version__)"
 "$PY" -c "from diffusers import ZImagePipeline; print('ZImagePipeline OK')"
 "$PY" -c "from diffusers import QwenImageEditPlusPipeline; print('QwenImageEditPlusPipeline OK')"
+"$PY" -c "from diffusers import WanImageToVideoPipeline; print('WanImageToVideoPipeline OK')"
 echo "ALL DONE"
 echo
-echo "下一步：下载模型（约 20GB / 54GB）"
+echo "下一步：下载模型（约 20GB / 54GB / 32GB）"
 echo "  bash backend/fetch_zimage.sh        # Z-Image-Turbo（生成底座，必装）"
 echo "  bash backend/fetch_qwen_edit.sh     # Qwen-Image-Edit-2511（编辑底座，可选）"
+echo "  python backend/fetch_wan22.py       # Wan2.2 TI2V-5B（视频底座，做循环动画可选）"
