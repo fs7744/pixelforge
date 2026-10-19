@@ -483,3 +483,20 @@ button, input, textarea, select { font-family: inherit; }
   padding: 8px 10px; border: 1px solid rgba(255, 213, 0, 0.45);
   background: rgba(255, 213, 0, 0.06);
 }
+
+/* 资产库筛选：两个维度（类型 / 来源），数量随另一维联动 */
+/* 间距交给 .panel 的 gap，这里不再叠 margin，否则两组之间空出 30px */
+.facet-group { display: flex; flex-direction: column; }
+.facet-group .label { margin-bottom: 6px; }
+.facet-hint { font-size: 12px; color: var(--muted); opacity: 0.75; margin-left: 2px; }
+.facet-n {
+  margin-left: 5px; font-size: 11px; opacity: 0.62;
+  font-variant-numeric: tabular-nums;
+}
+.chip.on .facet-n { opacity: 0.78; }
+/* 另一维筛完是 0 的项：标灰但仍可点，用户能知道自己筛出来的是空的 */
+.chip-zero { opacity: 0.38; }
+.lib-name {
+  font-size: 13px; color: var(--white); line-height: 1.5;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}

@@ -607,8 +607,23 @@ async def pipeline_threeview_step(payload: ThreeViewStepPayload):
 
 # ---------- 资产库 ----------
 @app.get("/api/assets")
-async def assets(kind: Optional[str] = None):
-    return {"assets": storage.list_assets(kind)}
+async def assets(kind: Optional[str] = None, pipeline: Optional[str] = None):
+    """kind（是什么）与 pipeline（哪条管线产出的）两个维度，AND 关系。
+
+    三视图的正/侧/背/拼板在 kind 上都属于 generated，只能靠 pipeline=threeview
+    筛出来——只给 kind 一个维度的话，资产库里永远选不到三视图。
+    """
+    return {"assets": storage.list_assets(kind, pipeline)}
+
+
+@app.get("/api/assets/facets")
+async def asset_facets():
+    """当前库里真实存在哪些 kind / pipeline 及各自数量，供筛选栏渲染。
+
+    注意：必须排在 /api/assets/{asset_id} 类路由之前，否则 "facets" 会被
+    当成资产 id 吃掉。
+    """
+    return storage.asset_facets()
 
 
 @app.get("/api/assets/{asset_id}/download")

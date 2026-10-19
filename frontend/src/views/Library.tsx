@@ -1,53 +1,166 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
-import { api, Asset } from '../api'
+import { api, Asset, AssetFacet, AssetFacets } from '../api'
 import { openPreview } from '../Preview'
 import { Splitter } from '../split'
 
-const KINDS: [string, string][] = [
-  ['全部', '全部'],
-  ['generated', '生成'],
-  ['matte', '抠图'],
-  ['resized', '规整'],
-  ['frame', '帧'],
-  ['sheet', '精灵表'],
-]
+const ALL = '全部'
+const DIRECT = 'direct'
+
+/** 资产的来源管线；没有 meta.pipeline 的直接生成，后端同样归到 direct */
+const pipelineOf = (a: Asset): string => (a.meta?.pipeline as string) || DIRECT
+
+type ChipRowProps = {
+  title: string
+  hint: string
+  active: string
+  options: AssetFacet[]
+  total: number
+  onPick: (id: string) => void
+}
+
+/** 一行筛选项。数量随「另一维」的选择实时联动，0 的项标灰但可点。 */
+function ChipRow({ title, hint, active, options, total, onPick }: ChipRowProps) {
+  return (
+    <div className="facet-group">
+      <div className="label">
+        {title} <span className="facet-hint">{hint}</span>
+      </div>
+      <div className="chips">
+        <button className={`chip ${active === ALL ? 'on' : ''}`} onClick={() => onPick(ALL)}>
+          全部
+          <span className="facet-n">{total}</span>
+        </button>
+        {options.map((o) => (
+          <button
+            key={o.id}
+            className={`chip ${active === o.id ? 'on' : ''} ${o.count === 0 ? 'chip-zero' : ''}`}
+            onClick={() => onPick(o.id)}
+            title={`${o.label} · ${o.count}`}
+          >
+            {o.label}
+            <span className="facet-n">{o.count}</span>
+          </button>
+        ))}
+      </div>
+    </div>
+  )
+}
 
 export default function Library() {
-  const [assets, setAssets] = useState<Asset[]>([])
-  const [kind, setKind] = useState('全部')
+  const [all, setAll] = useState<Asset[]>([])
+  const [facets, setFacets] = useState<AssetFacets | null>(null)
+  const [kind, setKind] = useState(ALL)
+  // 三视图的正/侧/背/拼板在 kind 上都是 generated，只有 pipeline 能区分子类。
+  // 筛选栏按「类型（是什么）+ 来源（哪条管线）」两个维度，任选其一是「全部」。
+  const [pipeline, setPipeline] = useState(ALL)
   const [selected, setSelected] = useState<string[]>([])
   const [detail, setDetail] = useState<Asset | null>(null)
   const [loading, setLoading] = useState(true)
 
   const load = useCallback(() => {
     setLoading(true)
-    api
-      .assets(kind)
-      .then((d) => setAssets(d.assets))
+    // 一次取全量再在本地切：库是本地文件，量级小，换来筛选 chip 的数量能
+    // 跟着另一维实时联动（否则点完一个维度，另一维的数量还是旧的）。
+    Promise.all([api.assets(), api.assetFacets()])
+      .then(([d, f]) => {
+        setAll(d.assets)
+        setFacets(f)
+      })
       .finally(() => setLoading(false))
-  }, [kind])
+  }, [])
 
   useEffect(load, [load])
 
+  const kindLabels = useMemo(() => {
+    const m: Record<string, string> = {}
+    ;(facets?.kinds || []).forEach((k) => (m[k.id] = k.label))
+    return m
+  }, [facets])
+
+  const pipeLabels = useMemo(() => {
+    const m: Record<string, string> = {}
+    ;(facets?.pipelines || []).forEach((p) => (m[p.id] = p.label))
+    return m
+  }, [facets])
+
+  const matchKind = (a: Asset) => kind === ALL || a.kind === kind
+  const matchPipe = (a: Asset) => pipeline === ALL || pipelineOf(a) === pipeline
+
+  const assets = useMemo(
+    () => all.filter((a) => matchKind(a) && matchPipe(a)),
+    // matchKind/matchPipe 只依赖 kind / pipeline
+    [all, kind, pipeline],
+  )
+
+  // chip 上的数字：把「另一维」的筛选也算进去，避免显示 32 结果点了是 0
+  const kindOptions = useMemo<AssetFacet[]>(
+    () =>
+      (facets?.kinds || []).map((k) => ({
+        ...k,
+        count: all.filter((a) => matchPipe(a) && a.kind === k.id).length,
+      })),
+    [facets, all, pipeline],
+  )
+  const pipeOptions = useMemo<AssetFacet[]>(
+    () =>
+      (facets?.pipelines || []).map((p) => ({
+        ...p,
+        count: all.filter((a) => matchKind(a) && pipelineOf(a) === p.id).length,
+      })),
+    [facets, all, kind],
+  )
+
+  const filtered = kind !== ALL || pipeline !== ALL
   const toggle = (id: string) => {
     setSelected((prev) => (prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id]))
   }
 
-  const stats = useMemo(() => `${assets.length} ASSETS`, [assets])
+  /** 卡片角标：kind 是「是什么」，pipeline 补上「哪来的」，重复时只留一个 */
+  const badgeOf = (a: Asset) => {
+    const k = kindLabels[a.kind] || a.kind
+    const p = pipeLabels[pipelineOf(a)] || ''
+    return p && p !== k && p !== pipeLabels[DIRECT] ? `${k} · ${p}` : k
+  }
 
   return (
     <div className="body">
       <aside className="panel">
         <div className="section-title">
-          筛选 <span className="tag">{stats}</span>
+          筛选{' '}
+          <span className="tag">
+            {filtered ? `${assets.length} / ${all.length}` : `${all.length} ASSETS`}
+          </span>
         </div>
-        <div className="chips">
-          {KINDS.map(([id, label]) => (
-            <button key={id} className={`chip ${kind === id ? 'on' : ''}`} onClick={() => setKind(id)}>
-              {label}
-            </button>
-          ))}
-        </div>
+
+        <ChipRow
+          title="类型"
+          hint="是什么"
+          active={kind}
+          options={kindOptions}
+          total={all.filter(matchPipe).length}
+          onPick={setKind}
+        />
+        <ChipRow
+          title="来源"
+          hint="哪条管线产出的"
+          active={pipeline}
+          options={pipeOptions}
+          total={all.filter(matchKind).length}
+          onPick={setPipeline}
+        />
+
+        {filtered && (
+          <button
+            className="btn btn-ghost btn-block"
+            onClick={() => {
+              setKind(ALL)
+              setPipeline(ALL)
+            }}
+          >
+            清除筛选
+          </button>
+        )}
+
         <div className="card">
           <div className="label">批量导出</div>
           <div className="mono">{selected.length} 个已选</div>
@@ -85,8 +198,27 @@ export default function Library() {
         ) : assets.length === 0 ? (
           <div className="empty">
             <div>
-              <span className="pixel">EMPTY</span>
-              还没有资产。去「生成工作台」出图，或用「后处理」处理一张图。
+              <span className="pixel">{filtered ? 'NO MATCH' : 'EMPTY'}</span>
+              {filtered ? (
+                <>
+                  当前筛选下没有资产（
+                  {kind !== ALL ? (kindLabels[kind] || kind) : '全部类型'} ·{' '}
+                  {pipeline !== ALL ? (pipeLabels[pipeline] || pipeline) : '全部来源'}）。
+                  <div className="mt8">
+                    <button
+                      className="btn btn-ghost"
+                      onClick={() => {
+                        setKind(ALL)
+                        setPipeline(ALL)
+                      }}
+                    >
+                      清除筛选
+                    </button>
+                  </div>
+                </>
+              ) : (
+                '还没有资产。去「生成工作台」出图，或用「后处理」处理一张图。'
+              )}
             </div>
           </div>
         ) : (
@@ -100,10 +232,15 @@ export default function Library() {
                   onDoubleClick={() => setDetail(a)}
                 >
                   <img src={a.url} alt={a.name} />
-                  <div className="cap">{a.kind}</div>
+                  <div className="cap">{badgeOf(a)}</div>
+                </div>
+                <div className="lib-name" title={a.name}>
+                  {a.name}
                 </div>
                 <div className="lib-meta">
-                  <span>{a.width}×{a.height}</span>
+                  <span>
+                    {a.width}×{a.height}
+                  </span>
                   <span>{new Date(a.createdAt * 1000).toLocaleDateString()}</span>
                 </div>
                 <div className="row">
@@ -151,7 +288,7 @@ export default function Library() {
             <div className="card">
               <div className="mono">{detail.name}</div>
               <div className="label">
-                {detail.width}×{detail.height} · {detail.kind}
+                {detail.width}×{detail.height} · {badgeOf(detail)}
               </div>
               <div className="hint">ID {detail.id}</div>
             </div>

@@ -308,6 +308,46 @@ if z.status_code == 200:
         check("ZIP 含 index.json", "index.json" in zf.namelist(), str(zf.namelist()[:3]))
 
 
+print("== 资产库：类型 / 来源两个维度 ==")
+# 前端筛选栏曾经手写死 6 个 kind，而实际写入的有 12 种，于是「像素化 / 工作流 /
+# 水印 / 换画风 / 拼图 / 三视图」这些资产在库里选不出来。facets 改成从索引派生后，
+# 这里锁住两条不变量：出现过的 kind 一定有筛选项；三视图靠 pipeline 能被单独筛出。
+before_total = len(client.get("/api/assets").json()["assets"])
+facets = client.get("/api/assets/facets").json()
+check("facets：同时给出 kinds 与 pipelines",
+      isinstance(facets, dict) and isinstance(facets.get("kinds"), list)
+      and isinstance(facets.get("pipelines"), list))
+check("facets：total 与 /api/assets 条数一致", facets.get("total") == before_total,
+      f"{facets.get('total')} vs {before_total}")
+
+present = {a["kind"] for a in client.get("/api/assets").json()["assets"]}
+missing = sorted(present - {k["id"] for k in facets["kinds"]})
+check("每个实际存在的 kind 都有筛选项（不再有选不出来的类型）", not missing, str(missing))
+check("facets 的 kind 数量都 ≥ 1", all(k["count"] >= 1 for k in facets["kinds"]))
+
+tv_asset = storage.save_asset(Image.new("RGB", (32, 32), (10, 20, 30)), kind="generated",
+                              name="facet-threeview", meta={"pipeline": "threeview"})
+direct_asset = storage.save_asset(Image.new("RGB", (32, 32), (30, 20, 10)), kind="generated",
+                                  name="facet-direct")
+remember(tv_asset)
+remember(direct_asset)
+
+tv_ids = [a["id"] for a in client.get("/api/assets?pipeline=threeview").json()["assets"]]
+check("pipeline=threeview 能单独筛出三视图",
+      tv_asset["id"] in tv_ids and direct_asset["id"] not in tv_ids, f"{len(tv_ids)} 条")
+check("pipeline=direct 兜住没有 pipeline 的记录",
+      direct_asset["id"] in [a["id"] for a in client.get("/api/assets?pipeline=direct").json()["assets"]])
+both = client.get("/api/assets?kind=generated&pipeline=threeview").json()["assets"]
+check("kind + pipeline 取交集",
+      tv_asset["id"] in [a["id"] for a in both] and direct_asset["id"] not in [a["id"] for a in both])
+check("「全部」视同不过滤",
+      len(client.get("/api/assets?kind=全部&pipeline=全部").json()["assets"]) == before_total + 2)
+check("未知 pipeline 返回空列表而不是报错",
+      client.get("/api/assets?pipeline=nope").json()["assets"] == [])
+check("三视图的来源标签是中文",
+      any(p["id"] == "threeview" and p["label"] == "三视图" for p in
+          client.get("/api/assets/facets").json()["pipelines"]))
+
 print("== 工作流 run 错误路径 ==")
 run = client.post("/api/workflows/scene/runs", json={"input": "测试场景", "params": {}}).json()
 run_id = run["id"]

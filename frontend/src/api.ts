@@ -1,3 +1,12 @@
+export type AssetFacet = { id: string; label: string; count: number }
+
+/** 筛选栏数据：kind=是什么（生成/抠图/帧…），pipeline=哪条管线产出的（三视图…） */
+export type AssetFacets = {
+  total: number
+  kinds: AssetFacet[]
+  pipelines: AssetFacet[]
+}
+
 export type Asset = {
   id: string
   name: string
@@ -194,8 +203,18 @@ export const api = {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(payload),
     }).then(json),
-  assets: (kind?: string) =>
-    fetch(`/api/assets${kind && kind !== '全部' ? `?kind=${kind}` : ''}`).then(json),
+  /**
+   * 资产列表。kind 与 pipeline 都是「是什么 / 从哪来」，两个都传时取交集。
+   * 三视图属于 kind=generated，只能靠 pipeline=threeview 单独筛出来。
+   */
+  assets: (kind?: string, pipeline?: string) => {
+    const qs = new URLSearchParams()
+    if (kind && kind !== '全部') qs.set('kind', kind)
+    if (pipeline && pipeline !== '全部') qs.set('pipeline', pipeline)
+    const q = qs.toString()
+    return fetch(`/api/assets${q ? `?${q}` : ''}`).then(json)
+  },
+  assetFacets: (): Promise<AssetFacets> => fetch('/api/assets/facets').then(json),
   delAsset: (id: string) => fetch(`/api/assets/${id}`, { method: 'DELETE' }).then(json),
   matte: (file: File, tolerance: number, feather: number) => {
     const fd = new FormData()
