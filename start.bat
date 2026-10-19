@@ -11,8 +11,9 @@ rem    --port N       listen on a custom port (auto-shifts if busy)
 rem    --reload       dev mode, auto-reload backend on code change
 rem    --setup        only prepare the environment, do not start
 rem    --check        only run a self-check and exit
+rem    --gpu          also install AI inference deps (torch/diffusers, ~2.9GB)
 rem
-rem  Environment variables: PF_PYTHON, PF_VENV, PF_PIP_INDEX, HOST, PORT
+rem  Environment variables: PF_PYTHON, PF_VENV, PF_PIP_INDEX, TORCH_INDEX, HOST, PORT
 rem ===========================================================================
 setlocal EnableExtensions EnableDelayedExpansion
 
@@ -24,7 +25,9 @@ if not defined PORT set "PORT=8787"
 set "OPEN_BROWSER=1"
 set "RELOAD="
 set "MODE=run"
+set "INSTALL_GPU=0"
 set "PY="
+if not defined TORCH_INDEX set "TORCH_INDEX=https://download.pytorch.org/whl/cu124"
 set "REMBG_STAMP=%VENV%\.pf-rembg-skip"
 
 :parse
@@ -33,6 +36,7 @@ if /i "%~1"=="--no-browser" ( set "OPEN_BROWSER=0" & shift & goto parse )
 if /i "%~1"=="--reload"     ( set "RELOAD=--reload" & shift & goto parse )
 if /i "%~1"=="--setup"      ( set "MODE=setup" & shift & goto parse )
 if /i "%~1"=="--check"      ( set "MODE=check" & set "OPEN_BROWSER=0" & shift & goto parse )
+if /i "%~1"=="--gpu"        ( set "INSTALL_GPU=1" & shift & goto parse )
 if /i "%~1"=="--port" (
   if "%~2"=="" ( echo [ERROR] --port needs a value & goto failed )
   set "PORT=%~2" & shift & shift & goto parse
@@ -164,6 +168,47 @@ if errorlevel 1 (
 )
 echo        Dependencies ... OK
 
+rem ---------- 2.5. AI inference deps (optional, ~2.9GB) ----------
+rem torch is deliberately kept out of requirements.txt: it is a 2.9GB download
+rem that only the AI tools need. Without it, hitting Generate fails with
+rem "No module named 'torch'", so we surface that clearly here instead.
+"%PY%" -c "import torch" >nul 2>nul
+if not errorlevel 1 (
+  echo        AI deps ....... OK
+  goto rembg
+)
+if not "%INSTALL_GPU%"=="1" (
+  echo        [warn] PyTorch not installed - AI generation is disabled.
+  echo            Deterministic tools ^(matte / pixelize / seamless^) still work.
+  echo            Run "start.bat --gpu" to install it ^(~2.9GB^).
+  goto rembg
+)
+echo [2.5/4] Installing AI inference deps ^(torch ~2.9GB, 5-15 min^) ...
+echo        torch source: %TORCH_INDEX%
+"%PY%" -m pip install --disable-pip-version-check -U pip >nul 2>nul
+"%PY%" -m pip install torch --index-url "%TORCH_INDEX%" --retries 5 --timeout 60
+if errorlevel 1 (
+  echo [ERROR] torch install failed.
+  echo         Check network, free disk space, and an NVIDIA driver with CUDA 12.x.
+  goto failed
+)
+rem torchvision 0.21.0 pairs with torch 2.6.0; diffusers needs it for the
+rem Qwen2VL video processor config shipped with Qwen-Image-Edit.
+"%PY%" -m pip install torchvision==0.21.0 --index-url "%TORCH_INDEX%" --retries 5 --timeout 60
+"%PY%" -m pip install --disable-pip-version-check diffusers transformers accelerate safetensors huggingface_hub -i https://mirrors.aliyun.com/pypi/simple
+if errorlevel 1 (
+  echo [ERROR] diffusers install failed. Check your network and retry.
+  goto failed
+)
+"%PY%" -m pip install --disable-pip-version-check peft -i https://mirrors.aliyun.com/pypi/simple
+"%PY%" -m pip install --disable-pip-version-check torchao==0.16.0 -i https://mirrors.aliyun.com/pypi/simple
+"%PY%" -c "import torch; print('        torch', torch.__version__, 'CUDA:', torch.cuda.is_available())"
+if errorlevel 1 (
+  echo [ERROR] torch installed but cannot be imported.
+  goto failed
+)
+
+:rembg
 rem Optional deep-matting stack. A failure here only downgrades matting quality.
 if not exist "%REMBG_STAMP%" (
   "%PY%" -c "import rembg" >nul 2>nul
@@ -171,7 +216,7 @@ if not exist "%REMBG_STAMP%" (
     echo        Optional: installing rembg for better matting ...
     "%PY%" -m pip install --disable-pip-version-check -q -r "%ROOT%\backend\requirements-optional.txt" >nul 2>nul
     if errorlevel 1 (
-      echo        [!] rembg unavailable - matting falls back to GrabCut.
+      echo        [warn] rembg unavailable - matting falls back to GrabCut.
       echo. > "%REMBG_STAMP%"
     )
   )
@@ -185,7 +230,7 @@ if exist "%ROOT%\frontend\dist\index.html" (
 )
 where npm >nul 2>nul
 if errorlevel 1 (
-  echo        [!] Node.js/npm not found - the web UI will be unavailable.
+  echo        [warn] Node.js/npm not found - the web UI will be unavailable.
   echo            API and /docs still work. Install Node.js 18+ to build the UI.
   goto models
 )
@@ -221,14 +266,14 @@ if exist "%ROOT%\models\*.safetensors" set "HAS_MODEL=1"
 if "%HAS_MODEL%"=="1" (
   echo        Models ......... found
 ) else (
-  echo        [!] No model yet - AI generation is disabled.
+  echo        [warn] No model yet - AI generation is disabled.
   echo            Deterministic tools ^(matte / pixelize / seamless^) still work.
   echo            Download Z-Image: bash backend/fetch_zimage.sh
 )
 goto ports
 
 :no_models
-echo        [!] No model yet - AI generation is disabled.
+echo        [warn] No model yet - AI generation is disabled.
 echo            Deterministic tools ^(matte / pixelize / seamless^) still work.
 echo            Download Z-Image: bash backend/fetch_zimage.sh
 
@@ -250,8 +295,10 @@ if not "%TRIES%"=="0" echo        Port busy, shifted to %PORT%
 echo.
 
 if /i "%MODE%"=="check" (
-  "%PY%" -c "import cv2; print('        OpenCV ......... OK')" 2>nul || echo        [!] OpenCV missing
-  "%PY%" -c "import rembg; print('        rembg .......... OK')" 2>nul || echo        [!] rembg missing ^(optional^)
+  "%PY%" -c "import cv2; print('        OpenCV ......... OK')" 2>nul || echo        [warn] OpenCV missing
+  "%PY%" -c "import rembg; print('        rembg .......... OK')" 2>nul || echo        [warn] rembg missing ^(optional^)
+  "%PY%" -c "import torch; print('        torch .......... OK')" 2>nul || echo        [warn] torch missing - AI generation disabled ^(run start.bat --gpu^)
+  "%PY%" -c "import diffusers; print('        diffusers ...... OK')" 2>nul || echo        [warn] diffusers missing - AI generation disabled ^(run start.bat --gpu^)
   echo.
   echo   Self-check done. Port %PORT% is free.
   goto done
@@ -279,7 +326,7 @@ goto done
 
 :usage
 echo.
-echo   Usage: start.bat [--no-browser] [--port N] [--reload] [--setup] [--check]
+echo   Usage: start.bat [--no-browser] [--port N] [--reload] [--setup] [--check] [--gpu]
 echo.
 echo   Just double-click start.bat for the default behavior.
 echo.

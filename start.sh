@@ -11,11 +11,13 @@
 #   ./start.sh --reload       开发模式：改后端代码自动重载
 #   ./start.sh --setup        只准备环境，不启动
 #   ./start.sh --check        只做自检，打印还缺什么
+#   ./start.sh --gpu          额外安装 AI 推理依赖（torch/diffusers，约 2.9GB）
 #
 # 环境变量：
 #   PF_PYTHON     指定 Python 解释器（默认自动探测 3.10–3.13，优先用项目 .venv）
 #   PF_VENV       虚拟环境目录（默认 <项目>/.venv）
 #   PF_PIP_INDEX  自定义 pip 源（默认先用本机 pip 配置，失败后自动切阿里云）
+#   TORCH_INDEX   torch wheel 源（默认 CUDA 12.4；无显卡可设 .../whl/cpu）
 #   HOST / PORT   监听地址（默认 127.0.0.1:8787）
 set -euo pipefail
 
@@ -34,6 +36,7 @@ OPEN_BROWSER=1
 RELOAD=0
 SETUP_ONLY=0
 CHECK_ONLY=0
+INSTALL_GPU=0
 PY=""
 
 # ---------- 输出 ----------
@@ -57,6 +60,7 @@ while [ $# -gt 0 ]; do
     --reload)        RELOAD=1; shift ;;
     --setup)         SETUP_ONLY=1; shift ;;
     --check)         CHECK_ONLY=1; OPEN_BROWSER=0; shift ;;
+    --gpu)           INSTALL_GPU=1; shift ;;
     --port)          [ $# -ge 2 ] || die "--port 需要一个端口号"; PORT="$2"; shift 2 ;;
     --port=*)        PORT="${1#*=}"; shift ;;
     --host)          [ $# -ge 2 ] || die "--host 需要一个地址"; HOST="$2"; shift 2 ;;
@@ -200,6 +204,34 @@ else
   ok "Python 依赖已就绪"
 fi
 
+# ---------- 2.5 AI 推理依赖（可选） ----------
+# torch 故意不放进 requirements.txt：2.9GB，只用抠图/像素化的人没必要等。
+# 代价是没装时点「生成」会报 No module named 'torch'，所以这里显式提示。
+torch_ok() { "$PY" -c "import torch" >/dev/null 2>&1; }
+
+if [ "$INSTALL_GPU" = "1" ]; then
+  if [ "$(uname -s)" = "Darwin" ]; then
+    warn "macOS 没有 CUDA，Z-Image / Qwen-Edit 无法推理"
+    dim "  确定性管线（抠图 / 像素化 / 延展）仍可用，已跳过 AI 依赖安装"
+  else
+    step "安装 AI 推理依赖（torch 约 2.9GB，首次 5–15 分钟）"
+    dim "  torch 源：${TORCH_INDEX:-https://download.pytorch.org/whl/cu124}"
+    if [ -n "${TORCH_INDEX:-}" ]; then export TORCH_INDEX; fi
+    GPUSH="$ROOT/backend/install_gpu_deps.sh"
+    [ -f "$GPUSH" ] || die "缺少 $GPUSH"
+    # 复用同一份脚本，避免 torch / torchvision / torchao 的版本矩阵两处漂移
+    PF_VENV="$VENV" PF_PYTHON="$PY" bash "$GPUSH" \
+      || die "AI 依赖安装失败。常见原因：网络中断、磁盘空间不足、显卡驱动过旧（需 CUDA 12.x）"
+    ok "AI 推理依赖就绪"
+  fi
+elif torch_ok; then
+  ok "AI 推理依赖已就绪"
+else
+  warn "未安装 PyTorch：AI 生图 / 图生图不可用"
+  dim "  抠图、像素化、延展等确定性管线不受影响"
+  dim "  需要出图时运行：./start.sh --gpu（约 2.9GB）"
+fi
+
 # 可选：rembg + u2net 深度抠图。装不上不影响使用，抠图会自动退到 GrabCut。
 # 失败一次就写标记，避免每次启动都重试拖慢速度。
 SKIP_STAMP="$VENV/.pf-optional-skip"
@@ -290,6 +322,10 @@ if [ "$CHECK_ONLY" = "1" ]; then
   "$PY" -c "import fastapi, uvicorn, PIL, numpy; print('  ✓ Web 依赖齐全')" || warn "Web 依赖缺失"
   "$PY" -c "import cv2; print('  ✓ OpenCV 可用（GrabCut 抠图）')" 2>/dev/null || warn "OpenCV 缺失，抠图退到颜色键"
   "$PY" -c "import rembg; print('  ✓ rembg 可用（u2net 深度抠图）')" 2>/dev/null || warn "rembg 缺失（可选）"
+  "$PY" -c "import torch; print('  ✓ torch', torch.__version__, '· CUDA:', torch.cuda.is_available())" 2>/dev/null || \
+    warn "torch 缺失，AI 生成不可用（运行 ./start.sh --gpu 安装）"
+  "$PY" -c "import diffusers; print('  ✓ diffusers', diffusers.__version__)" 2>/dev/null || \
+    warn "diffusers 缺失，AI 生成不可用（运行 ./start.sh --gpu 安装）"
   if [ -f "$DIST" ]; then ok "前端构建产物存在"; else warn "前端未构建"; fi
   if [ -d "$ROOT/models" ] && [ -n "$(ls -A "$ROOT/models" 2>/dev/null)" ]; then ok "本地模型存在"; else warn "本地模型未下载（AI 生成不可用）"; fi
   ok "端口 $PORT 可用"

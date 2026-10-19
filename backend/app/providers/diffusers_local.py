@@ -143,6 +143,29 @@ def _normalize_refs(ref=None, refs=None) -> List[Any]:
     return out[:MAX_REFS]
 
 
+# torch 不在 backend/requirements.txt 里：它是 2.9GB 的推理依赖，只有真要出图才需要，
+# 塞进基础依赖会让「只想用抠图/像素化」的人白等十几分钟。
+# 代价是没装 torch 时点生成会抛 ModuleNotFoundError——这里统一换成可执行的指引。
+_TORCH_HINT = (
+    "未安装 PyTorch，AI 生成不可用（抠图 / 像素化 / 延展等确定性管线不受影响）。\n"
+    "安装推理依赖（约 2.9GB）：\n"
+    "  Windows:            start.bat --gpu\n"
+    "  macOS / Linux:      ./start.sh --gpu\n"
+    "或手动安装（NVIDIA 显卡，CUDA 12.4）：\n"
+    "  pip install torch torchvision==0.21.0 --index-url https://download.pytorch.org/whl/cu124\n"
+    "  pip install diffusers transformers accelerate safetensors huggingface_hub peft torchao==0.16.0"
+)
+
+
+def _require_torch():
+    """取 torch；缺失时抛带安装指引的 RuntimeError，而不是裸的 ModuleNotFoundError。"""
+    try:
+        import torch
+    except Exception as e:  # pragma: no cover
+        raise RuntimeError(_TORCH_HINT) from e
+    return torch
+
+
 def _torch_status() -> Dict[str, Any]:
     try:
         import torch  # noqa: F401
@@ -192,13 +215,17 @@ class DiffusersProvider(BaseProvider):
         """Z-Image-Turbo：bf16 单流 S3-DiT + Qwen3-4B 中文编码器，8 步蒸馏。"""
         try:
             import torch
+        except Exception as e:  # pragma: no cover
+            raise RuntimeError(_TORCH_HINT) from e
+        try:
             from diffusers import ZImagePipeline
         except Exception as e:  # pragma: no cover
             raise RuntimeError(
                 "Z-Image 需要较新版本的 diffusers（含 ZImagePipeline）。请执行：\n"
-                "  pip install -U diffusers\n"
+                "  ./start.sh --gpu      （Windows：start.bat --gpu）\n"
+                "或  pip install -U diffusers\n"
                 f"原始错误：{e}"
-            )
+            ) from e
         # cuDNN 卷积算法启发式在显存紧张时会选中非 Tensor Core 慢速路径
         # （实测 4090 上 VAE 解码从 5s 劣化到 4 分钟以上，非确定性复现），
         # 开 benchmark 按实际 shape 自动调优，确定性走最快算法
@@ -238,13 +265,18 @@ class DiffusersProvider(BaseProvider):
         """
         try:
             import torch
+        except Exception as e:  # pragma: no cover
+            raise RuntimeError(_TORCH_HINT) from e
+        try:
             from diffusers import QwenImageEditPlusPipeline
         except Exception as e:  # pragma: no cover
             raise RuntimeError(
-                "Qwen-Image-Edit 需要较新版本的 diffusers（含 QwenImageEditPlusPipeline）。请执行：\n"
-                "  pip install -U diffusers\n"
+                "Qwen-Image-Edit 需要较新版本的 diffusers（含 QwenImageEditPlusPipeline）。"
+                "请执行：\n"
+                "  ./start.sh --gpu      （Windows：start.bat --gpu）\n"
+                "或  pip install -U diffusers\n"
                 f"原始错误：{e}"
-            )
+            ) from e
         # 同 _load_zimage：防止 cuDNN 选中慢速卷积路径劣化 VAE 解码
         torch.backends.cudnn.benchmark = True
         if not torch.cuda.is_available():
@@ -560,7 +592,7 @@ class DiffusersProvider(BaseProvider):
     def _run(self, model_id: str, prompt: str, negative: str, width: int, height: int,
              steps: int, cfg: float, seed: Optional[int], n: int,
              ref: Optional[Any] = None, refs: Optional[Any] = None):
-        import torch
+        torch = _require_torch()
 
         generator = None
         if seed is not None:
@@ -598,6 +630,9 @@ class DiffusersProvider(BaseProvider):
         ref=None,
         refs: Optional[Any] = None,
     ) -> ProviderResult:
+        # 入口先卡一次：缺 torch 时直接把安装指引抛给前端，
+        # 而不是等 _run 里 import 出一句光秃秃的 "No module named 'torch'"
+        _require_torch()
         requested = self._resolve_model()
         family = detect_family(requested)
         all_refs = _normalize_refs(ref, refs)
@@ -639,7 +674,9 @@ class DiffusersProvider(BaseProvider):
     async def test(self) -> Dict[str, Any]:
         st = _torch_status()
         if not st["installed"]:
-            return {"ok": False, "message": "未安装 torch，请按 README 安装 AI 依赖"}
+            return {"ok": False,
+                    "message": "未安装 PyTorch，AI 生成不可用。运行 ./start.sh --gpu"
+                               "（Windows：start.bat --gpu）安装推理依赖，约 2.9GB"}
         model = self._resolve_model()
         import importlib.util
 

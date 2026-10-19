@@ -35,7 +35,8 @@
 | `./start.sh --port 9000` | 指定端口（占用时仍会自动顺延） |
 | `./start.sh --reload` | 开发模式，改后端代码自动重载 |
 | `./start.sh --setup` | 只准备环境，不启动 |
-| `./start.sh --check` | 自检：打印 Python / 依赖 / 前端 / 模型 / 端口状态 |
+| `./start.sh --check` | 自检：打印 Python / 依赖 / torch / 前端 / 模型 / 端口状态 |
+| `./start.sh --gpu` | 额外安装 AI 推理依赖（torch + diffusers，约 2.9GB） |
 
 Windows 下把 `./start.sh` 换成 `start.bat`，参数相同。
 
@@ -46,6 +47,7 @@ Windows 下把 `./start.sh` 换成 `start.bat`，参数相同。
 | `PF_PYTHON` | 指定解释器路径，跳过 `.venv` 探测 |
 | `PF_VENV` | 虚拟环境目录（默认项目内 `.venv`） |
 | `PF_PIP_INDEX` | 自定义 pip 源；默认先用本机配置，失败自动切阿里云 |
+| `TORCH_INDEX` | torch wheel 源，默认 CUDA 12.4；纯 CPU 环境可设 `.../whl/cpu` |
 | `HOST` / `PORT` | 监听地址，默认 `127.0.0.1:8787` |
 
 ### 没有模型时能用什么
@@ -61,8 +63,9 @@ ZIP 批量导出。启动脚本会明确提示模型状态。
 需要 NVIDIA 显卡。**Z-Image 约 21GB 显存，Qwen-Edit 用 fp8 量化后约 20GB**，两者不会同时驻留。
 
 ```bash
-# 1. GPU 推理依赖（torch cu124 + diffusers + transformers，约 3GB）
-bash backend/install_gpu_deps.sh
+# 1. GPU 推理依赖（torch cu124 + diffusers + transformers，约 2.9GB）
+./start.sh --gpu          # Windows：start.bat --gpu
+# 等价于直接跑：bash backend/install_gpu_deps.sh
 
 # 2. 生成底座：Z-Image-Turbo（约 20GB，文生图，中文提示词直喂）
 bash backend/fetch_zimage.sh
@@ -70,6 +73,10 @@ bash backend/fetch_zimage.sh
 # 3. 编辑底座：Qwen-Image-Edit-2511（约 54GB，可选；角色一致性、AI 去水印/延展/画风重绘要用）
 bash backend/fetch_qwen_edit.sh
 ```
+
+> **为什么 torch 不随 `start.sh` 一起装**：它单独就占 2.9GB，而抠图、像素化、延展
+> 这些确定性功能根本不需要它。所以默认不装，只在检测到缺失时提示。
+> 如果没装就点「生成」，会看到 `No module named 'torch'` —— 跑一次 `--gpu` 即可。
 
 下载都支持断点续传，中断后重跑即可接着下。装完在「设置 → 内置推理服务」里确认模型路径，
 点「测试连接」。模型目录换了位置就改这里的路径，不用改代码。
@@ -140,6 +147,7 @@ GET  /api/runs/{id}                    查询步骤状态与产物
 | 界面空白 / 打不开 | 装 Node.js 18+ 后重跑 `./start.sh`；也可 `cd frontend && npm install && npm run build` |
 | 端口被占用 | 默认自动顺延；也可 `--port 9000` |
 | 生成报错「模型不存在」 | 按上面下载模型，并在设置页确认路径 |
+| 生成报错 `No module named 'torch'` | 只装了 Web 依赖，没装推理依赖。跑 `./start.sh --gpu`（Windows `start.bat --gpu`） |
 | 抠图边缘有杂色 | 确认 `~/.u2net/u2net.onnx` 存在（深度抠图）；否则是 GrabCut 兜底 |
 | 显存不足 | 同一时间只能驻留一个底座；设置页点「卸载模型」再切另一个 |
 
