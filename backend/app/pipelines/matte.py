@@ -213,6 +213,61 @@ _U2NET_HOME = os.path.expanduser(os.getenv("U2NET_HOME", "~/.u2net"))
 _U2NET_ONNX = os.path.join(_U2NET_HOME, "u2net.onnx")
 
 
+def drop_bg_islands(cut: Image.Image, tol: float = 70.0) -> Image.Image:
+    """丢掉 mask 里「孤立小块且整体都是背景色」的伪影岛。
+
+    u2net 偶发把一小片背景当成显著目标保留（实测：三视图脚边一块 248px 的
+    亮绿岛、人物像素化右肩外侧的白色长椅碎片）——原图里那是纯净背景，抠完
+    却成了一块扎眼的浮块。判定：连通域面积小（< 主体 2%，上限 3000px）且
+    域内 90%+ 像素接近透明区主色 → alpha 置 0。
+
+    连在主体上的伪影属于主体大连通域，不受影响——那块肉眼不可辨，按需求
+    保持原样。放在 matte 里而不是某个管线内：三视图、人物像素化都会踩到
+    同一个 u2net 伪影问题，一份实现比两份各自漂移强。
+    """
+    import numpy as np
+
+    arr = np.asarray(cut)
+    kept = arr[:, :, 3] > 8
+    if not kept.any():
+        return cut
+    try:
+        import cv2
+    except Exception:
+        return cut
+
+    rgb = arr[:, :, :3].astype(np.int32)
+    trans = rgb[~kept]
+    if len(trans) < 64:
+        return cut
+    q = trans // 16 * 16
+    colors, counts = np.unique(q.reshape(-1, 3), axis=0, return_counts=True)
+    refs = (colors[counts.argsort()[::-1][:3]] + 8).astype(np.int32)
+
+    bg_like = np.zeros(kept.shape, dtype=bool)
+    for c in refs:
+        bg_like |= (np.abs(rgb - c).sum(axis=2) < tol)
+    bg_like &= kept
+    if not bg_like.any():
+        return cut
+
+    n, lab = cv2.connectedComponents(kept.astype(np.uint8), connectivity=4)
+    if n <= 1:
+        return cut
+    subject_area = int(kept.sum())
+    max_area = max(48, min(int(0.02 * subject_area), 3000))
+    out = arr.copy()
+    for i in range(1, n):
+        comp = lab == i
+        area = int(comp.sum())
+        if area == 0 or area > max_area:
+            continue
+        if (bg_like & comp).sum() < 0.9 * area:
+            continue
+        out[comp, 3] = 0
+    return Image.fromarray(out, "RGBA")
+
+
 def _u2net_session():
     global _SESSION, _U2NET_ERR
     if _SESSION is not None or _U2NET_ERR is not None:

@@ -244,57 +244,12 @@ def _clean_edges(cut: Image.Image, bg: Tuple[int, int, int], depth: int = 2
 
 
 def _drop_bg_islands(cut: Image.Image, tol: float = 70.0) -> Image.Image:
-    """丢掉 mask 里「孤立小块且整体都是背景色」的伪影岛。
+    """丢掉 mask 里的孤立背景伪影岛（实现已提到 matte.drop_bg_islands）。
 
-    u2net 偶发把一小片背景当成显著目标保留（实测：前视图脚边一块
-    248px 的亮绿岛）——原图里那是纯净背景，拼到统一底色上却成了一块
-    扎眼的亮绿斑。判定：连通域面积小（< 主体 2%，上限 3000px）且域内
-    90%+ 像素接近透明区主色 → alpha 置 0。
-
-    连在主体上的伪影（如头顶一小块绿）属于主体大连通域，不受影响——
-    那块肉眼不可辨，按需求保持原样。
+    留这个薄包装是因为拼板逻辑里 _drop_bg_islands 这个名字更贴合上下文，
+    同时避免两套实现各自漂移。
     """
-    import numpy as np
-
-    arr = np.asarray(cut)
-    kept = arr[:, :, 3] > 8
-    if not kept.any():
-        return cut
-    try:
-        import cv2
-    except Exception:
-        return cut
-
-    rgb = arr[:, :, :3].astype(np.int32)
-    trans = rgb[~kept]
-    if len(trans) < 64:
-        return cut
-    q = trans // 16 * 16
-    colors, counts = np.unique(q.reshape(-1, 3), axis=0, return_counts=True)
-    refs = (colors[counts.argsort()[::-1][:3]] + 8).astype(np.int32)
-
-    bg_like = np.zeros(kept.shape, dtype=bool)
-    for c in refs:
-        bg_like |= (np.abs(rgb - c).sum(axis=2) < tol)
-    bg_like &= kept
-    if not bg_like.any():
-        return cut
-
-    n, lab = cv2.connectedComponents(kept.astype(np.uint8), connectivity=4)
-    if n <= 1:
-        return cut
-    subject_area = int(kept.sum())
-    max_area = max(48, min(int(0.02 * subject_area), 3000))
-    out = arr.copy()
-    for i in range(1, n):
-        comp = lab == i
-        area = int(comp.sum())
-        if area == 0 or area > max_area:
-            continue
-        if (bg_like & comp).sum() < 0.9 * area:
-            continue
-        out[comp, 3] = 0
-    return Image.fromarray(out, "RGBA")
+    return matte_pipe.drop_bg_islands(cut, tol=tol)
 
 
 def compose_three_view(

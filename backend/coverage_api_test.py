@@ -701,14 +701,19 @@ check("背景三选一（保留/绿幕/透明）",
 check("档位提示词以重绘动作开头",
       all(x_id and cp.get_level(x_id)["prompt"].startswith("把这张照片重绘成")
           for x_id in ("fine", "mid", "chibi")))
-check("Q 版档写明 2 头身与大眼", "2 头身" in cp.get_level("chibi")["prompt"]
-      and "三分之一" in cp.get_level("chibi")["prompt"])
+_cp_chibi = cp.get_level("chibi")["prompt"]
+check("Q 版档写明 2 头身与大眼",
+      "2 头身" in _cp_chibi and "眼睛大而圆" in _cp_chibi)
+check("三档都要求粗黑描边（像素画的辨识度一半在这里）",
+      all("粗黑轮廓线" in cp.get_level(x)["prompt"] for x in ("fine", "mid", "chibi")))
+check("三档都要求平涂、禁止渐变",
+      all("平涂" in cp.get_level(x)["prompt"] and "渐变" in cp.get_level(x)["prompt"]
+          for x in ("fine", "mid", "chibi")))
 
-_p_keep = cp.build_prompt(cp.get_level("mid"), "戴红帽子", "keep")
-_p_alpha = cp.build_prompt(cp.get_level("mid"), "戴红帽子", "alpha")
-check("保留原图：不铺绿幕", "#00FF00" not in _p_keep and "像素化处理" in _p_keep)
-check("绿幕/透明：指令钉死纯绿底（无渐变无纹理）",
-      all(k in _p_alpha for k in ("#00FF00", "无渐变", "无纹理")))
+_p_keep = cp.build_prompt(cp.get_level("mid"), "戴红帽子")
+check("生成指令不含背景色（绿幕/透明在出图后本地做）",
+      "#00FF00" not in _p_keep and "绿幕" not in _p_keep, _p_keep[-50:])
+check("生成指令锚定构图沿用原图", "构图沿用原图" in _p_keep)
 check("用户补充要求拼在指令末尾", "补充要求：戴红帽子" in _p_keep)
 check("留空不拼空补充段", "补充要求" not in cp.build_prompt(cp.get_level("mid"), ""))
 try:
@@ -718,11 +723,11 @@ except ValueError as e:
     _lv_err = str(e)
 check("未知档位报错列出合法值", "chibi" in _lv_err, _lv_err[:60])
 
-# 横向格数 → 像素块：1024 宽 168 格 ≈ 6px 一格；分辨率无关是设计核心
-check("格数换算：1024/168 → 6px", cp.block_for(1024, 168) == 6, cp.block_for(1024, 168))
-check("格数换算：512/168 → 3px（同档位密度一致）", cp.block_for(512, 168) == 3,
-      cp.block_for(512, 168))
-check("格数换算：极小图不炸（至少 1px）", cp.block_for(16, 168) == 1, cp.block_for(16, 168))
+# 横向格数 → 像素块：1024 宽 128 格 ≈ 8px 一格；分辨率无关是设计核心
+check("格数换算：1024/128 → 8px", cp.block_for(1024, 128) == 8, cp.block_for(1024, 128))
+check("格数换算：512/128 → 4px（同档位密度一致）", cp.block_for(512, 128) == 4,
+      cp.block_for(512, 128))
+check("格数换算：极小图不炸（至少 1px）", cp.block_for(16, 128) == 1, cp.block_for(16, 128))
 
 _src = Image.new("RGB", (128, 128), (200, 120, 90))
 _d = ImageDraw.Draw(_src)
@@ -733,14 +738,24 @@ check("apply_pixels：横向格数命中请求值",
 check("apply_pixels：色数被限制", _px_meta["colors"] <= 8, str(_px_meta["colors"]))
 check("apply_pixels：尺寸不变", _px_out.size == _src.size)
 
-# 透明背景 = 绿幕 + 色键：纯绿底上一块「角色」，抠完四角透、中间留
+# 背景：AI 只画角色，绿幕/透明都由本地抠图 + 合成产出——
+# 让 AI 直接画绿底会把角色染色（实测肤色变橄榄绿、白 T 变柠檬绿）。
 _green = Image.new("RGB", (96, 96), (0, 255, 0))
 _d = ImageDraw.Draw(_green)
 _d.rectangle([24, 24, 71, 71], fill=(180, 40, 40))
 _cut, _cut_meta = cp.cut_out(_green)
-check("cut_out：强制走色键（确定性）", _cut_meta["method"] == "key", _cut_meta["method"])
-check("cut_out：绿底被抠透", _cut.getpixel((2, 2))[3] == 0, str(_cut.getpixel((2, 2))))
+check("cut_out：走抠图链（u2net/grabcut/key 任一）",
+      _cut_meta["method"] in ("u2net", "grabcut", "key"), _cut_meta["method"])
+check("cut_out：背景被抠透", _cut.getpixel((2, 2))[3] == 0, str(_cut.getpixel((2, 2))))
 check("cut_out：角色保留", _cut.getpixel((48, 48))[3] == 255, str(_cut.getpixel((48, 48))))
+_comp = cp.compose_green(_cut)
+check("compose_green：背景是纯 #00FF00",
+      _comp.getpixel((2, 2)) == (0, 255, 0), str(_comp.getpixel((2, 2))))
+check("compose_green：角色颜色不被绿幕污染",
+      _comp.getpixel((48, 48)) == (180, 40, 40), str(_comp.getpixel((48, 48))))
+check("compose_green：输出 RGB（绿幕素材不带 alpha）", _comp.mode == "RGB", _comp.mode)
+_bgkeep, _bgkeep_meta = cp._apply_background(_green, "keep")
+check("keep 背景不动原图", _bgkeep is _green and not _bgkeep_meta)
 
 _rp_out, _rp_meta = cp.repixel(_px_out, 32, 4)
 check("repixel：标记为复用原稿（没重跑 AI）", _rp_meta["reusedDraft"] is True)

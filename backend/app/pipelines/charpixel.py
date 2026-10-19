@@ -11,7 +11,9 @@
    它给的是「像素感的插画」；
 2. **确定性像素化**（pixelize）：按「横向格数」算块大小，分块取单色 + 限定
    调色板，得到硬边、每格单色的真像素图。AI 那一步只负责造型，这一步负责
-   像素语法。
+   像素语法；
+3. **背景**（可选）：绿幕 / 透明都是本地抠图后处理出来的，不靠 AI 画绿底
+   ——原因见 BACKGROUNDS 上方的注释（绿幕会把角色染绿）。
 
 档位参数为什么用「横向格数」而不是「像素块大小」：同一档位在 1024 照片和
 512 照片上应该得到一样的像素密度，写死 block=8 会让大图变成超细像素、
@@ -30,6 +32,12 @@ SAMPLE_URL_PREFIX = "/char-pixel-samples"
 # 三档：造型语言（写实 / 半 Q / Q 版）× 像素密度 × 色数
 # - grid：成品横向格数（分辨率无关的像素密度）
 # - colors：调色板色数。写实档需要更多色阶撑体积，Q 版靠平涂，色少反而干净
+#
+# 提示词里必须显式写到的四件事（缺一件就会退化成「照片加马赛克」）：
+# 1. **粗黑轮廓线**——像素画的辨识度一半来自描边，不写模型就保留照片的软边；
+# 2. **平涂色块 + 限定明暗层次**——照片级的细腻渐变被量化后就是一片脏噪点；
+# 3. **深色瞳孔 + 白色高光**——不写清楚，眼睛会变成一坨灰或死白；
+# 4. **高饱和明快配色 + 偏暖肤色**——模型默认往灰白走，出来像褪色照片。
 LEVELS: List[Dict[str, Any]] = [
     {
         "id": "fine",
@@ -37,14 +45,18 @@ LEVELS: List[Dict[str, Any]] = [
         "short": "写实比例",
         "hint": "保留照片里的五官与真实头身比，只把笔触换成像素画；适合想要「像本人」的头像",
         "heads": "6-7 头身",
-        "grid": 168,
-        "colors": 48,
+        "grid": 128,
+        "colors": 32,
         "prompt": (
-            "把这张照片重绘成高精度像素角色立绘："
+            "把这张照片重绘成像素画角色立绘（dot art）："
             "五官特征、脸型、发型、发色和服装照照片中的人物绘制，保留真实的人体比例；"
-            "面部用像素画方式刻画，眼睛、眉毛、嘴唇清晰可辨，头发分组块、有高光；"
-            "光影柔和有体积感，明暗过渡用有限色阶表现；"
-            "像素块细小、边缘硬朗，限定调色板，日式独立游戏角色立绘质感。"
+            "用粗黑轮廓线勾出发型、脸颊、肩线和衣服边缘；"
+            "皮肤、头发、衣服全部平涂成色块，每块只有一种颜色，明暗最多两级硬边过渡，"
+            "不要照片级的细腻渐变、不要噪点；"
+            "眼睛画成清晰的深色瞳孔加一点白色高光，眼线明确，眉毛和嘴唇用色块概括；"
+            "肤色用偏暖的肉色，脸颊带一点红晕；"
+            "背景简化为像素游戏场景，树木草地用大色块概括，删掉细碎枝叶；"
+            "像素边缘硬朗、无抗锯齿，限定调色板，配色鲜明、明暗对比清楚。"
         ),
     },
     {
@@ -53,13 +65,18 @@ LEVELS: List[Dict[str, Any]] = [
         "short": "半 Q 版",
         "hint": "约 4 头身，头略放大、眼睛放大，保留人物辨识度的游戏立绘比例",
         "heads": "约 4 头身",
-        "grid": 120,
-        "colors": 28,
+        "grid": 104,
+        "colors": 24,
         "prompt": (
-            "把这张照片重绘成日系像素游戏角色："
-            "按照片中人物的五官特征、发型、发色和服装配色绘制，比例调整到约 4 头身；"
-            "头部略放大，眼睛放大并简化眼型，鼻子和嘴简化，手部与四肢比例简化；"
-            "像素块中等偏粗、边缘硬朗，大面积平涂配两级硬边阴影，限定调色板。"
+            "把这张照片重绘成日系像素 RPG 角色立绘："
+            "按照片中人物的发型、发色、脸型和服装配色绘制，比例调整到约 4 头身；"
+            "头部略放大，用粗黑轮廓线勾出头发、脸、身体和衣服的边线；"
+            "眼睛放大成深色瞳孔加白色高光，眼线清晰，鼻子和嘴用两三个色块概括；"
+            "全身平涂，每块一种颜色，两级硬边阴影，不要渐变、不要照片质感；"
+            "全身完整入画，头顶到脚底都在画面内；"
+            "肤色偏暖，脸颊带红晕，配色鲜明、明暗对比清楚；"
+            "背景简化为像素游戏场景的大色块；"
+            "像素边缘硬朗、无抗锯齿，限定调色板。"
         ),
     },
     {
@@ -68,22 +85,36 @@ LEVELS: List[Dict[str, Any]] = [
         "short": "Q 版",
         "hint": "约 2 头身，大头大眼、四肢短粗，最像游戏里的行走小人",
         "heads": "约 2 头身",
-        "grid": 84,
-        "colors": 20,
+        "grid": 76,
+        "colors": 16,
         "prompt": (
             "把这张照片重绘成 Q 版像素角色："
             "保留照片中人物的发型、发色和服装配色，比例压缩到约 2 头身，头部约占全身一半；"
-            "眼睛大而圆、占脸部三分之一，鼻子和嘴简化为小点，四肢短粗、手掌简化为圆块；"
-            "像素块粗、边缘硬朗，大面积平涂配单级硬边阴影，限定调色板，可爱游戏角色图标质感。"
+            "用粗黑轮廓线勾出整个角色的外轮廓和五官；"
+            "眼睛大而圆，深色瞳孔占满眼白并带一点白色高光，眼线粗黑，鼻子省略，嘴画成小弧线；"
+            "四肢短粗，手掌简化为圆块；"
+            "大面积平涂，每块一种颜色，单级硬边阴影，不要渐变；"
+            "画全身，头顶到脚底完整落在画面内，四周留出边距，不裁切；"
+            "肤色偏暖，脸颊带红晕，配色鲜明；"
+            "背景简化为纯色或简单色块；"
+            "像素边缘硬朗、无抗锯齿，限定调色板。"
         ),
     },
 ]
 
 _BY_ID: Dict[str, Dict[str, Any]] = {lv["id"]: lv for lv in LEVELS}
 
-# 背景处理：游戏素材最终要透明 PNG，但 AI 一步出不了可靠 alpha，
-# 所以「透明」的实际做法是——生成时铺纯绿幕，出图后按键色确定性抠掉。
-# 这样 alpha 边缘是像素对齐的硬边，不是模型猜出来的半透明。
+# 背景处理：AI 只负责画角色，**不要求它画绿幕**。
+#
+# 踩过的坑：让编辑底座「背景铺纯绿 #00FF00」时，模型为了画面协调会把绿色带进
+# 人物本体——实测同一张人像、同种子，肤色被画成橄榄绿 (183,195,67)、白 T 恤
+# 变成柠檬绿；换个措辞又反过来把 T 恤画成肤色。这类染色是概率性的，靠提示词
+# 压不干净。
+#
+# 现在的做法：一律生成「带背景的正常图」（颜色最忠实），再用 u2net 把人物抠
+# 出来——绿幕是我们自己合成的纯色（必然是纯 #00FF00），透明就是抠出来的
+# alpha。好处：颜色不经过绿幕污染、绿幕绝对干净、三种背景可以随时切换而不用
+# 重新生成。
 BACKGROUNDS: List[Dict[str, Any]] = [
     {
         "id": "keep",
@@ -93,22 +124,17 @@ BACKGROUNDS: List[Dict[str, Any]] = [
     {
         "id": "green",
         "name": "绿幕",
-        "hint": "纯 #00FF00 满铺，自己进引擎/后处理键控；角色身上别有大块绿",
+        "hint": "本地抠出人物后合成纯 #00FF00 底，颜色绝不被绿幕污染；进引擎前可自己键控",
     },
     {
         "id": "alpha",
         "name": "透明",
-        "hint": "生成绿幕后按色键抠掉，输出带 alpha 的 PNG（硬边、无白晕）",
+        "hint": "本地抠图输出带 alpha 的 PNG（硬边、无白晕），可直接当精灵素材",
     },
 ]
 _BG_IDS = {b["id"] for b in BACKGROUNDS}
 
-# 绿幕底提示词：只写正向要求，并明确「无渐变无纹理」——
-# 渐变底会让色键只抠掉一部分，留下半透明脏边。
-_GREEN_BG_PROMPT = (
-    "背景为纯绿色 #00FF00 满铺，颜色均匀、无渐变、无纹理、无投影，"
-    "人物边缘干净利落，不要出现环境元素。"
-)
+GREEN_KEY = (0, 255, 0)
 
 
 def get_level(level_id: Optional[str]) -> Dict[str, Any]:
@@ -144,17 +170,16 @@ def list_levels() -> List[Dict[str, Any]]:
     return out
 
 
-def build_prompt(level: Dict[str, Any], extra: str = "", background: str = "keep") -> str:
-    """档位提示词 + 构图锚点 + 背景要求 + 用户补充要求。
+def build_prompt(level: Dict[str, Any], extra: str = "") -> str:
+    """档位提示词 + 构图锚点 + 用户补充要求。
 
     锚点写成「沿用原图」而不是「保持不变」：编辑底座对否定约束极敏感，
     写成「不要改变构图」时它连画风一起不动（restyle 踩过的坑）。
+
+    背景不写进生成指令：绿幕/透明都在出图后本地处理（见 BACKGROUNDS 注释），
+    AI 只负责把角色画对、颜色画准。
     """
-    text = level["prompt"] + "人物在画面中的位置与构图沿用原图，"
-    if background in ("green", "alpha"):
-        text += _GREEN_BG_PROMPT
-    else:
-        text += "背景一并做同样的像素化处理。"
+    text = level["prompt"] + "人物在画面中的位置与构图沿用原图，背景一并做同样的像素化处理。"
     extra = (extra or "").strip()
     if extra:
         text += f"补充要求：{extra}"
@@ -190,22 +215,35 @@ def get_background(bg_id: Optional[str]) -> str:
 
 
 def cut_out(img: Image.Image) -> Tuple[Image.Image, Dict[str, Any]]:
-    """绿幕 → 透明：强制走色键（method=key），不用 u2net/grabcut。
+    """抠出人物，返回带硬 alpha 的 RGBA。
 
-    为什么不用深度抠图：这里的前景是 AI 刚画在纯绿底上的像素角色，色键是
-    精确且可复现的；u2net 会按「语义」猜边缘，反而把描边啃掉。硬 alpha 之后
-    再洗一圈边缘溢色，避免轮廓外留着「黑 + 亮绿」的混色。
+    走深度抠图链（u2net → grabcut → 色键）：背景是照片/像素场景，不是纯色幕，
+    色键在这里没有可用基准。硬 alpha + 边缘去污保证像素素材没有半透明白晕；
+    再清掉 u2net 偶发留下的小块背景伪影（长椅碎片、草丛色块）。
     """
     from . import matte as matte_pipe
 
     cut, info = matte_pipe.connected_matte(
-        img, tolerance=60, feather=0, sample="topleft", method="key", hard=True)
-    bg_hex = info.get("background")
-    if bg_hex:
-        bg = tuple(int(bg_hex[i:i + 2], 16) for i in (1, 3, 5))
-        cut, spilled = matte_pipe.clean_edge_spill(cut, bg)
-        info["edgePixelsRecolored"] = spilled
+        img, tolerance=60, feather=0, hard=True)
+    cut = matte_pipe.drop_bg_islands(cut)
     return cut, info
+
+
+def compose_green(cut: Image.Image) -> Image.Image:
+    """把抠好的 RGBA 合成到纯 #00FF00 上——绿幕由我们生成，必然是纯色。"""
+    canvas = Image.new("RGB", cut.size, GREEN_KEY)
+    canvas.paste(cut, (0, 0), cut)
+    return canvas
+
+
+def _apply_background(
+    img: Image.Image, bg: str
+) -> Tuple[Image.Image, Dict[str, Any]]:
+    """按背景选项处理像素化后的成品：keep 原样 / alpha 抠图 / green 抠图后铺绿。"""
+    if bg == "keep":
+        return img, {}
+    cut, info = cut_out(img)
+    return (cut if bg == "alpha" else compose_green(cut)), info
 
 
 async def run(
@@ -230,15 +268,15 @@ async def run(
 
     level = get_level(level_id)
     bg = get_background(background)
-    instruction = build_prompt(level, prompt, bg)
+    instruction = build_prompt(level, prompt)
     draft, meta = await ai_edit.run_edit(
         img, instruction, steps=steps, seed=seed, model=model, max_side=max_side)
 
     g = int(grid or level["grid"])
     c = int(colors or level["colors"])
     out, px = apply_pixels(draft, g, c)
-    if bg == "alpha":
-        out, minfo = cut_out(out)
+    out, minfo = _apply_background(out, bg)
+    if minfo:
         meta["matte"] = minfo
     meta.update({
         "pipeline": "char-pixel",
@@ -263,11 +301,12 @@ def repixel(
 ) -> Tuple[Image.Image, Dict[str, Any]]:
     """对已有 AI 原稿重新像素化（不碰 GPU）。
 
-    background 只允许「保持原样」或「绿幕 → 透明」：原稿若是保留原图背景，
-    再按键色去背只会把照片背景啃出一块。这条约束由调用方保证。
+    背景三种都能随意切：原稿是「带背景的正常图」，绿幕/透明都是本地抠出来再
+    合成的，所以改背景不需要重新生成——这是「不要求 AI 画绿幕」换来的好处。
     """
     bg = get_background(background)
     out, px = apply_pixels(draft, int(grid), int(colors), dither)
+    out, minfo = _apply_background(out, bg)
     meta: Dict[str, Any] = {
         "pipeline": "char-pixel",
         "grid": int(grid),
@@ -276,7 +315,6 @@ def repixel(
         "pixelize": px,
         "reusedDraft": True,
     }
-    if bg == "alpha":
-        out, minfo = cut_out(out)
+    if minfo:
         meta["matte"] = minfo
     return out, meta

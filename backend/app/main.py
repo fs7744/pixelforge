@@ -652,8 +652,8 @@ async def pipeline_char_pixel(
 class CharRepixelPayload(BaseModel):
     """对 AI 原稿重新像素化：只改像素密度/色数/背景处理，不重新生成。
 
-    background 允许 keep / green / alpha；但原稿本身是保留原图背景时，
-    alpha/green 只会把照片背景啃掉一块——这条由前端禁用，后端照做。
+    背景可以任意切：原稿是「带背景的正常图」，绿幕/透明都是本地抠图合成的，
+    不存在「换了背景就抠不干净」的问题。
     """
 
     draftAssetId: str

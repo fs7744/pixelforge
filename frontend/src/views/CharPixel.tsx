@@ -194,13 +194,8 @@ export default function CharPixel({ incoming }: Props) {
     }
   }
 
-  // 背景是生成时就写进 AI 指令的：改背景必须重新生成；
-  // 唯一的例外是「绿幕 → 透明」，那一步是纯色键，不占 GPU。
-  const canRepixelAs = (target: string) => {
-    const made = outMeta?.background || 'keep'
-    return made === target || (made === 'green' && target === 'alpha')
-  }
-  const repixelAllowed = !!draft && canRepixelAs(bg)
+  // 背景在出图后本地处理（抠图/合成），所以三种背景可以随时切换，不用重新生成
+  const repixelAllowed = !!draft
 
   const applyRepixel = async () => {
     if (!draft) return
@@ -352,9 +347,7 @@ export default function CharPixel({ incoming }: Props) {
           </div>
           <div className="hint" style={{ marginTop: 6 }}>
             {backgrounds.find((b) => b.id === bg)?.hint}
-            {out && !canRepixelAs(bg) && (
-              <> 当前结果是「{bgName(outMeta?.background || 'keep')}」，换背景要重新生成。</>
-            )}
+            {out && ' 改背景只需重新像素化（毫秒级），不用重跑 AI。'}
           </div>
         </div>
 
@@ -484,10 +477,8 @@ export default function CharPixel({ incoming }: Props) {
                 </button>
                 <span className="hint">
                   {repixelAllowed
-                    ? '毫秒级完成，不占 GPU。'
-                    : draft
-                      ? `当前原稿是「${bgName(outMeta?.background || 'keep')}」背景，改背景要重新生成。`
-                      : '生成一次后可用。'}
+                    ? '毫秒级完成，不占 GPU；换背景也走这里。'
+                    : '生成一次后可用。'}
                 </span>
               </div>
             </div>
@@ -611,9 +602,9 @@ export default function CharPixel({ incoming }: Props) {
         <div className="card-white">
           <div style={{ fontFamily: 'Silkscreen, monospace', fontSize: 10, marginBottom: 4 }}>HOW IT WORKS</div>
           <div style={{ fontSize: 13, lineHeight: 1.7 }}>
-            · 第 1 步 AI 重绘：Qwen-Image-Edit 按档位改造型语言（头身比/眼睛/简化）
+            · 第 1 步 AI 重绘：Qwen-Image-Edit 按档位改造型语言（头身比/眼睛/描边）
             <br />· 第 2 步确定性像素化：按横向格数分块取单色 + 限定调色板
-            <br />· 透明背景：生成时铺纯绿幕，出图后按色键抠成 alpha（硬边无白晕）
+            <br />· 绿幕/透明：本地抠出人物再合成纯色或 alpha，不经绿幕染色
             <br />· AI 出不了真像素，最后一道必须是本地像素化
           </div>
         </div>
