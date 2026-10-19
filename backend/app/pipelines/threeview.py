@@ -186,36 +186,6 @@ def _matte_padded(img: Image.Image, pad_frac: float, tolerance: int
     return cut, meta
 
 
-# 8 邻域偏移（先正交后对角：正上方/左方的内侧像素优先，重绘更稳）
-_NEIGHBOURS = ((0, 1), (0, -1), (1, 0), (-1, 0), (1, 1), (1, -1), (-1, 1), (-1, -1))
-
-
-def _shift(m, dy: int, dx: int):
-    """按 (dy,dx) 平移数组，空出来的边填 0（不用 np.roll，避免环绕串色）。"""
-    import numpy as np
-
-    out = np.zeros_like(m)
-    h, w = m.shape[:2]
-    out[max(0, dy):h + min(0, dy), max(0, dx):w + min(0, dx)] = \
-        m[max(0, -dy):h + min(0, -dy), max(0, -dx):w + min(0, -dx)]
-    return out
-
-
-def _erode(kept, times: int = 1):
-    """二值腐蚀 times 圈（纯 numpy，不依赖 cv2）。"""
-    import numpy as np
-
-    cur = kept
-    for _ in range(max(1, times)):
-        nxt = cur.copy()
-        for dy, dx in _NEIGHBOURS:
-            nxt &= _shift(cur, dy, dx).astype(bool)
-        if not nxt.any():
-            return cur
-        cur = nxt
-    return cur
-
-
 def _fill_enclosed_holes(cut: Image.Image, max_ratio: float = 0.02
                          ) -> Tuple[Image.Image, int]:
     """补回被角色完全围住的透明孔洞（只改 alpha，RGB 原样）。
@@ -265,82 +235,12 @@ def _fill_enclosed_holes(cut: Image.Image, max_ratio: float = 0.02
 
 def _clean_edges(cut: Image.Image, bg: Tuple[int, int, int], depth: int = 2
                  ) -> Tuple[Image.Image, int]:
-    """把外圈「底色混出来的」像素换成内侧角色色（只改 RGB，alpha 一个都不动）。
+    """边缘溢色清洗——实现已提到 matte.clean_edge_spill（sprite 管线也要用）。
 
-    硬 alpha 抠图会把模型抗锯齿边整颗保留：底色若是亮绿，描边外圈就是一圈
-    「黑+亮绿」的混色，肉眼看到的就是绿边。matte 自带的 despill 用固定容差
-    比对底色，亮绿底与边框取样色差 197，洗不掉。
-
-    判定不靠色相（角色本身可能是绿的），而是比较「离底色近还是离内侧颜色近」：
-    边界像素本来是内侧色的抗锯齿混色，离底色更近就说明它被背景污染了，
-    直接取内侧（再腐蚀一圈）的颜色重绘；纯黑描边离内部为 0，永远不会被洗掉。
-
-    不动 alpha 是刻意的：不吃掉轮廓、不会把胡须/触角啃细。细结构（胡须、
-    刀尖）腐蚀后没有内侧邻居，首轮跳过，最后再用"最近的非污染邻居"扫一遍。
+    留这个薄包装是因为拼板逻辑里 _clean_edges 这个名字更贴合上下文，
+    同时避免两套实现各自漂移。
     """
-    import numpy as np
-
-    a = np.asarray(cut).copy()
-    kept = a[:, :, 3] > 8
-    if not kept.any():
-        return cut, 0
-    rgb = a[:, :, :3].astype(np.int32)
-    changed = 0
-
-    bg_arr = np.array(bg, dtype=np.int32)
-    dist_bg = np.abs(rgb - bg_arr).sum(axis=2)
-    # 底色本身也得算「离底色近」：边界像素是内侧色与底色按比例混合，
-    # 只要比内侧色更接近底色，就说明这一颗被背景污染了。
-    band = kept
-    for _ in range(max(1, depth)):
-        inner = _erode(band, 1)
-        if not inner.any():
-            break
-        ring = band & ~inner
-        if not ring.any():
-            break
-        out = rgb.copy()
-        used = np.zeros_like(ring)
-        for dy, dx in _NEIGHBOURS:
-            src_ok = _shift(inner, dy, dx).astype(bool)
-            src_rgb = _shift(rgb, dy, dx)
-            dist_src = np.abs(rgb - src_rgb).sum(axis=2)
-            # 只洗「离底色比离自身内侧颜色更近」的像素（放宽到 2 倍，含深色混边）：
-            # 纯黑描边 dist_src=0，永远不会被洗掉；背景混色则必然满足
-            contaminated = ring & (dist_bg < dist_src * 2) & (dist_bg < 150)
-            take = contaminated & src_ok & ~used
-            if take.any():
-                out[take] = src_rgb[take]
-                used |= take
-        rgb = out
-        dist_bg = np.abs(rgb - bg_arr).sum(axis=2)
-        changed += int(used.sum())
-        band = inner  # 下一轮处理更内一圈
-
-    # 细结构兜底：仍与透明区相邻、且明显偏底色相的像素，从最近的干净同伴取色
-    near_trans = np.zeros_like(kept)
-    for dy, dx in _NEIGHBOURS:
-        near_trans |= _shift(~kept, dy, dx).astype(bool)
-    # "偏底色"= 绿系底色时 G 明显高于 R/B；换底色也不影响判定（逐通道比较）
-    tinted = (rgb[:, :, 1] - rgb[:, :, 0] > 18) & (rgb[:, :, 1] - rgb[:, :, 2] > 18)
-    greenish = kept & near_trans & tinted
-    done = np.zeros_like(greenish)
-    for _ in range(2):  # 3x3 → 再一圈，给 2px 宽的细结构留机会
-        for dy, dx in _NEIGHBOURS:
-            src_ok = _shift(kept & ~greenish, dy, dx).astype(bool)
-            src_rgb = _shift(rgb, dy, dx)
-            take = greenish & ~done & src_ok
-            if take.any():
-                rgb[take] = src_rgb[take]
-                done |= take
-        if done.all() or not done.any():
-            break
-    changed += int(done.sum())
-
-    if not changed:
-        return cut, 0
-    a[:, :, :3] = np.clip(rgb, 0, 255).astype(np.uint8)
-    return Image.fromarray(a, "RGBA"), changed
+    return matte_pipe.clean_edge_spill(cut, bg, depth=depth)
 
 
 def _drop_bg_islands(cut: Image.Image, tol: float = 70.0) -> Image.Image:

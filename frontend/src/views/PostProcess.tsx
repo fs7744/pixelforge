@@ -34,6 +34,8 @@ export default function PostProcess({ incoming }: Props) {
   const [variant, setVariant] = useState('v1')
   const [cols, setCols] = useState(4)
   const [rows, setRows] = useState(4)
+  // 精灵表带绿幕/纯色键色底，拆完就该去背——16 帧手动点 16 次没人受得了
+  const [sheetMatte, setSheetMatte] = useState(true)
   const [wmSize, setWmSize] = useState(48)
   const [wmMode, setWmMode] = useState('alpha')
   const [mask, setMask] = useState<File | null>(null)
@@ -306,16 +308,26 @@ export default function PostProcess({ incoming }: Props) {
         )}
 
         {pipeline === 'sheet' && (
-          <div className="row">
-            <div className="grow">
-              <div className="label">列（每行帧数）</div>
-              <input className="input" type="number" value={cols} onChange={(e) => setCols(+e.target.value)} />
+          <>
+            <div className="row">
+              <div className="grow">
+                <div className="label">列（每行帧数）</div>
+                <input className="input" type="number" value={cols} onChange={(e) => setCols(+e.target.value)} />
+              </div>
+              <div className="grow">
+                <div className="label">行（动作组）</div>
+                <input className="input" type="number" value={rows} onChange={(e) => setRows(+e.target.value)} />
+              </div>
             </div>
-            <div className="grow">
-              <div className="label">行（动作组）</div>
-              <input className="input" type="number" value={rows} onChange={(e) => setRows(+e.target.value)} />
-            </div>
-          </div>
+            <label className="hint" style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+              <input
+                type="checkbox"
+                checked={sheetMatte}
+                onChange={(e) => setSheetMatte(e.target.checked)}
+              />
+              逐帧去背（绿幕 / 纯色底）
+            </label>
+          </>
         )}
 
         {pipeline === 'pixelize' && (

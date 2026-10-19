@@ -66,3 +66,4 @@ logs/
 
 # 画风 A/B 对照产物（本地验证用，不入库）
 backend/out_style_ab/
+backend/out_sprite/

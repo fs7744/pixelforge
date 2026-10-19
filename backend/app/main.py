@@ -312,9 +312,20 @@ async def pipeline_sheet_split(
     file: UploadFile = File(...),
     cols: int = Form(4),
     rows: int = Form(4),
+    # 精灵表拆完通常还要逐帧去背；16 帧手动跑 16 次抠图没人受得了。
+    # 默认关，避免改变既有调用方的行为。
+    matte: bool = Form(False),
+    tolerance: int = Form(80),
 ):
     img = await _read_image(file)
     frames, meta = sheet_pipe.split_sheet(img, cols, rows)
+    if matte:
+        cleaned = []
+        for i, f in enumerate(frames):
+            m, minfo = matte_pipe.connected_matte(f, tolerance=tolerance)
+            cleaned.append(m)
+            meta["frames"][i]["matte"] = minfo
+        frames = cleaned
     items = [
         storage.save_asset(f, kind="frame", name=f"frame-{i:02d}", meta={"pipeline": "sheet-split", "index": i})
         for i, f in enumerate(frames)

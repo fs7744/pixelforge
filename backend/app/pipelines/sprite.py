@@ -51,6 +51,13 @@ def normalize_frame(
         work, matte_meta = matte_pipe.connected_matte(
             work, tolerance=tolerance, feather=feather, hard=hard, method=matte_method
         )
+        # 硬 alpha 会保留「描边 + 键色」的抗锯齿混色：绿幕底实测边缘环 51% 偏绿，
+        # 只看 alpha 是干净的，放大到游戏里就是一圈绿线。清洗只改 RGB 不动 alpha。
+        bg_hex = matte_meta.get("background")
+        if hard and bg_hex:
+            bg = tuple(int(bg_hex[i:i + 2], 16) for i in (1, 3, 5))
+            work, spilled = matte_pipe.clean_edge_spill(work, bg)
+            matte_meta["edgePixelsRecolored"] = spilled
 
     trimmed, bbox = trim_alpha(work)
     if trimmed.width < 1 or trimmed.height < 1:

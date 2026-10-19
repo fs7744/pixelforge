@@ -162,6 +162,9 @@ export default function Workbench({ onSendToPost }: Props) {
   const [cat, setCat] = useState('全部')
   const [tplId, setTplId] = useState<string>('')
   const [prompt, setPrompt] = useState('')
+  // 同一个模板的第二条路：本地出图 / 复制提示词交给外部 AI。
+  // 只对声明了 textMode 的模板有意义，其余模板固定按 kind 走。
+  const [runMode, setRunMode] = useState<'image' | 'text'>('image')
   const [providers, setProviders] = useState<ProviderInfo[]>([])
   const [provider, setProvider] = useState('')
   const [styles, setStyles] = useState<StyleInfo[]>([])
@@ -237,6 +240,8 @@ export default function Workbench({ onSendToPost }: Props) {
   const pickTemplate = (t: Template) => {
     setTplId(t.id)
     setPrompt(promptFor(t))
+    // 切模板回到它自己的默认路线：文本模板只能是 text，双模式模板默认本地出图
+    setRunMode(t.kind === 'text' ? 'text' : 'image')
     if (t.params?.width) setWidth(t.params.width)
     if (t.params?.height) setHeight(t.params.height)
     // 画风不写在提示词里（写死就会和选择器打架），模板自带默认画风，这里点亮它；
@@ -341,14 +346,19 @@ export default function Workbench({ onSendToPost }: Props) {
 
   const current = results.find((r) => r.id === selected)
   const currentTpl = templates.find((t) => t.id === tplId)
-  // 文本任务本地做不了（底座只出图），整块操作面板换成「去别的 AI 做」指引
-  const isTextTask = currentTpl?.kind === 'text'
+  // 纯文本模板（kind=text）根本没得选；带 textMode 的模板由用户切路线
+  const isPureText = currentTpl?.kind === 'text'
+  const canSwitchMode = !!currentTpl?.textMode
+  // 文本路线上本页不出图：整块操作面板换成「去别的 AI 做」指引
+  const isTextTask = isPureText || (runMode === 'text' && canSwitchMode)
+  const textPrompt = isPureText ? currentTpl!.prompt : currentTpl?.textMode?.prompt || ''
+  const textGuide = isPureText ? currentTpl?.guide : currentTpl?.textMode?.guide
   // 当前模板适用的画风：后端按分类给出推荐集（tags 太粗，按它过滤等于没过滤）。
-  // 文本任务不出图、编辑/提取类模板画风跟随原图——这两种都不显示画风区，
+  // 文本路线不出图、编辑/提取类模板画风跟随原图——这两种都不显示画风区，
   // 摆一个选了也不起作用的选择器，比不显示更糟。
   const recStyleIds = styleRecs[currentTpl?.category || '角色'] || []
   const showStyleBlock =
-    currentTpl?.kind !== 'text' && !currentTpl?.styleLocked && recStyleIds.length > 0
+    !isTextTask && !currentTpl?.styleLocked && recStyleIds.length > 0
   const visibleStyles = showAllStyles
     ? styles
     : styles.filter((s) => recStyleIds.includes(s.id) || s.id === styleId)
@@ -365,7 +375,7 @@ export default function Workbench({ onSendToPost }: Props) {
     <div className="body">
       <aside className="panel">
         <div className="section-title">
-          {isTextTask ? '文本任务' : '生成参数'}{' '}
+          {isTextTask ? '文本生成' : '生成参数'}{' '}
           {isTextTask ? <span className="tag pink">TEXT</span> : <span className="tag">PARAMS</span>}
         </div>
 
@@ -384,7 +394,7 @@ export default function Workbench({ onSendToPost }: Props) {
         )}
 
         <div>
-          <div className="label">模板库 · 单图模式</div>
+          <div className="label">模板库</div>
           <div className="chips mt8">
             {categories.map((c) => (
               <button key={c} className={`chip ${cat === c ? 'on' : ''}`} onClick={() => setCat(c)}>
@@ -408,7 +418,42 @@ export default function Workbench({ onSendToPost }: Props) {
           )}
         </div>
 
-        {isTextTask && currentTpl && <TextTaskPanel tpl={currentTpl} />}
+        {canSwitchMode && (
+          <div>
+            <div className="label">运行方式</div>
+            <div className="chips mt8">
+              <button
+                className={`chip ${runMode === 'image' ? 'on' : ''}`}
+                onClick={() => setRunMode('image')}
+              >
+                图片生成 · 本地
+              </button>
+              <button
+                className={`chip ${runMode === 'text' ? 'on' : ''}`}
+                onClick={() => setRunMode('text')}
+              >
+                文本生成 · 外部 AI
+              </button>
+            </div>
+            <div className="hint" style={{ marginTop: 8 }}>
+              {runMode === 'text'
+                ? currentTpl?.textMode?.hint
+                : '本地底座直接出图，快、免费；多格排布和帧间一致性看运气，排不满就换外部 AI。'}
+            </div>
+          </div>
+        )}
+
+        {isTextTask && (
+          <TextTaskPanel
+            prompt={textPrompt}
+            guide={textGuide}
+            why={
+              canSwitchMode
+                ? '你选了「文本生成 · 外部 AI」：这一条不在本地跑，复制提示词交给能出图的对话式 AI。'
+                : undefined
+            }
+          />
+        )}
 
         {showStyleBlock && (
           <div>

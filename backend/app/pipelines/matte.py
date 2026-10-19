@@ -348,6 +348,109 @@ def _key_keep(rgb: np.ndarray, palette: List[np.ndarray], tolerance: float,
 
 
 # --------------------------------------------------------------------------- #
+# 边缘溢色清洗（硬 alpha 之后的二次修正）
+# --------------------------------------------------------------------------- #
+_NEIGHBOURS8 = ((0, 1), (0, -1), (1, 0), (-1, 0), (1, 1), (1, -1), (-1, 1), (-1, -1))
+
+
+def _erode_mask(mask: np.ndarray, times: int = 1) -> np.ndarray:
+    cur = mask
+    for _ in range(max(1, times)):
+        nxt = cur.copy()
+        for dy, dx in _NEIGHBOURS8:
+            nxt &= _neighbour_shift(cur, dy, dx)
+        cur = nxt
+    return cur
+
+
+def clean_edge_spill(cut: Image.Image, bg, depth: int = 2):
+    """把外圈「底色混出来的」像素换成内侧颜色（只改 RGB，alpha 一个都不动）。
+
+    硬 alpha 抠图会把模型抗锯齿边整颗保留：底色若是亮绿，描边外圈就是一圈
+    「黑+亮绿」的混色，肉眼看到的就是绿边。`_despill` 按固定容差比对底色，
+    亮绿底与描边取样色差过大，洗不掉。
+
+    判定不靠色相（角色本身可能是绿的），而是比较「离底色近还是离内侧颜色近」：
+    边界像素是内侧色的抗锯齿混色，离底色更近就说明被背景污染，直接取内侧
+    （再腐蚀一圈）的颜色重绘；纯黑描边离内部为 0，永远不会被洗掉。
+
+    不动 alpha 是刻意的：不吃掉轮廓、不会把胡须/触角啃细。细结构（胡须、
+    刀尖）腐蚀后没有内侧邻居，首轮跳过，最后用「最近的非污染邻居」扫一遍。
+
+    三视图亮绿底实测边缘环 44% 偏绿，精灵表绿幕底 51% —— 同一个问题，
+    所以从 threeview 提到 matte 里，任何走硬 alpha 的管线都能用。
+    """
+    a = np.asarray(cut.convert("RGBA")).copy()
+    kept = a[:, :, 3] > 8
+    if not kept.any():
+        return cut, 0
+    rgb = a[:, :, :3].astype(np.int32)
+    changed = 0
+
+    bg_arr = np.array(bg, dtype=np.int32)
+    dist_bg = np.abs(rgb - bg_arr).sum(axis=2)
+    # 底色本身也得算「离底色近」：边界像素是内侧色与底色按比例混合，
+    # 只要比内侧色更接近底色，就说明这一颗被背景污染了。
+    band = kept
+    for _ in range(max(1, depth)):
+        inner = _erode_mask(band, 1)
+        if not inner.any():
+            break
+        ring = band & ~inner
+        if not ring.any():
+            break
+        out = rgb.copy()
+        used = np.zeros_like(ring)
+        for dy, dx in _NEIGHBOURS8:
+            src_ok = _neighbour_shift(inner, dy, dx).astype(bool)
+            src_rgb = _shift_block(rgb, dy, dx)
+            dist_src = np.abs(rgb - src_rgb).sum(axis=2)
+            # 只洗「离底色比离自身内侧颜色更近」的像素（放宽到 2 倍，含深色混边）：
+            # 纯黑描边 dist_src=0，永远不会被洗掉；背景混色则必然满足
+            contaminated = ring & (dist_bg < dist_src * 2) & (dist_bg < 150)
+            take = contaminated & src_ok & ~used
+            if take.any():
+                out[take] = src_rgb[take]
+                used |= take
+        rgb = out
+        dist_bg = np.abs(rgb - bg_arr).sum(axis=2)
+        changed += int(used.sum())
+        band = inner  # 下一轮处理更内一圈
+
+    # 细结构兜底：仍与透明区相邻、且明显偏底色相的像素，从最近的干净同伴取色。
+    # 「偏底色相」按底色主通道动态判定：绿幕看绿、蓝幕看蓝；底色本身没有明显
+    # 主通道（灰/紫/洋红这类）时退回距离判定，避免把角色本身的主色当溢色洗掉。
+    near_trans = np.zeros_like(kept)
+    for dy, dx in _NEIGHBOURS8:
+        near_trans |= _neighbour_shift(~kept, dy, dx)
+    dom = int(np.argmax(bg_arr))
+    others = [i for i in range(3) if i != dom]
+    if int(bg_arr[dom]) - max(int(bg_arr[i]) for i in others) > 40:
+        tinted = ((rgb[:, :, dom] - rgb[:, :, others[0]] > 18)
+                  & (rgb[:, :, dom] - rgb[:, :, others[1]] > 18))
+    else:
+        tinted = dist_bg < 120
+    spill = kept & near_trans & tinted
+    done = np.zeros_like(spill)
+    for _ in range(2):  # 3x3 → 再一圈，给 2px 宽的细结构留机会
+        for dy, dx in _NEIGHBOURS8:
+            src_ok = _neighbour_shift(kept & ~spill, dy, dx).astype(bool)
+            src_rgb = _shift_block(rgb, dy, dx)
+            take = spill & ~done & src_ok
+            if take.any():
+                rgb[take] = src_rgb[take]
+                done |= take
+        if done.all() or not done.any():
+            break
+    changed += int(done.sum())
+
+    if not changed:
+        return cut, 0
+    a[:, :, :3] = np.clip(rgb, 0, 255).astype(np.uint8)
+    return Image.fromarray(a, "RGBA"), changed
+
+
+# --------------------------------------------------------------------------- #
 # 主入口
 # --------------------------------------------------------------------------- #
 def connected_matte(

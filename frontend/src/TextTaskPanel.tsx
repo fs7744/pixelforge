@@ -1,26 +1,34 @@
 import { useState } from 'react'
-import { Template } from './api'
+import { TextGuide } from './api'
 
 /**
- * 文本任务面板。
+ * 「本页不出图」的指引面板。
  *
- * 本地底座（Z-Image / Qwen-Image-Edit）只有图像能力，没有任何文本模型，
- * 所以这类模板在本页做不了事。与其摆一个「按钮变灰」的假操作面板，
- * 不如直接告诉用户：复制这段、去哪个 AI、拿到什么、之后怎么用。
+ * 两种场景共用：kind=text 的纯文本任务（本地底座只有图像能力，做不了），
+ * 以及 image 模板切到「文本生成 · 外部 AI」模式（用户主动选了外部路线）。
+ * 与其摆一个「按钮变灰」的假操作面板，不如直接告诉用户：复制这段、去哪个 AI、
+ * 拿到什么、之后怎么用。
  */
-export default function TextTaskPanel({ tpl }: { tpl: Template }) {
+export default function TextTaskPanel({
+  prompt,
+  guide,
+  why,
+}: {
+  prompt: string
+  guide?: TextGuide
+  /** 顶部那句「为什么在这里做不了」，双模式模板的说法和纯文本任务不同 */
+  why?: string
+}) {
   const [copied, setCopied] = useState(false)
-  const guide = tpl.guide
 
   const copy = async () => {
-    const text = tpl.prompt
     try {
-      await navigator.clipboard.writeText(text)
+      await navigator.clipboard.writeText(prompt)
       setCopied(true)
     } catch {
       // 非 https / 无剪贴板权限时的兜底：临时 textarea + execCommand
       const ta = document.createElement('textarea')
-      ta.value = text
+      ta.value = prompt
       ta.style.position = 'fixed'
       ta.style.opacity = '0'
       document.body.appendChild(ta)
@@ -35,8 +43,8 @@ export default function TextTaskPanel({ tpl }: { tpl: Template }) {
   return (
     <div className="text-task">
       <div className="tt-why">
-        本地两个底座（Z-Image / Qwen-Image-Edit）只出图，没有文本模型，
-        这条在这里跑不了。复制下面的提示词，交给对话式 AI 即可。
+        {why ||
+          '本地两个底座（Z-Image / Qwen-Image-Edit）只出图，没有文本模型，这条在这里跑不了。复制下面的提示词，交给对话式 AI 即可。'}
       </div>
 
       {guide ? (
@@ -61,7 +69,7 @@ export default function TextTaskPanel({ tpl }: { tpl: Template }) {
           {copied ? '已复制' : '复制'}
         </button>
       </div>
-      <pre className="tt-prompt">{tpl.prompt}</pre>
+      <pre className="tt-prompt">{prompt}</pre>
 
       {guide?.edit && (
         <div className="tt-note">

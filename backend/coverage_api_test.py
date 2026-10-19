@@ -14,6 +14,9 @@
 import inspect
 import io
 import zipfile
+from pathlib import Path
+
+import numpy as np
 
 from fastapi.testclient import TestClient
 from PIL import Image, ImageDraw
@@ -196,6 +199,68 @@ if r.status_code == 200:
           f"{frames[0]['width']}x{frames[0]['height']}")
     check("index 记录 16 项", len(r.json()["index"]["frames"]) == 16)
 
+# 精灵表拆分默认只切不去背；matte=true 时逐帧清掉键色。
+# 绿幕 + 深色主体：拆完四角应透明，主体完整。
+matte_sheet = Image.new("RGB", (64, 64), (0, 255, 0))
+_md = ImageDraw.Draw(matte_sheet)
+for gy in range(2):
+    for gx in range(2):
+        _md.rectangle((gx * 32 + 8, gy * 32 + 8, gx * 32 + 23, gy * 32 + 23),
+                      fill=(30, 30, 30))
+r = client.post("/api/pipeline/sheet/split",
+                files={"file": ("m.png", png(matte_sheet), "image/png")},
+                data={"cols": 2, "rows": 2, "matte": "true", "tolerance": "80"})
+check("sheet/split 支持逐帧去背", r.status_code == 200, str(r.json())[:80])
+if r.status_code == 200:
+    ms = r.json()
+    for f in ms["frames"]:
+        remember(f)
+    check("去背结果写进 index（method / background）",
+          bool(ms["index"]["frames"][0].get("matte", {}).get("method")),
+          str(ms["index"]["frames"][0].get("matte")))
+    _px = Image.open(storage.asset_path(ms["frames"][0])).convert("RGBA")
+    check("去背后四角透明", _px.getpixel((0, 0))[3] == 0, str(_px.getpixel((0, 0))))
+    check("去背后主体保留", _px.getpixel((16, 16))[3] == 255 and
+          _px.getpixel((16, 16))[:3] == (30, 30, 30), str(_px.getpixel((16, 16))))
+
+# 硬 alpha 保留「描边 + 键色」的抗锯齿混色：绿幕底实测边缘环 51% 偏绿。
+# clean_edge_spill 只改 RGB 不动 alpha，把它洗成内侧颜色。
+from backend.app.pipelines import matte as matte_pipe  # noqa: E402
+
+_edge = Image.new("RGB", (40, 40), (0, 255, 0))
+_ed = ImageDraw.Draw(_edge)
+_ed.rectangle((10, 10, 29, 29), fill=(20, 20, 20))
+# 1px「黑 + 绿」混色边，模拟模型抗锯齿
+_ed.rectangle((9, 9, 30, 30), outline=(10, 140, 10))
+_arr = np.array(_edge.convert("RGBA"))
+_arr[:, :, 3] = 0
+_arr[9:31, 9:31, 3] = 255
+_cut = Image.fromarray(_arr, "RGBA")
+
+
+def _green_ring(im):
+    a = np.asarray(im.convert("RGBA")).astype(np.int32)
+    al = a[:, :, 3] > 8
+    inner = np.zeros_like(al)
+    inner[1:-1, 1:-1] = (al[1:-1, 1:-1] & al[:-2, 1:-1] & al[2:, 1:-1]
+                         & al[1:-1, :-2] & al[1:-1, 2:])
+    ring = al & ~inner
+    r, g, b = a[:, :, 0], a[:, :, 1], a[:, :, 2]
+    return int(ring.sum()), int((ring & (g > r + 25) & (g > b + 25)).sum())
+
+
+_n0, _g0 = _green_ring(_cut)
+_clean, _npx = matte_pipe.clean_edge_spill(_cut, (0, 255, 0))
+_n1, _g1 = _green_ring(_clean)
+check("边缘清洗确实改到像素", _npx > 0, str(_npx))
+check("绿幕边缘溢色大幅下降", _g1 <= max(1, _g0 // 5), f"{_g0} → {_g1}（环 {_n0}px）")
+check("边缘清洗不动 alpha", np.array_equal(
+    np.asarray(_cut)[:, :, 3], np.asarray(_clean)[:, :, 3]))
+# 蓝幕同样适用（主通道判定不是写死绿）
+assert _green_ring(_cut)[0] > 0
+check("清洗认的是底色主通道，不写死绿",
+      matte_pipe.clean_edge_spill(_cut, (0, 0, 255))[1] == 0)
+
 files = []
 for i, f in enumerate(frames[:6]):
     files.append(("files", (f"f{i}.png", png(Image.open(storage.asset_path(f))), "image/png")))
@@ -341,6 +406,43 @@ check("读图任务的 guide 标了 needsImage",
       api_tpls["char_style_extract"].get("guide", {}).get("needsImage") is True)
 check("纯文本任务的 guide 不需要图",
       api_tpls["eng_spec_doc"].get("guide", {}).get("needsImage") is False)
+
+# 双模式模板（目前只有角色精灵表）：同一个模板既能本地出图，也能复制提示词
+# 交给外部出图 AI。两段 prompt 必须是两份独立话术，不能拿一段凑两家。
+dual = [t for t in tpl_mod.TEMPLATES if t.get("textMode")]
+check("双模式模板存在且是精灵表",
+      {t["id"] for t in dual} == {"char_sprite_sheet"},
+      str([t["id"] for t in dual]))
+tm = api_tpls["char_sprite_sheet"].get("textMode") or {}
+check("接口透传 textMode", bool(tm.get("prompt")), str(list(tm)))
+check("textMode 与主 prompt 不是同一段话",
+      tm.get("prompt") != tpl_mod.TEMPLATES[[t["id"] for t in tpl_mod.TEMPLATES]
+                                           .index("char_sprite_sheet")]["prompt"])
+check("textMode 带 hint 与 guide",
+      bool(tm.get("hint")) and isinstance(tm.get("guide"), dict))
+check("textMode 的 guide 字段齐备",
+      set(("needsImage", "targets", "steps", "edit", "after")) - set((tm.get("guide") or {})) == set(),
+      str(set(("needsImage", "targets", "steps", "edit", "after")) - set(tm.get("guide") or {})))
+check("textMode 的 guide 至少两个 AI / 两步操作",
+      len((tm.get("guide") or {}).get("targets") or []) >= 2
+      and len((tm.get("guide") or {}).get("steps") or []) >= 2)
+check("textMode 的 prompt 同样不含写作说明",
+      not [w for w in DIRTY if w in (tm.get("prompt") or "")]
+      and "{" not in (tm.get("prompt") or ""))
+
+# 抠图底色：管线不是硬编码绿幕（边缘采样做色键），但同一功能两处写不同颜色
+# 会让用户不知道信哪个。项目约定是绿幕，洋红是精灵表的历史孤例。
+workflows_src = (Path(__file__).resolve().parent / "app" / "workflows.py").read_text(
+    encoding="utf-8")
+sprite = api_tpls["char_sprite_sheet"]
+check("精灵表用绿幕键色", "#00FF00" in sprite["prompt"] and "洋红" not in sprite["prompt"],
+      sprite["prompt"][-60:])
+check("精灵表两条路线都用绿幕",
+      "洋红" not in (tm.get("prompt") or "") and "#00FF00" in (tm.get("prompt") or ""))
+check("模板与工作流的精灵表底色一致（都用绿）",
+      "纯绿色背景" in sprite["prompt"] and "纯绿色背景" in workflows_src)
+check("notes 里的底色说明跟着改（不再提洋红）",
+      not [n for n in sprite.get("notes", []) if "洋红" in n])
 
 print("== 画风推荐表 ==")
 r = client.get("/api/styles")

@@ -10,6 +10,14 @@ export type Asset = {
   meta?: Record<string, any>
 }
 
+export type TextGuide = {
+  needsImage: boolean
+  targets: string[]
+  steps: string[]
+  edit: string
+  after: string
+}
+
 export type Template = {
   id: string
   category: string
@@ -18,19 +26,22 @@ export type Template = {
   prompt: string
   /** 页面单独展示的提示，非提示词内容（不进模型） */
   notes?: string[]
-  /** image = 出图；text = 文本任务，本页不出图 */
+  /** image = 本地出图；text = 文本任务，本页不出图 */
   kind?: 'image' | 'text'
   /** 模板默认画风 id；画风不写进 prompt，避免和选择器打架 */
   defaultStyle?: string
   /** 参考原图的编辑/提取类模板：画风跟随原图，选画风无效，前端不显示画风区 */
   styleLocked?: boolean
   /** 仅 text：引导用户去别的对话式 AI 完成，不在本页做操作面板 */
-  guide?: {
-    needsImage: boolean
-    targets: string[]
-    steps: string[]
-    edit: string
-    after: string
+  guide?: TextGuide
+  /**
+   * image 模板的第二条路：复制提示词交给外部出图 AI。
+   * prompt 与主 prompt 分开写——本地底座吃短句，外部模型能接受结构化约束。
+   */
+  textMode?: {
+    hint: string
+    prompt: string
+    guide: TextGuide
   }
   params: Record<string, number>
 }
@@ -202,11 +213,13 @@ export const api = {
     fd.append('variant', variant)
     return fetch('/api/pipeline/resize', { method: 'POST', body: fd }).then(json)
   },
-  splitSheet: (file: File, cols: number, rows: number) => {
+  splitSheet: (file: File, cols: number, rows: number, matte = false, tolerance = 80) => {
     const fd = new FormData()
     fd.append('file', file)
     fd.append('cols', String(cols))
     fd.append('rows', String(rows))
+    fd.append('matte', String(matte))
+    fd.append('tolerance', String(tolerance))
     return fetch('/api/pipeline/sheet/split', { method: 'POST', body: fd }).then(json)
   },
   pixelize: (file: File, colors: number, pixelSize: number, dither: boolean, palette: string) => {
