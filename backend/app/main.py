@@ -361,6 +361,7 @@ async def pipeline_sprite_frame(
     width: int = Form(512),
     height: int = Form(512),
     maxSide: int = Form(768),
+    backdrop: str = Form("neutral"),
 ):
     """逐帧动作生成：一次一帧，用户填的动作原样进指令。
 
@@ -368,6 +369,10 @@ async def pipeline_sprite_frame(
     能力，一张图排 4×4 时姿势大面积重复（实测 16 格几乎同姿势），动作循环
     根本不能用。改成一次一帧后，模型只需做「换个姿势」一件事，身份由同一张
     参考图钉住，拼板/对齐交给本地确定性管线。
+
+    backdrop：生成时铺什么底色。默认中性灰——实测模型画不出纯色绿，还会把绿
+    染到角色边缘（内圈偏底色像素绿幕 76.5% vs 中性灰 33.3%），详见
+    pipelines/backdrop.py。
     """
     from .pipelines import sprite_loop
 
@@ -387,7 +392,7 @@ async def pipeline_sprite_frame(
     img, meta = await sprite_loop.run_frame(
         ref, pose.strip(), index, max(1, total),
         subject=subject, style=style, steps=steps, seed=seed,
-        width=width, height=height, max_side=maxSide,
+        width=width, height=height, max_side=maxSide, backdrop=backdrop,
     )
     item = storage.save_asset(
         img, kind="generated",
@@ -588,6 +593,21 @@ async def pipeline_restyle(
         meta={"pipeline": "restyle", "sourceAssetId": refAssetId or None, **meta},
     )
     return {"asset": item, "meta": {"pipeline": "restyle", **meta}}
+
+
+# ---------- 生成底色（抠图质量的根因在生成侧，不在抠图参数） ----------
+@app.get("/api/pipeline/backdrops")
+async def pipeline_backdrops():
+    """可选底色：中性灰（推荐）/ 绿幕 / 白。
+
+    默认不是绿幕。实测（640×896、同提示词同 seed、只改背景色）模型声明
+    #00FF00 实际画出薄荷绿 [90,199,126] + 径向渐变，还把绿染到角色边缘
+    （内圈偏底色像素 76.5%，中性灰只有 33.3%）。详见 pipelines/backdrop.py。
+    """
+    from .pipelines import backdrop as backdrop_pipe
+
+    return {"backdrops": backdrop_pipe.list_backdrops(),
+            "default": backdrop_pipe.DEFAULT}
 
 
 # ---------- 人物像素化（照片 → 像素角色，三档造型程度） ----------

@@ -17,6 +17,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from PIL import Image
 
+from . import backdrop as backdrop_pipe
 from . import sheet as sheet_pipe
 from . import sprite as sprite_pipe
 
@@ -48,7 +49,8 @@ def pose_hint(pose: str) -> str:
     return ""
 
 
-def pose_instruction(pose: str, index: int, total: int) -> str:
+def pose_instruction(pose: str, index: int, total: int,
+                     backdrop: str = "neutral") -> str:
     """单帧编辑指令：只讲「改成什么姿势」，不讲「保持什么不变」。
 
     实测结论（同一张角色图、同 seed、20 步）：
@@ -58,25 +60,30 @@ def pose_instruction(pose: str, index: int, total: int) -> str:
     - 把这些约束全删掉、只写「把角色改成正在迈步的样子：一腿前迈屈膝、
       另一腿后蹬、手臂摆动」，姿势立刻真的变了，而且衣服/装备/配色/画风
       本来就是编辑底座默认保留的，不会丢。
-    所以这里不写任何「保持不变」。背景仍然钉 #00FF00（后面要按色键/显著性
-    抠图），并要求全身入画——跨步姿势最容易把脚裁出画面。
+    所以这里不写任何「保持不变」。全身入画那条不能省——跨步姿势最容易把脚
+    裁出画面。
+
+    底色默认走中性灰而不是绿幕：实测模型声明 #00FF00 实际画出薄荷绿
+    [90,199,126] + 径向渐变，还会把绿染到角色边缘（内圈偏底色像素 76.5%，
+    中性灰只有 33.3%）。理由与数据见 backdrop 模块文档。
     """
     hint = pose_hint(pose)
     detail = f"：{hint}" if hint else ""
     return (
         f"把角色改成{pose}的动作{detail}。"
-        "全身完整入画，双脚不超出画面，背景为纯绿色 #00FF00。"
+        f"全身完整入画，双脚不超出画面，{backdrop_pipe.backdrop_prompt(backdrop)}。"
     )
 
 
 def pose_prompt(pose: str, index: int, total: int, subject: str,
-                style_words: str = "") -> str:
+                style_words: str = "", backdrop: str = "neutral") -> str:
     """没有编辑底座时的文生图兜底提示词（一致性会弱一些，但不会没输出）。"""
     body = (
         f"游戏角色正面立绘，全身，角色设定：{(subject or '').strip()}。"
         f"动作：{pose}。这是同一套动作循环的第 {index + 1} 帧（共 {total} 帧），"
         "角色朝向正前方，双脚踩在同一条水平线上，身体水平居中。"
-        "画面中只有一个角色，纯绿色背景 #00FF00，无渐变、无纹理、无文字、无水印、无边框。"
+        f"画面中只有一个角色，{backdrop_pipe.backdrop_prompt(backdrop)}，"
+        "无文字、无水印、无边框。"
     )
     return f"画风：{style_words}。{body}" if style_words else body
 
@@ -95,6 +102,7 @@ async def run_frame(
     height: int = 512,
     max_side: int = 768,
     engines: Optional[Dict[str, Any]] = None,
+    backdrop: str = "neutral",
 ) -> Tuple[Image.Image, Dict[str, Any]]:
     """生成一帧。有参考图走编辑底座（保外观），没有则退回文生图。
 
@@ -106,7 +114,8 @@ async def run_frame(
 
     eng = engines or _engines()
     t = time.time()
-    inst = pose_instruction(pose, index, total)
+    bd = backdrop_pipe.get_backdrop(backdrop)
+    inst = pose_instruction(pose, index, total, backdrop)
 
     if ref is not None and eng["editModel"]:
         from . import ai_edit
@@ -117,11 +126,11 @@ async def run_frame(
             "mode": "edit", "instruction": inst, "pose": pose,
             "index": index, "total": total, "steps": emeta.get("steps"),
             "seed": seed, "seconds": round(time.time() - t, 1),
-            "editModel": eng["editModel"],
+            "editModel": eng["editModel"], "backdrop": bd["id"],
         }
 
     sw = style_words(style)
-    prompt = pose_prompt(pose, index, total, subject, sw)
+    prompt = pose_prompt(pose, index, total, subject, sw, backdrop)
     res = await eng["txt"].generate(
         prompt=prompt, width=max(64, width // 16 * 16), height=max(64, height // 16 * 16),
         steps=steps, cfg=7.5, seed=seed, n=1)
@@ -129,7 +138,7 @@ async def run_frame(
         "mode": "txt2img", "prompt": prompt, "pose": pose,
         "index": index, "total": total, "steps": res.meta.get("steps"),
         "seed": seed, "seconds": round(time.time() - t, 1),
-        "subject": subject,
+        "subject": subject, "backdrop": bd["id"],
     }
     if ref is not None and eng["editFallback"]:
         meta["editFallback"] = eng["editFallback"]

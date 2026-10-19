@@ -366,6 +366,43 @@ def _mask_keep(rgb: np.ndarray) -> np.ndarray:
     return np.array(mask) >= 128
 
 
+def _u2net_session():
+    global _SESSION, _U2NET_ERR
+    if _SESSION is not None or _U2NET_ERR is not None:
+        return _SESSION
+    # 关键：权重文件不存在时 **绝不** 触发 rembg 的联网下载（会卡死数十分钟，
+    # 直接拖垮整个请求）。只有本地权重就绪才尝试 new_session。
+    if not os.path.exists(_U2NET_ONNX):
+        _U2NET_ERR = f"u2net 权重缺失：{_U2NET_ONNX}（请先放置权重）"
+        return None
+    try:
+        from rembg import new_session
+        _SESSION = new_session("u2net")
+    except Exception as e:  # 权重损坏 / onnxruntime 不可用
+        _U2NET_ERR = f"{type(e).__name__}: {e}"
+        _SESSION = None
+    return _SESSION
+
+
+def u2net_available() -> bool:
+    return _u2net_session() is not None
+
+
+def u2net_status() -> dict:
+    _u2net_session()
+    return {"available": _SESSION is not None, "error": _U2NET_ERR}
+
+
+def _mask_keep(rgb: np.ndarray) -> np.ndarray:
+    """显著性分割得到 kept 掩码（阈值二值化，像素素材不要软边）。"""
+    from rembg import remove
+    session = _u2net_session()
+    if session is None:
+        raise RuntimeError(_U2NET_ERR or "u2net session unavailable")
+    mask = remove(Image.fromarray(rgb), session=session, only_mask=True)
+    return np.array(mask) >= 128
+
+
 # --------------------------------------------------------------------------- #
 # 路径 2：GrabCut 图割
 # --------------------------------------------------------------------------- #
@@ -680,6 +717,13 @@ def connected_matte(
         "residualKeyPixels": residual,
         "residualKeyRatio": round(residual / max(1, int(kept.sum())), 4),
     }
+    # 语义路线下「残留键色像素」是唯一的量化指标，但它只统计轮廓环附近；
+    # 若背景本就有角色同款颜色（如白底角色的白衬衫），这个数天然不为 0，
+    # 属于度量本身的局限，写清楚避免被误读成抠图失败。
+    if used == "u2net":
+        meta["residualNote"] = (
+            "residualKeyPixels 只统计轮廓环附近的底色色相像素；角色本身含相近"
+            "颜色时会偏高，不代表抠图有误——请看棋盘格预览判断")
     if last_err:
         meta["fallbackReason"] = last_err
     return out, meta

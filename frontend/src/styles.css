@@ -671,3 +671,11 @@ button, input, textarea, select { font-family: inherit; }
 .lv-name { font-size: 12px; color: var(--white); padding: 0 5px; }
 .lv-card.on .lv-name { color: var(--green); }
 .lv-spec { font-family: var(--chip); font-size: 9px; color: var(--muted); padding: 0 5px 5px; }
+
+/* ---------- 生成底色选择 ---------- */
+/* 每个 chip 前带一个真实色块：底色选错会让抠图残留，这是需要「看得见」的选择 */
+.chip .bd-dot {
+  display: inline-block; width: 9px; height: 9px; margin-right: 5px;
+  border-radius: 2px; vertical-align: -1px;
+  box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.25);
+}

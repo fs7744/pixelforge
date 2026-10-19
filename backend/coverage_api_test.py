@@ -471,9 +471,53 @@ check("逐帧指令带上动作名", "迈步" in _inst, _inst[:40])
 check("逐帧指令把两字动作扩成肢体描述", "蹬直" in _inst or "迈出" in _inst, _inst[:60])
 check("逐帧指令不含「保持不变」这类压制措辞",
       not any(w in _inst for w in ("保持不变", "不要改", "完全不变")), _inst[:60])
-check("逐帧指令钉住绿幕背景", "#00FF00" in _inst)
 check("逐帧指令要求全身入画", "全身" in _inst)
 check("未知动作也给出可用指令", "旋转" in sl.pose_instruction("旋转", 0, 1))
+
+# ---- 生成底色：默认不是绿幕 ----
+# 实测（640×896、同提示词同 seed、只改背景色）：模型声明 #00FF00 实际画出薄荷绿
+# [90,199,126] + 径向渐变，并把绿染到角色边缘（内圈偏底色像素绿幕 76.5% vs
+# 中性灰 33.3%）。所以默认底色必须是中性灰——抠不干净的根因在生成侧。
+from backend.app.pipelines import backdrop as bdp  # noqa: E402
+
+check("默认底色是中性灰而非绿幕",
+      bdp.DEFAULT == "neutral", bdp.DEFAULT)
+check("底色选项至少含中性灰/绿幕/白",
+      {"neutral", "green", "white"} <= {b["id"] for b in bdp.list_backdrops()},
+      str([b["id"] for b in bdp.list_backdrops()]))
+check("底色提示词钉死纯色、无渐变无接地阴影",
+      all(k in bdp.backdrop_prompt("neutral") for k in ("均匀", "无渐变", "接地阴影")),
+      bdp.backdrop_prompt("neutral")[:50])
+check("绿幕提示词含 #00FF00（老用户按惯例选它时行为不变）",
+      "#00FF00" in bdp.backdrop_prompt("green"))
+check("底色 rgb 解析正确",
+      bdp.backdrop_rgb("green") == (0, 255, 0)
+      and bdp.backdrop_rgb("neutral") == (128, 128, 128),
+      str(bdp.backdrop_rgb("neutral")))
+_try_bd = None
+try:
+    bdp.get_backdrop("nope")
+except ValueError as e:
+    _try_bd = str(e)
+check("未知底色报错并列出合法值",
+      _try_bd is not None and "neutral" in _try_bd, str(_try_bd)[:60])
+check("逐帧指令默认用中性底（不钉绿幕）",
+      "#00FF00" not in sl.pose_instruction("迈步", 1, 4)
+      and "#808080" in sl.pose_instruction("迈步", 1, 4),
+      sl.pose_instruction("迈步", 1, 4)[-40:])
+check("逐帧指令可切回绿幕",
+      "#00FF00" in sl.pose_instruction("迈步", 1, 4, "green"))
+check("兜底提示词同样跟随底色",
+      "#808080" in sl.pose_prompt("迈步", 0, 4, "猫武士")
+      and "#00FF00" in sl.pose_prompt("迈步", 0, 4, "猫武士", "", "green"))
+_r_bd = client.get("/api/pipeline/backdrops")
+_bd_json = _r_bd.json() if _r_bd.status_code == 200 else {}
+check("底色列表接口可用且带默认项",
+      _r_bd.status_code == 200 and _bd_json.get("default") == "neutral"
+      and len(_bd_json.get("backdrops") or []) >= 3,
+      str(_r_bd.status_code))
+check("底色列表不含内部提示词（不想让前端拼提示词）",
+      all("prompt" not in b for b in _bd_json.get("backdrops") or []))
 
 print("== 模板库：提示词纯净度 ==")
 from backend.app import templates as tpl_mod

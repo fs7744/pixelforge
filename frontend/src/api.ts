@@ -88,6 +88,16 @@ export type StyleInfo = {
 }
 
 /** 人物像素化的一档：造型语言（头身比）+ 像素密度 + 色数 */
+/** 生成底色（抠图质量的根因在生成侧） */
+export type Backdrop = {
+  id: string
+  name: string
+  hint: string
+  hex: string
+  /** 底色是否适合做色键（灰/白不适合，色键要底色够纯且角色不同色） */
+  chromaKeyable: boolean
+}
+
 export type CharPixelLevel = {
   id: string
   name: string
@@ -295,6 +305,8 @@ export const api = {
     seed?: number | null
     width?: number
     height?: number
+    /** 生成时铺什么底色；不传则后端默认「中性灰」（比绿幕干净，见 /backdrops） */
+    backdrop?: string
   }, file?: File | null) => {
     const fd = new FormData()
     fd.append('pose', payload.pose)
@@ -307,6 +319,7 @@ export const api = {
     if (payload.seed != null) fd.append('seed', String(payload.seed))
     if (payload.width) fd.append('width', String(payload.width))
     if (payload.height) fd.append('height', String(payload.height))
+    if (payload.backdrop) fd.append('backdrop', payload.backdrop)
     if (file) fd.append('file', file)
     return fetch('/api/pipeline/sprite/frame', { method: 'POST', body: fd }).then(json)
   },
@@ -350,6 +363,16 @@ export const api = {
     if (file) fd.append('file', file)
     return fetch('/api/pipeline/restyle', { method: 'POST', body: fd }).then(json)
   },
+  /**
+   * 生成底色选项：中性灰（默认）/ 绿幕 / 白。
+   * 默认不是绿幕——模型画不出纯色绿，还会把绿染到角色边缘（实测内圈污染
+   * 76.5% vs 中性灰 33.3%）。
+   */
+  backdrops: (): Promise<{
+    backdrops: Backdrop[]
+    default: string
+  }> => fetch('/api/pipeline/backdrops').then(json),
+
   /** 人物像素化三档（写实比例 / 半 Q 版 / Q 版）+ 背景处理选项 */
   charPixelLevels: (): Promise<{
     levels: CharPixelLevel[]

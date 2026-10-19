@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
-import { api, Asset, AssetFacets, ProviderInfo, StyleInfo, Template, TemplateField } from '../api'
+import { api, Asset, AssetFacets, Backdrop, ProviderInfo, StyleInfo, Template, TemplateField } from '../api'
 import { openPreview } from '../Preview'
 import { RefPicker } from '../RefPicker'
 import { Splitter } from '../split'
@@ -243,6 +243,20 @@ export default function Workbench({ onSendToPost }: Props) {
   const [spriteProg, setSpriteProg] = useState<{ i: number; total: number; pose: string } | null>(null)
   const [spriteFrames, setSpriteFrames] = useState<Record<number, Asset>>({})
   const spriteCancel = useRef(false)
+  // 生成底色。默认「中性灰」而不是绿幕：实测模型声明 #00FF00 会画成薄荷绿
+  // [90,199,126] + 径向渐变，还会把绿染到角色边缘（内圈偏底色像素 76.5% vs
+  // 中性灰 33.3%）。数据见 pipelines/backdrop.py。
+  const [backdrops, setBackdrops] = useState<Backdrop[]>([])
+  const [backdrop, setBackdrop] = useState('neutral')
+
+  useEffect(() => {
+    api.backdrops()
+      .then((d) => {
+        setBackdrops(d.backdrops)
+        setBackdrop(d.default)
+      })
+      .catch(() => undefined)
+  }, [])
 
   useEffect(() => {
     api.templates().then((d) => {
@@ -477,6 +491,7 @@ export default function Workbench({ onSendToPost }: Props) {
             seed: seed.trim() ? Number(seed) : null,
             width,
             height,
+            backdrop,
           },
           refFile,
         )
@@ -914,6 +929,28 @@ export default function Workbench({ onSendToPost }: Props) {
                 />
               </div>
             </div>
+
+            {backdrops.length > 0 && (
+              <>
+                <div className="label" style={{ marginTop: 10 }}>生成底色（决定抠图干不干净）</div>
+                <div className="chips mt8">
+                  {backdrops.map((b) => (
+                    <button
+                      key={b.id}
+                      className={`chip ${backdrop === b.id ? 'on' : ''}`}
+                      onClick={() => setBackdrop(b.id)}
+                    >
+                      <span className="bd-dot" style={{ background: b.hex }} />
+                      {b.name}
+                    </button>
+                  ))}
+                </div>
+                <div className="hint" style={{ marginTop: 6 }}>
+                  {backdrops.find((b) => b.id === backdrop)?.hint}
+                  {' '}合成用语义分割（u2net），它不看背景色，所以中性底不会被误抠。
+                </div>
+              </>
+            )}
 
             <div className="label" style={{ marginTop: 10 }}>全局锁色（帧间不偏色）</div>
             <div className="chips mt8">
