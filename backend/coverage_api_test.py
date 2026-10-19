@@ -112,8 +112,9 @@ def cleanup_assets(verbose: bool = False) -> None:
     # 所以这里先作废缓存再扫，按「创建时间 >= 本轮起点」判定，不依赖登记。
     try:
         storage._INDEX_CACHE = None      # noqa: SLF001 —— 测试收尾，必须看到磁盘真身
-        leftovers = [a for a in storage.list_assets()
-                     if a["id"] not in _baseline_ids and a["createdAt"] >= _START_TS]
+        # 别再按时间戳筛：这轮就吃过亏——save 之后缓存没失效，时间戳筛出 0 个，
+        # 一次跑跑胖 34 张。判据只留「不在基线里」，与 smoke/e2e 一致。
+        leftovers = [a for a in storage.list_assets() if a["id"] not in _baseline_ids]
     except Exception:
         leftovers = []
     # 工作流产物的名字是「runId-步骤」，run 文件被测试删掉后它们就成了孤儿；
@@ -134,9 +135,8 @@ def cleanup_assets(verbose: bool = False) -> None:
         except Exception:
             pass
     if verbose:
-        check("时间戳兜底无残留",
-              not [a for a in storage.list_assets()
-                   if a["id"] not in _baseline_ids and a["createdAt"] >= _START_TS],
+        check("兜底清理后无残留",
+              not [a for a in storage.list_assets() if a["id"] not in _baseline_ids],
               f"余 {len(storage.list_assets())}")
 
 
