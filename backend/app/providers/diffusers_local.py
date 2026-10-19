@@ -85,12 +85,16 @@ def detect_family(model_id: str) -> str:
             family = "zimage"
         elif "QwenImageEdit" in cls:
             family = "qwen_edit"
+        elif "Wan" in cls:
+            family = "wan"
     if family == "unknown":
         name = os.path.basename(model_id.rstrip("/\\")).lower()
         if "z-image" in name or "zimage" in name:
             family = "zimage"
         elif "qwen-image-edit" in name or "qwen_image_edit" in name:
             family = "qwen_edit"
+        elif "wan" in name:
+            family = "wan"
     _FAMILY[model_id] = family
     return family
 
@@ -192,9 +196,11 @@ def _torch_status() -> Dict[str, Any]:
     }
 
 
-# 两个大族在 24GB 卡上的实测占用（bf16 / fp8+offload）：
-# Z-Image 19.3GB、Qwen-Edit fp8 前向峰值 20.3GB。留 1GB 余量给 CUDA context。
-_NEED_GB = {"zimage": 20.5, "qwen_edit": 21.0}
+# 三个大族在 24GB 卡上的实测/估算占用（bf16 / fp8+offload）：
+# Z-Image 19.3GB、Qwen-Edit fp8 前向峰值 20.3GB、Wan2.2 TI2V-5B（transformer
+# fp8 9.3GB + umT5 fp8 5.3GB + VAE 2.6GB ≈ 17GB 常驻，视频前向另有激活）。
+# 留 1GB 余量给 CUDA context。
+_NEED_GB = {"zimage": 20.5, "qwen_edit": 21.0, "wan": 19.0}
 
 
 def _vram_note(family: str) -> Optional[str]:
@@ -354,6 +360,120 @@ class DiffusersProvider(BaseProvider):
         _CACHE[model_id] = pipe
         return pipe
 
+    # ---------- Wan2.2 TI2V-5B：图生视频（角色参考图 + 动作提示词 → 帧序列） ----------
+
+    def _load_wan(self, model_id: str):
+        """Wan2.2 TI2V-5B：5B DiT + umT5-xxl + Wan VAE，diffusers WanPipeline。
+
+        为什么用视频底座做精灵：逐帧编辑（Qwen-Edit 一帧一帧改姿势）每帧都是
+        独立推理，帧间没有运动连续性，快速动作会抖；视频底座一次生成整段动作，
+        肢体路径天然连贯，抽帧后就是现成的循环素材。h3-character-studio 用的
+        MiniMax H3 是同一思路（首帧 = 方向母版，27 帧加中间引导）。
+
+        显存策略（照 Qwen-Edit 的作业）：
+        - transformer bf16 18.6GB → GPU 逐层 fp8（约 9.3GB），落盘缓存
+          transformer-fp8/，冷启动省掉 18GB 读取；
+        - umT5-xxl bf16 10.6GB → torchao fp8（约 5.3GB），只在条件编码时用，
+          enable_model_cpu_offload 会让它按阶段换出；
+        - VAE 2.6GB 保持 bf16（解码质量敏感，且只在首尾用一次）。
+        合计常驻约 17GB，24GB 卡可行；14B I2V 在同一张卡上要 block swap，
+        所以先用 5B 验证链路。
+        """
+        try:
+            import torch
+        except Exception as e:  # pragma: no cover
+            raise RuntimeError(_TORCH_HINT) from e
+        try:
+            from diffusers import WanPipeline, WanTransformer3DModel
+        except Exception as e:
+            raise RuntimeError(
+                "Wan2.2 视频生成需要 diffusers ≥ 0.36（含 WanPipeline / "
+                "WanTransformer3DModel）。请执行 pip install -U diffusers。\n"
+                f"原始错误：{e}"
+            ) from e
+        torch.backends.cudnn.benchmark = True
+        if not torch.cuda.is_available():
+            raise RuntimeError("Wan2.2 是视频 DiT，需要 CUDA GPU；CPU 推理不可行。")
+
+        transformer = None
+        if os.environ.get("PIXELFORGE_QWEN_FP8", "1") != "0":
+            try:
+                transformer = self._load_component_fp8(
+                    model_id, "transformer", WanTransformer3DModel, "wan.transformer")
+            except Exception as e:
+                print(f"[pixelforge] fp8 transformer 快速路径失败（{e}），退回完整加载",
+                      flush=True)
+                transformer = None
+
+        if transformer is not None:
+            pipe = WanPipeline.from_pretrained(
+                model_id, torch_dtype=torch.bfloat16, transformer=transformer)
+        else:
+            pipe = WanPipeline.from_pretrained(model_id, torch_dtype=torch.bfloat16)
+            if os.environ.get("PIXELFORGE_QWEN_FP8", "1") != "0":
+                self._quantize_fp8(pipe.transformer, "wan.transformer")
+        # umT5-xxl 10.6GB：fp8 后约 5.3GB，offload 会在编码完成后把它搬出显存
+        if os.environ.get("PIXELFORGE_QWEN_FP8", "1") != "0":
+            self._quantize_fp8(pipe.text_encoder, "wan.text_encoder")
+        pipe.enable_model_cpu_offload()
+        pipe.set_progress_bar_config(disable=True)
+        caps: Dict[str, Any] = {
+            "family": "wan",
+            "notes": ["Wan2.2 TI2V-5B：参考图 + 中文提示词 → 视频帧序列；"
+                      "fp8 + cpu offload"],
+        }
+        _CAPS[model_id] = caps
+        _CACHE[model_id] = pipe
+        return pipe
+
+    def _run_wan(self, model_id: str, prompt: str, negative: str,
+                 width: int, height: int, steps: Optional[int],
+                 seed: Optional[int], generator: Any,
+                 ref: Optional[Any], num_frames: int, fps: int, max_side: int):
+        """图生视频：参考图 + 动作提示词 → 帧序列（PIL 列表）。
+
+        - num_frames 必须是 4k+1（Wan 时序 VAE 的要求），内部向下取整；
+        - 输入图按 16 对齐缩放到目标尺寸，长边超过 max_side 时先降（编辑成本
+          随像素数涨，视频尤其明显——帧数 × 分辨率双重放大）；
+        - guidance_scale=5.0 / steps=30 是 TI2V-5B 的官方推荐量级；步数可调，
+          但不低于 20（再低动作会跳变）。
+        """
+        import torch
+
+        if ref is None:
+            raise ValueError("Wan 图生视频需要一张参考图（ref）")
+        pipe = self._load(model_id)
+        use_steps = 30 if not steps else max(20, min(int(steps), 50))
+        from PIL import Image as _Image
+
+        src = ref.convert("RGB")
+        w = int(width or src.width) // 16 * 16
+        h = int(height or src.height) // 16 * 16
+        if max(w, h) > max_side:
+            scale = max_side / max(w, h)
+            w, h = max(16, int(w * scale) // 16 * 16), max(16, int(h * scale) // 16 * 16)
+        src = src.resize((w, h), _Image.LANCZOS)
+        # 4k+1：Wan 时序 VAE 把帧数压成 (n-1)/4+1 个潜帧，非 4k+1 会补齐或报错
+        frames = max(5, (int(num_frames) - 1) // 4 * 4 + 1)
+        out = pipe(
+            image=src,
+            prompt=prompt,
+            negative_prompt=negative or " ",
+            height=h,
+            width=w,
+            num_frames=frames,
+            num_inference_steps=use_steps,
+            guidance_scale=5.0,
+            generator=generator,
+        )
+        imgs = [f.convert("RGBA") for f in out.frames[0]]
+        return imgs, {
+            "steps": use_steps, "cfg": 5.0, "family": "wan",
+            "mode": "i2v", "frames": len(imgs), "fps": fps,
+            "seconds": round(len(imgs) / max(1, int(fps)), 2),
+            "size": [w, h],
+        }
+
     # ---------- Qwen-Image-Edit fp8 transformer：量化 + 落盘缓存 ----------
 
     def _load_qwen_transformer_fp8(self, model_id: str):
@@ -397,8 +517,8 @@ class DiffusersProvider(BaseProvider):
         return t
 
     @staticmethod
-    def _fp8_cache_valid(cache_dir, model_dir) -> bool:
-        """缓存有效性：三件套齐全 + 源 transformer 权重文件指纹未变。
+    def _fp8_cache_valid(cache_dir, model_dir, subdir: str = "transformer") -> bool:
+        """缓存有效性：三件套齐全 + 源权重文件指纹未变。
 
         环境变量 PIXELFORGE_QWEN_CACHE=0 可强制 miss（调试/重新量化用）。
         """
@@ -411,7 +531,7 @@ class DiffusersProvider(BaseProvider):
         try:
             meta = json.loads((cache_dir / "fp8_cache_meta.json").read_text())
             for name, (size, mtime) in meta.get("files", {}).items():
-                f = model_dir / "transformer" / name
+                f = model_dir / subdir / name
                 if not f.is_file() or f.stat().st_size != size or int(f.stat().st_mtime) != mtime:
                     return False
             return True
@@ -419,8 +539,8 @@ class DiffusersProvider(BaseProvider):
             return False
 
     @staticmethod
-    def _save_fp8_cache(transformer, cache_dir, model_dir) -> None:
-        """把量化后的 transformer 存成 diffusers 风格缓存目录（约 20GB）。
+    def _save_fp8_cache(transformer, cache_dir, model_dir, subdir: str = "transformer") -> None:
+        """把量化后的组件存成 diffusers 风格缓存目录。
 
         键布局与 diffusers 权重一致：<路径>.weight 为 float8_e4m3fn，
         <路径>.w_scale 为 fp32 逐输出通道 scale，其余（norm/adaLN 的 bf16 等）
@@ -433,11 +553,11 @@ class DiffusersProvider(BaseProvider):
         cache_dir.mkdir(parents=True, exist_ok=True)
         sd = {k: v.detach().contiguous() for k, v in transformer.state_dict().items()}
         save_file(sd, str(cache_dir / "model.safetensors"))
-        shutil.copy(str(model_dir / "transformer" / "config.json"),
+        shutil.copy(str(model_dir / subdir / "config.json"),
                     str(cache_dir / "config.json"))
         # 源指纹：权重文件名 + 大小 + mtime（重新下载/换版本即失效，自动重建）
         files = {}
-        for f in sorted((model_dir / "transformer").glob("*.safetensors")):
+        for f in sorted((model_dir / subdir).glob("*.safetensors")):
             st = f.stat()
             files[f.name] = [st.st_size, int(st.st_mtime)]
         (cache_dir / "fp8_cache_meta.json").write_text(json.dumps(
@@ -445,34 +565,37 @@ class DiffusersProvider(BaseProvider):
             ensure_ascii=False, indent=1))
 
     @staticmethod
-    def _load_fp8_cache(cache_dir):
-        """从缓存快速搭出 fp8 transformer：meta 骨架 + mmap assign + 换类。
+    def _load_fp8_cache(cache_dir, cls=None):
+        """从缓存快速搭出 fp8 组件：meta 骨架 + mmap assign + 换类。
 
         用 diffusers 同款低内存加载路径（accelerate init_empty_weights +
-        load_state_dict(assign=True)），20B 模型不分配 bf16 空张量；
+        load_state_dict(assign=True)），大模型不分配 bf16 空张量；
         safetensors load_file 返回 mmap 视图，assign 后参数直接指向映射页。
+        cls 缺省取 Qwen 的 transformer 类（历史调用路径）。
         """
         import torch
         from accelerate import init_empty_weights
-        from diffusers import QwenImageTransformer2DModel
         from safetensors.torch import load_file
 
+        if cls is None:
+            from diffusers import QwenImageTransformer2DModel as cls
+
         fp8_cls = _get_fp8_linear_cls()
-        config = QwenImageTransformer2DModel.load_config(str(cache_dir / "config.json"))
+        config = cls.load_config(str(cache_dir / "config.json"))
         sd = load_file(str(cache_dir / "model.safetensors"))
         try:
             with init_empty_weights():
-                model = QwenImageTransformer2DModel.from_config(config)
+                model = cls.from_config(config)
         except Exception:
             # meta 路径失败时退回普通 from_config（CPU 上空张量，仅多耗内存）
-            model = QwenImageTransformer2DModel.from_config(config)
+            model = cls.from_config(config)
         missing, unexpected = model.load_state_dict(sd, strict=False, assign=True)
         # unexpected 必须全部是 .w_scale（骨架无此 buffer）；missing 必须为空
         scales = [k for k in unexpected if k.endswith(".w_scale")]
         if missing or len(scales) != len(unexpected):
             raise RuntimeError(
                 f"缓存键不匹配（missing={len(missing)} unexpected={len(unexpected)}），"
-                "删除 transformer-fp8/ 可重建")
+                f"删除 {cache_dir.name}/ 可重建")
         for key in scales:
             mod = model.get_submodule(key[: -len(".w_scale")])
             mod.register_buffer("w_scale", sd[key])
@@ -484,6 +607,36 @@ class DiffusersProvider(BaseProvider):
         if n == 0:
             raise RuntimeError("缓存中没有任何 fp8 Linear，格式可能损坏")
         return model
+
+    def _load_component_fp8(self, model_id: str, subdir: str, cls, tag: str):
+        """任意 diffusers 组件的 fp8 加载（量化 + 落盘缓存），Qwen/Wan 共用。
+
+        与 _load_qwen_transformer_fp8 的区别只是组件目录和模型类可指定，
+        逻辑完全一样：命中缓存 mmap 直读，未命中 GPU 逐层量化后写缓存。
+        """
+        import time
+        from pathlib import Path
+
+        model_dir = Path(model_id)
+        cache_dir = model_dir / f"{subdir}-fp8"
+        if self._fp8_cache_valid(cache_dir, model_dir, subdir):
+            t0 = time.time()
+            t = self._load_fp8_cache(cache_dir, cls)
+            print(f"[pixelforge] fp8 缓存命中：{cache_dir.name}/（{time.time() - t0:.0f}s）",
+                  flush=True)
+            return t
+
+        t0 = time.time()
+        t = cls.from_pretrained(str(model_dir / subdir), torch_dtype=torch.bfloat16)
+        t_load = time.time() - t0
+        n = self._quantize_transformer_gpu(t)
+        try:
+            self._save_fp8_cache(t, cache_dir, model_dir, subdir)
+        except Exception as e:
+            print(f"[pixelforge] {tag} fp8 缓存落盘失败（{e}），不影响本次运行", flush=True)
+        print(f"[pixelforge] {tag} fp8 量化完成（{n} 个 Linear，bf16 加载 {t_load:.0f}s，"
+              f"缓存已写 {cache_dir.name}/）", flush=True)
+        return t
 
     @staticmethod
     def _quantize_transformer_gpu(transformer) -> int:
@@ -664,6 +817,11 @@ class DiffusersProvider(BaseProvider):
             images, meta = self._run_qwen_edit(model_id, prompt, negative, width, height,
                                                steps, seed, generator, n,
                                                refs=_normalize_refs(ref, refs))
+        elif family == "wan":
+            raise RuntimeError(
+                "Wan 是视频底座，请走 generate_video()（参考图 + 提示词 → 帧序列），"
+                "不要走 generate()。"
+            )
         else:
             raise RuntimeError(
                 f"不支持的模型族：{model_id}。只支持 Z-Image-Turbo 与 Qwen-Image-Edit-2511。"
@@ -723,6 +881,48 @@ class DiffusersProvider(BaseProvider):
         if auto_routed:
             out_meta["autoRouted"] = True
             out_meta["requestedModel"] = requested
+        return ProviderResult(images=images, meta=out_meta)
+
+    async def generate_video(
+        self,
+        prompt: str,
+        ref,
+        width: int = 0,
+        height: int = 0,
+        steps: Optional[int] = None,
+        seed: Optional[int] = None,
+        num_frames: int = 81,
+        fps: int = 24,
+        max_side: int = 832,
+    ) -> ProviderResult:
+        """图生视频：参考图 + 提示词 → 帧序列（ProviderResult.images = 帧）。
+
+        与 generate() 分开而不是加参数：视频的输入输出语义都不同（一张图进、
+        几十帧出、按时长而非张数描述），塞进同一个方法只会让调用方猜。
+        """
+        _require_torch()
+        model_id = self._resolve_model()
+        if detect_family(model_id) != "wan":
+            raise RuntimeError(
+                f"当前模型不是视频底座：{model_id}。"
+                "请先下载 Wan2.2 TI2V-5B：PYTHONPATH=. python backend/fetch_wan22.py"
+            )
+        import torch
+
+        generator = None
+        if seed is not None:
+            generator = torch.Generator(
+                device="cuda" if torch.cuda.is_available() else "cpu").manual_seed(int(seed))
+        async with _LOCK:
+            images, meta = await asyncio.to_thread(
+                self._run_wan, model_id, prompt, self.cfg.get("negativePrompt", ""),
+                width, height, steps, seed, generator, ref,
+                int(num_frames), int(fps), int(max_side),
+            )
+        status = _torch_status()
+        out_meta = {"provider": "diffusers", "model": model_id,
+                    "device": status.get("device"), **meta,
+                    "caps": _CAPS.get(model_id)}
         return ProviderResult(images=images, meta=out_meta)
 
     async def test(self) -> Dict[str, Any]:

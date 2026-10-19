@@ -118,6 +118,86 @@ WORKFLOWS: List[Dict[str, Any]] = [
         ],
     },
     {
+        "id": "animation_video",
+        "name": "动画工作流 · 视频生成",
+        "tag": "I2V",
+        "desc": "角色图 → 视频底座生成整段动作 → 抽帧去重 → 抠图规整 → 精灵表 + Godot 导出",
+        "inputHint": "角色描述（如：灰白英短猫武士，红披风，武士刀）",
+        "steps": [
+            {
+                "id": "anchor",
+                "name": "角色锚点图",
+                "type": "generate",
+                "desc": "先出一张干净的正面全身图，作为视频底座的第一帧参考",
+                "prompt": "{input}。游戏角色正面立绘，全身，双脚踩在同一水平线上，"
+                          "纯绿色背景 #00FF00，无渐变、无纹理、无文字、无水印、无边框。",
+                "n": 1,
+                "refChain": True,
+                "width": 480,
+                "height": 832,
+                "maxSide": 832,
+            },
+            {
+                "id": "video",
+                "name": "视频生成动作",
+                "type": "video",
+                "desc": "Wan2.2 TI2V-5B：锚点图 + 动作提示词 → 连续帧序列（肢体路径连贯，"
+                        "不会像逐帧编辑那样抖）",
+                "prompt": "画面中的角色在原地行走，双脚交替蹬地，手臂与腿反向摆动，"
+                          "发饰和衣摆随步伐轻微晃动；角色位置、大小、朝向始终不变，"
+                          "没有位移、没有镜头运动、没有起停；背景保持纯绿色。",
+                "useRef": "anchor",
+                "numFrames": 81,
+                "fps": 24,
+                "steps": 30,
+                "width": 480,
+                "height": 832,
+                "maxSide": 832,
+            },
+            {
+                "id": "dedup",
+                "name": "抽帧去重",
+                "type": "dedup",
+                "desc": "感知哈希去重，剔除近似帧，保证动作变化可见",
+            },
+            {
+                "id": "inbetween",
+                "name": "插帧补帧",
+                "type": "blend",
+                "desc": "视频帧本身连续，默认不补；需要更慢的动作再开（光流插帧）",
+                "perGap": 0,
+                "mode": "flow",
+            },
+            {
+                "id": "normalize",
+                "name": "抠图与规整",
+                "type": "sprites",
+                "desc": "连通域抠图 → 裁空白 → 最近邻缩放 → 底部居中对齐，消除逐帧漂移",
+                "size": 128,
+                "anchor": "bottom",
+                "matte": True,
+                "tolerance": 72,
+                "feather": 0,
+                "hard": True,
+                "inset": 0.04,
+            },
+            {
+                "id": "sprite_sheet",
+                "name": "精灵表导出",
+                "type": "compose",
+                "desc": "全局锁色后合成精灵表并生成引擎索引",
+                "cols": 4,
+                "colors": 24,
+            },
+            {
+                "id": "godot",
+                "name": "Godot 工程导出",
+                "type": "godot",
+                "desc": "生成 SpriteFrames 资源 + AnimatedSprite2D 场景 + 导入说明",
+            },
+        ],
+    },
+    {
         "id": "parallax",
         "name": "视差图层工作流",
         "tag": "PARALLAX",
@@ -593,6 +673,46 @@ async def run_step(run_id: str, step_id: str, overrides: Optional[Dict[str, Any]
                             "mode": result.meta.get("mode"),
                             **({"refStep": ref_step} if ref_img is not None else {}),
                             "promptLang": "zh"}
+
+        elif stype == "video":
+            # 视频底座生成整段动作，再走既有的抽帧/抠图/拼表链。
+            # 参考图来自上一步产物（锚点图）；没有视频底座时给明确错误，
+            # 不静默退回逐帧生成——那会让用户以为视频链路是好的。
+            ref_ids = _step_artifacts(run, index - 1)
+            if not ref_ids:
+                raise RuntimeError("视频生成需要上一步的产物作为参考图")
+            ref_img = _load(ref_ids[-1])
+            prompt = overrides.get("prompt") or _fill(step_def["prompt"], run, step_def, 0)
+            psteps = run.get("params", {}).get("steps")
+            seed = run.get("params", {}).get("seed")
+            if not hasattr(provider, "generate_video"):
+                raise RuntimeError(
+                    f"当前 Provider（{pid}）不支持视频生成。"
+                    "需要本地 Wan2.2 TI2V-5B：PYTHONPATH=. python backend/fetch_wan22.py"
+                )
+            res = await provider.generate_video(
+                prompt,
+                ref_img,
+                width=int(step_def.get("width") or 480),
+                height=int(step_def.get("height") or 832),
+                steps=int(psteps) if psteps else None,
+                seed=int(seed) if seed is not None else None,
+                num_frames=int(step_def.get("numFrames", 81)),
+                fps=int(step_def.get("fps", 24)),
+                max_side=int(step_def.get("maxSide", 832)),
+            )
+            for i, img in enumerate(res.images):
+                artifacts.append(_save_asset(
+                    img, kind="workflow", name=f"{run['id']}-{step_id}-f{i:03d}",
+                    meta={"runId": run["id"], "step": step_id, "index": i,
+                          "label": f"frame {i}", "fps": res.meta.get("fps")},
+                )["id"])
+            meta = {"prompt": prompt, "frames": len(artifacts),
+                    "model": res.meta.get("model"), "mode": res.meta.get("mode"),
+                    "fps": res.meta.get("fps"), "seconds": res.meta.get("seconds"),
+                    "size": res.meta.get("size"), "promptLang": "zh"}
+            if res.meta.get("vramWarning"):
+                meta["vramWarning"] = res.meta["vramWarning"]
 
         elif stype == "dedup":
             src = overrides.get("artifacts") or _prev_artifacts(run, index)

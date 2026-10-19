@@ -995,6 +995,48 @@ _cut3, _wmeta = matte_pipe.connected_matte(
 check("白底不走色相判定（不当成溢色乱洗）",
       _cut3.getpixel((16, 16))[:3] == (200, 160, 140), str(_cut3.getpixel((16, 16))))
 
+print("== 视频生成工作流（Wan2.2 TI2V-5B） ==")
+from backend.app import workflows as wf_mod  # noqa: E402
+from backend.app.providers.diffusers_local import DiffusersProvider, detect_family  # noqa: E402
+
+r = client.get("/api/workflows")
+check("视频工作流已注册", "animation_video" in [w["id"] for w in r.json()["workflows"]],
+      str([w["id"] for w in r.json()["workflows"]]))
+_vwf = wf_mod.get_workflow("animation_video")
+check("视频工作流步骤链完整（锚点 → 视频 → 去重 → 插帧 → 规整 → 拼表 → 导出）",
+      [s["type"] for s in _vwf["steps"]] == ["generate", "video", "dedup", "blend",
+                                             "sprites", "compose", "godot"],
+      str([s["type"] for s in _vwf["steps"]]))
+_vstep = next(s for s in _vwf["steps"] if s["type"] == "video")
+check("视频步骤默认 81 帧 / 24fps / 480×832",
+      _vstep["numFrames"] == 81 and _vstep["fps"] == 24
+      and _vstep["width"] == 480 and _vstep["height"] == 832,
+      str({k: _vstep.get(k) for k in ("numFrames", "fps", "width", "height")}))
+check("模型族识别：wan 目录名",
+      detect_family("models/wan2.2-ti2v-5b") == "wan", detect_family("models/wan2.2-ti2v-5b"))
+
+# 视频步骤的依赖与底座校验（都不碰 GPU）
+_run = wf_mod.create_run("animation_video", "灰白英短猫武士")
+_r2 = client.post(f"/api/runs/{_run['id']}/steps/video/run", json={})
+check("视频步骤：上一步未完成 → 400",
+      _r2.status_code == 400 and "上一步" in str(_r2.json().get("detail", "")),
+      f"{_r2.status_code} {_r2.text[:60]}")
+check("视频步骤在 run 里可见",
+      any(s["id"] == "video" for s in client.get(f"/api/runs/{_run['id']}").json()["steps"]))
+
+import asyncio as _aio  # noqa: E402
+_prov = DiffusersProvider({})
+try:
+    _aio.get_event_loop().run_until_complete(
+        _prov.generate_video("测试", Image.new("RGB", (64, 64), (10, 10, 10))))
+    _vmsg = ""
+except RuntimeError as e:
+    _vmsg = str(e)
+except Exception as e:  # 事件循环关闭等：忽略，只看能否走到族校验
+    _vmsg = ""
+check("非视频底座调 generate_video → 明确报错并给出下载指引",
+      "fetch_wan22" in _vmsg or "视频底座" in _vmsg, _vmsg[:80])
+
 print("== 清理测试资产 ==")
 removed = 0
 for aid in created:

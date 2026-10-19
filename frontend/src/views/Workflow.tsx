@@ -11,6 +11,12 @@ type StepDef = {
   prompt?: string
   layerNames?: string[]
   n?: number
+  /** 视频步骤的参数（后端 workflows.py 的 video 步骤定义） */
+  numFrames?: number
+  fps?: number
+  width?: number
+  height?: number
+  steps?: number
 }
 type Workflow = { id: string; name: string; tag: string; desc: string; inputHint: string; steps: StepDef[] }
 type RunStep = { id: string; name: string; status: string; artifacts: string[]; meta: any; error?: string }
@@ -225,7 +231,7 @@ export default function WorkflowView() {
               <button
                 className="btn btn-primary"
                 disabled={!!busy || runStep?.status === 'done'}
-                onClick={() => runOne(stepDef.id, stepDef.type === 'generate' ? { prompt: promptDraft } : {})}
+                onClick={() => runOne(stepDef.id, (stepDef.type === 'generate' || stepDef.type === 'video') ? { prompt: promptDraft } : {})}
               >
                 {busy === stepDef.id ? '执行中' : runStep?.status === 'done' ? '已完成' : '执行此步'}
               </button>
@@ -251,14 +257,39 @@ export default function WorkflowView() {
               </div>
               <div className="label">{stepDef?.desc}</div>
 
-              {stepDef?.type === 'generate' && (
+              {(stepDef?.type === 'generate' || stepDef?.type === 'video') && (
                 <div>
-                  <div className="label">提示词（可编辑，执行时以此为准）</div>
+                  <div className="label">
+                    {stepDef?.type === 'video' ? '动作提示词（可编辑，执行时以此为准）' : '提示词（可编辑，执行时以此为准）'}
+                  </div>
                   <textarea
                     className="textarea"
                     value={promptDraft}
                     onChange={(e) => setPromptDraft(e.target.value)}
                   />
+                  {stepDef?.type === 'video' && (
+                    <div className="hint" style={{ marginTop: 6 }}>
+                      视频底座一次生成整段动作，肢体路径连贯；帧数 / 分辨率 / 步数固定为
+                      {' '}{stepDef.numFrames ?? '-'} 帧 · {stepDef.fps ?? '-'}fps ·{' '}
+                      {stepDef.width ?? '-'}×{stepDef.height ?? '-'} · {stepDef.steps ?? '-'} 步
+                      （单次数分钟，先在「模型设置」确认已下载 Wan2.2 TI2V-5B）。
+                    </div>
+                  )}
+                </div>
+              )}
+
+              {stepDef?.type === 'video' && currentStepMeta.frames && (
+                <div className="card-white">
+                  <div style={{ fontFamily: 'Silkscreen, monospace', fontSize: 10, marginBottom: 4 }}>I2V RESULT</div>
+                  <div style={{ fontSize: 14, lineHeight: 1.7 }}>
+                    生成 {currentStepMeta.frames} 帧 · {currentStepMeta.fps}fps ·{' '}
+                    {currentStepMeta.seconds}s · {currentStepMeta.size?.join('×')}
+                    <br />
+                    模型 {currentStepMeta.model || '-'}
+                    {currentStepMeta.vramWarning && (
+                      <div style={{ color: '#8a6d00', marginTop: 4 }}>{currentStepMeta.vramWarning}</div>
+                    )}
+                  </div>
                 </div>
               )}
 
