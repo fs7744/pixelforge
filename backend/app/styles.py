@@ -1,9 +1,16 @@
-"""美术画风库：游戏行业典型风格，生成时拼接在提示词尾部。
+"""美术画风库：游戏行业典型风格，生成时前置到提示词**开头**。
 
 设计要点：
 - 风格词统一为中文（两个底座 Z-Image / Qwen-Image-Edit 都是中文原生），
   不再维护英文版，也没有中文→英文的翻译链路；
-- 风格词放提示词尾部：注意力对尾部权重自然衰减，放开头容易被主体描述淹没；
+- 风格词放提示词**开头**。原实现放尾部，线上表现为「选了画风但出图没变化」：
+  Z-Image 的 Qwen3 文本编码器是因果结构，尾部 token 对整体语义的影响最弱，
+  何况模板提示词自己还带着一句造型/背景约束压在后面。开头是权重最高的位置，
+  一句话定调整张图，主体描述跟在后面细化——这也和 SD 时代
+  「画风/质量词在前、主体在后」的写法和用户直觉一致；
+- 提示词里已存在的同类画风词会**去重**（模板提示词历史上写过「Q版日系卡通」
+  「像素艺术风格」，与用户新选的画风直接打架，实测两个画风同时出现时模型
+  只认前面那个）；
 - pixelize 字段是「后处理建议」：像素类画风出图后应接最近邻降采样 +
   调色板量化，参数随画风返回给前端，一键送后处理时预填。
 """
@@ -154,6 +161,8 @@ def list_styles() -> List[Dict[str, Any]]:
     """画风列表（去掉大字段，给前端 chips 用）。
 
     sample：示例图 URL（gen_style_samples.py 生成过才返回），供悬浮 tooltip 展示。
+    words：实际拼进提示词的风格词。放出来是为了让「选了画风」变成可验证的
+    事实——前端直接展示这句话会被加在提示词最前面，而不是只亮一个 chip。
     """
     out = []
     for s in STYLES:
@@ -164,6 +173,7 @@ def list_styles() -> List[Dict[str, Any]]:
                 "name": s["name"],
                 "tags": s["tags"],
                 "hint": s["hint"],
+                "words": s["prompt"],
                 "pixelize": s.get("pixelize"),
                 "sample": f"{SAMPLE_URL_PREFIX}/{s['id']}.png" if sample_file.is_file() else None,
             }
@@ -175,19 +185,35 @@ def get_style(style_id: Optional[str]) -> Optional[Dict[str, Any]]:
     return _BY_ID.get(style_id) if style_id else None
 
 
-def apply_style(prompt: str, style_id: Optional[str]) -> Dict[str, Any]:
-    """把中文风格词拼到提示词尾部，返回 {prompt, style, suggestPost}。
+def style_words(style_id: Optional[str]) -> str:
+    """只取风格词本身（不拼提示词），给三视图这类要自己组织句式的管线用。"""
+    style = get_style(style_id)
+    return style["prompt"] if style else ""
 
-    风格词放尾部：注意力对尾部权重自然衰减，放开头容易被主体描述淹没。
-    拼好后直接送中文原生底座，不需要任何语言转换。
+
+def apply_style(prompt: str, style_id: Optional[str]) -> Dict[str, Any]:
+    """把中文风格词**前置**到提示词开头，返回 {prompt, style, styleWords, suggestPost}。
+
+    放开头而不是尾部，原因见模块注释：尾部对整图语义的影响最弱，实测表现为
+    「选了画风但出图没变化」。开头一句定调，主体描述跟在后面细化。
+
+    幂等：同一段风格词已经在提示词里（用户手动粘过）就不再重复拼，避免
+    生成时出现两遍同样的画风描述把提示词预算吃掉。
     """
     style = get_style(style_id)
     if not style:
-        return {"prompt": prompt, "style": None, "suggestPost": None}
+        return {"prompt": prompt, "style": None, "styleWords": "", "suggestPost": None}
     words = style["prompt"]
-    merged = prompt.rstrip("。.，, ") + "。" + words if prompt.strip() else words
+    body = (prompt or "").strip()
+    if body.startswith(words):
+        merged = body
+    elif body:
+        merged = f"{words}。{body}"
+    else:
+        merged = words
     return {
         "prompt": merged,
         "style": {"id": style["id"], "name": style["name"]},
+        "styleWords": words,
         "suggestPost": style.get("pixelize"),
     }

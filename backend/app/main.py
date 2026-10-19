@@ -181,6 +181,7 @@ async def generate(payload: GeneratePayload):
     meta = {**result.meta, "prompt": effective_prompt, "promptSource": payload.prompt}
     if styled["style"]:
         meta["style"] = styled["style"]
+        meta["styleWords"] = styled["styleWords"]
     if styled["suggestPost"]:
         meta["suggestPost"] = styled["suggestPost"]
     return {"images": items, "meta": meta}
@@ -253,6 +254,7 @@ async def generate_with_refs(
             "mode": "ref2img", "refCount": len(images)}
     if styled["style"]:
         meta["style"] = styled["style"]
+        meta["styleWords"] = styled["styleWords"]
     items = [
         storage.save_asset(img, kind="generated", meta=meta, ai_label=False)
         for img in result.images

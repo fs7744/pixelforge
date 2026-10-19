@@ -87,9 +87,16 @@ export function StyleChip({ style, active, onSelect }: { style: StyleInfo; activ
         type="button"
         className={`chip ${active ? 'on' : ''}`}
         onClick={() => {
+          // 第一次点击 = 选中（只亮 chip，不弹浮层）；已选中再点才看示例图。
+          // 原来点击同时选中+弹浮层，浮层盖住下方提示，用户看不到自己选了什么，
+          // 观感上就像「点了没反应」。
+          if (active) {
+            place()
+            setOpen(true)
+            return
+          }
           onSelect()
-          place()
-          setOpen(true)
+          setOpen(false)
         }}
         onMouseEnter={show}
         onMouseLeave={hide}
@@ -120,9 +127,9 @@ export function StyleChip({ style, active, onSelect }: { style: StyleInfo; activ
                 />
               ) : (
                 <div className="style-tip-none">
-                  示例图未生成
+                  暂无示例图
                   <br />
-                  跑 backend/gen_style_samples.py
+                  按下面的画风要点判断
                 </div>
               )}
             </div>
@@ -190,6 +197,7 @@ export default function Workbench({ onSendToPost }: Props) {
       if (d.templates[0]) {
         setTplId(d.templates[0].id)
         setPrompt(d.templates[0].prompt)
+        setStyleId(d.templates[0].defaultStyle || '')
       }
     })
     api.providers().then((d) => {
@@ -231,8 +239,9 @@ export default function Workbench({ onSendToPost }: Props) {
     setPrompt(promptFor(t))
     if (t.params?.width) setWidth(t.params.width)
     if (t.params?.height) setHeight(t.params.height)
-    // 文本任务不出图，画风不会生效；留着只会让界面状态和实际不一致
-    if (t.kind === 'text') setStyleId('')
+    // 画风不写在提示词里（写死就会和选择器打架），模板自带默认画风，这里点亮它；
+    // 文本任务不出图，画风不会生效，留空免得界面状态和实际不一致
+    setStyleId(t.kind === 'text' ? '' : t.defaultStyle || '')
   }
 
   // 参考图最多 4 张：再多也分不清主次，编码时间还线性上涨
@@ -343,6 +352,8 @@ export default function Workbench({ onSendToPost }: Props) {
     : styles.filter((s) => recStyleIds.includes(s.id) || s.id === styleId)
   // 选了但不在本类推荐里的画风：仍然显示（否则用户看不到自己选了什么），标注一下
   const styleOutOfRec = !!styleId && !recStyleIds.includes(styleId)
+  // 当前画风实际会拼到提示词里的那句话；给「最终提示词」预览用
+  const styleWords = styles.find((s) => s.id === styleId)?.words || ''
 
   return (
     <div className="body">
@@ -438,6 +449,11 @@ export default function Workbench({ onSendToPost }: Props) {
                       </span>
                     </>
                   )}
+                  {s.words && (
+                    <div className="style-words">
+                      <span className="tag">前置到提示词开头</span> {s.words}
+                    </div>
+                  )}
                 </div>
               )
             })()}
@@ -448,6 +464,14 @@ export default function Workbench({ onSendToPost }: Props) {
           <div>
             <div className="label">提示词（可编辑）</div>
             <textarea className="textarea" value={prompt} onChange={(e) => setPrompt(e.target.value)} />
+            {styleWords && (
+              <details className="sent-preview">
+                <summary>最终提示词（画风已加在最前面）</summary>
+                <pre>
+                  {styleWords}。{prompt}
+                </pre>
+              </details>
+            )}
             {currentTpl?.notes?.length ? (
               <ul className="tpl-notes">
                 {currentTpl.notes.map((n, i) => (

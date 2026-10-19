@@ -362,6 +362,50 @@ check("推荐数少于画风总数（确实做了收敛）",
       all(len(ids) < len(style_ids) for k, ids in rec.items() if k != "工程"),
       f"{len(style_ids)} 种画风")
 
+print("== 画风确实进提示词 ==")
+# 线上反馈「选了画风没生效」。根因有三层，逐条守住：
+# ① 风格词曾经拼在尾部，对整图语义影响最弱；
+# ② 模板 prompt 自己写死了画风（「Q版日系卡通」），与新选画风直接打架；
+# ③ 用户看不到最终提示词，无从判断到底加没加。
+from backend.app import styles as sty_mod  # noqa: E402
+
+sv = sty_mod.apply_style("灰白英短猫武士，红披风", "manga_bw")
+check("风格词前置到开头", sv["prompt"].startswith(sty_mod.get_style("manga_bw")["prompt"]),
+      sv["prompt"][:50])
+check("返回 styleWords 供界面展示", bool(sv.get("styleWords")), sv.get("styleWords", "")[:30])
+check("重复拼接是幂等的",
+      sty_mod.apply_style(sv["prompt"], "manga_bw")["prompt"] == sv["prompt"])
+check("不选画风时不改提示词",
+      sty_mod.apply_style("主体", None)["prompt"] == "主体")
+check("画风列表带 words（前端可展示）",
+      all(s.get("words") for s in sty["styles"]),
+      str([s["id"] for s in sty["styles"] if not s.get("words")]))
+
+# 模板里写死画风 = 选择器失效。这几个是**编辑/提取类**指令，要求「参考原图、
+# 画风不变」，它们本来就不参与画风切换，所以不计入、也不给默认画风。
+NO_DEFAULT_STYLE = {
+    "anim_action_video", "anim_inbetween", "scene_element_extract",
+    "scene_parallax_layer", "tile_seamless",
+}
+STYLE_KW = ("像素", "卡通", "Q版", "Q 版", "日系", "赛璐璐", "写实", "厚涂",
+            "水彩", "扁平", "矢量", "低多边形", "体素", "漫画", "速写", "3A")
+dirty = []
+for t in tpl_mod.TEMPLATES:
+    if t.get("kind") == "text":
+        continue
+    hits = [k for k in STYLE_KW if k in t.get("prompt", "")]
+    if hits and t["id"] not in NO_DEFAULT_STYLE:
+        dirty.append((t["id"], hits))
+check("图片模板的提示词不写死画风（画风交给选择器）", not dirty, str(dirty))
+
+bad_ds = [t["id"] for t in tpl_mod.TEMPLATES
+          if t.get("defaultStyle") and t["defaultStyle"] not in style_ids]
+check("模板 defaultStyle 都是合法画风 id", not bad_ds, str(bad_ds))
+no_ds = [t["id"] for t in tpl_mod.TEMPLATES
+         if t.get("kind") != "text" and not t.get("defaultStyle")
+         and t["id"] not in NO_DEFAULT_STYLE]
+check("生成类模板都带默认画风", not no_ds, str(no_ds))
+
 print("== 三视图提示词 ==")
 # 背视图指令曾经把示例角色（灰白英短猫武士）的造型写死：后脑纯灰、灰耳廓、
 # 红披风、手中兵器。结果任何角色转背面都会长出红披风。这里守住两条底线：
@@ -382,6 +426,11 @@ check("背视图禁止凭空添加",
       "没有的衣物" in back_ins and "一件都不要出现" in back_ins)
 
 p = tv._view_prompt("角色设定：灰白英短猫武士，腰挎武士刀。", "back")
+ps = tv._view_prompt("灰白英短猫武士，腰挎武士刀", "front",
+                     sty_mod.style_words("chibi"))
+check("三视图风格句在最前", ps.startswith("画风："), ps[:24])
+check("三视图风格词只出现一次", ps.count("二维日系Q版卡通风格") == 1)
+check("三视图无画风时不加空句", not tv._view_prompt("测试角色", "front").startswith("画风："))
 check("重复的「角色设定：」前缀被去掉", p.count("角色设定：") == 1, p[:40])
 check("结尾句号不重复", "。。" not in p)
 check("三视角提示词各自带视角名",

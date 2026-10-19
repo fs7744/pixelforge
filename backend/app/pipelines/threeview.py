@@ -89,11 +89,18 @@ def _clean_subject(subject: str) -> str:
     return s.rstrip("。.，, ").strip()
 
 
-def _view_prompt(subject: str, view: str) -> str:
-    """单视角 txt2img 提示词：核心是「画面中只有一个角色」的反重叠约束。"""
+def _view_prompt(subject: str, view: str, style_words: str = "") -> str:
+    """单视角 txt2img 提示词：画风句在前，主体与「只画一个角色」约束在后。
+
+    风格句必须占开头：Qwen3 编码器是因果结构，越靠后的 token 对整体语义
+    影响越弱，而这条 prompt 后面还有一大段视角/背景约束，风格词排在里面
+    等于没写（线上表现为「选了画风出图没变化」）。
+    """
     m = _VIEW_META[view]
     subj = _clean_subject(subject)
+    head = f"画风：{style_words}。" if style_words else ""
     return (
+        f"{head}"
         f"游戏角色{m['cn']}立绘。画面中只有一个角色，绝对不能出现两个或多个人物。"
         f"角色设定：{subj}。"
         f"{m['pose_cn']}。纯色暗绿色背景，无渐变、无纹理、无文字、无水印、无边框、无其他物体。"
@@ -546,13 +553,14 @@ async def run_front(
     三视图的起点必须是文生图——编辑器只能改已有图，不能从零创作。
     后两张的全部造型都由这一张决定，所以它值得单独重跑。
     """
-    from ..styles import apply_style
+    from ..styles import get_style, style_words
 
     eng = engines or _engines(provider_id=provider_id, provider_cfg=provider_cfg,
                               txt2img_model=txt2img_model)
-    styled = apply_style((subject or "").strip(), style)
+    st = get_style(style)
+    sw = style_words(style)
     cw, ch = _cell(width, height)
-    prompt = _view_prompt(styled["prompt"], "front")
+    prompt = _view_prompt((subject or "").strip(), "front", sw)
 
     t = time.time()
     res = await eng["txt"].generate(
@@ -563,12 +571,13 @@ async def run_front(
         "view": "front", "name": _VIEW_META["front"]["cn"], "mode": "txt2img",
         "prompt": prompt, "steps": res.meta.get("steps"), "seed": seed,
         "seconds": round(time.time() - t, 1), "cell": [cw, ch],
-        "style": styled.get("style"),
+        "style": {"id": st["id"], "name": st["name"]} if st else None,
+        "styleWords": sw or None,
         "txt2imgModel": eng["txt"]._resolve_model()
         if hasattr(eng["txt"], "_resolve_model") else eng["pid"],
     }
-    if styled.get("suggestPost"):
-        meta["suggestPost"] = styled["suggestPost"]
+    if st and st.get("pixelize"):
+        meta["suggestPost"] = st["pixelize"]
     return img, meta
 
 
@@ -594,7 +603,7 @@ async def run_derived(
     优先走编辑底座指令接力（外观保持最好）；编辑器不可用时退回同种子
     txt2img——一致性弱一些，但仍保证「一张图一个角色、三张不重叠」。
     """
-    from ..styles import apply_style
+    from ..styles import style_words
 
     if view not in ("side", "back"):
         raise ValueError(f"未知视角：{view}")
@@ -618,8 +627,8 @@ async def run_derived(
             "editModel": eng["editModel"],
         }
 
-    styled = apply_style((subject or "").strip(), style)
-    prompt = _view_prompt(styled["prompt"], view)
+    sw = style_words(style)
+    prompt = _view_prompt((subject or "").strip(), view, sw)
     res = await eng["txt"].generate(
         prompt=prompt, width=cw, height=ch, steps=steps,
         cfg=cfg if cfg is not None else 7.5, seed=seed, n=1)
@@ -657,7 +666,7 @@ async def run_three_view(
     - 帧 2+ 优先走 Qwen-Image-Edit 指令接力（外观保持最好）；
       编辑底座缺失时退回同种子 txt2img × 3（meta.editFallback 记录原因）。
     """
-    from ..styles import apply_style
+    from ..styles import get_style
 
     t0 = time.time()
     eng = _engines(provider_id=provider_id, provider_cfg=provider_cfg,
@@ -680,11 +689,11 @@ async def run_three_view(
 
     cw, ch = _cell(width, height)
     strip, cmeta = compose_three_view(views, cell=(cw, ch))
-    styled = apply_style((subject or "").strip(), style)
+    st = get_style(style)
     meta: Dict[str, Any] = {
         "pipeline": "threeview",
         "subject": (subject or "").strip(),
-        "style": styled.get("style"),
+        "style": {"id": st["id"], "name": st["name"]} if st else None,
         "mode": "txt2img→edit-relay" if eng["editModel"] else "txt2img×3",
         "txt2imgModel": fmeta.get("txt2imgModel"),
         "editModel": eng["editModel"],
@@ -697,6 +706,6 @@ async def run_three_view(
     }
     if eng["editFallback"]:
         meta["editFallback"] = eng["editFallback"]
-    if styled.get("suggestPost"):
-        meta["suggestPost"] = styled["suggestPost"]
+    if st and st.get("pixelize"):
+        meta["suggestPost"] = st["pixelize"]
     return strip, views, meta

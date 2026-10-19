@@ -20,6 +20,8 @@ export type Template = {
   notes?: string[]
   /** image = 出图；text = 文本任务，本页不出图 */
   kind?: 'image' | 'text'
+  /** 模板默认画风 id；画风不写进 prompt，避免和选择器打架 */
+  defaultStyle?: string
   /** 仅 text：引导用户去别的对话式 AI 完成，不在本页做操作面板 */
   guide?: {
     needsImage: boolean
@@ -36,6 +38,8 @@ export type StyleInfo = {
   name: string
   tags: string[]
   hint: string
+  /** 实际拼进提示词的风格词（前置到开头），用于界面展示「加的是什么」 */
+  words?: string
   pixelize?: { block: number; colors: number }
   /** 画风示例图 URL（gen_style_samples.py 生成过才有） */
   sample?: string | null

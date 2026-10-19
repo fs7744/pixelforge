@@ -459,3 +459,21 @@ button, input, textarea, select { font-family: inherit; }
 }
 .tv-acts { display: flex; gap: 6px; }
 .tv-acts .btn { height: 32px; padding: 0 8px; font-size: 13px; flex: 1; }
+
+/* 画风：实际拼进提示词的那句话（让「选画风」变成可验证的事实） */
+.style-words {
+  margin-top: 6px; font-size: 13px; line-height: 1.7; color: var(--muted);
+}
+.style-words .tag { margin-right: 6px; color: var(--white); }
+/* 最终提示词预览：折叠展示，确认画风句真的在最前面 */
+.sent-preview { margin-top: 8px; }
+.sent-preview summary {
+  cursor: pointer; font-size: 13px; color: var(--muted); user-select: none;
+}
+.sent-preview summary:hover { color: var(--white); }
+.sent-preview pre {
+  margin: 6px 0 0; padding: 8px 10px; background: #0b0b0e;
+  border: 1px solid var(--line); font-size: 13px; line-height: 1.7;
+  color: var(--white); white-space: pre-wrap; word-break: break-word;
+  max-height: 180px; overflow-y: auto; font-family: inherit;
+}
