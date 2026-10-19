@@ -29,6 +29,9 @@ from PIL import Image, ImageFilter
 # --------------------------------------------------------------------------- #
 # 通用小工具
 # --------------------------------------------------------------------------- #
+_NEIGHBOURS = ((0, 1), (0, -1), (1, 0), (-1, 0), (1, 1), (1, -1), (-1, 1), (-1, -1))
+
+
 def _neighbour_shift(mask: np.ndarray, dy: int, dx: int) -> np.ndarray:
     """把 bool mask 按 (dy,dx) 平移，越界填 False。"""
     out = np.zeros_like(mask)
@@ -119,34 +122,57 @@ def _saturation(rgb: np.ndarray) -> np.ndarray:
 # 边缘去污
 # --------------------------------------------------------------------------- #
 def _despill(arr: np.ndarray, kept: np.ndarray, palette: List[np.ndarray], tol: float) -> int:
-    """把「紧贴透明区、颜色仍接近背景」的轮廓像素改成相邻内部像素的颜色。
+    """把「紧贴透明区、颜色仍接近背景」的轮廓像素改成内侧角色像素的颜色。
 
     像素画的边界像素要么是角色本身的颜色，要么透明，不能是背景色的混合残影。
+
+    判定要同时看两个距离，只看``到背景的距离``会误伤浅色角色（白发 /
+    白甲在灰底上本来就离底色近）：
+    - ``d_bg``：到背景色板的距离，越小越像背景；
+    - ``d_core``：到内侧核心像素颜色的距离，越小越像角色本身。
+    只有 ``d_bg`` 明显小于 ``d_core`` 且确实贴着底色，才认定是混边。
     """
     rgb = arr[:, :, :3].astype(np.int32)
-    interior = kept & ~_erode(kept)
-    edge = kept & ~interior
-    if not edge.any():
+    core = _erode(kept)
+    if not core.any():           # 1px 细结构没有可信内侧参考，宁可不改
         return 0
-    dist = _palette_dist(rgb, palette)
-    contaminated = edge & (dist <= tol * 1.25)
+    deeper = _erode(core)
+    if deeper.any():
+        core = deeper
+    band = kept & ~core
+    if not band.any():
+        return 0
 
+    d_bg_all = _palette_dist(rgb, palette)
     out = rgb.copy()
-    filled = np.zeros_like(kept)
-    for dy, dx in ((0, 1), (0, -1), (1, 0), (-1, 0), (1, 1), (1, -1), (-1, 1), (-1, -1)):
-        cand = contaminated & ~filled
-        if not cand.any():
-            continue
-        near_int = _neighbour_shift(interior, dy, dx)
-        if not near_int.any():
-            continue
-        take = cand & near_int
-        if not take.any():
-            continue
-        out[take] = _shift_block(rgb, dy, dx)[take]
-        filled |= take
+    known = core.copy()          # 已确认是角色本身的像素
+    changed = 0
 
-    changed = int(filled.sum())
+    # 由内向外一圈圈推进：内圈的判定结果会成为外圈的参考色。
+    for _ in range(3):
+        acc = np.zeros((rgb.shape[0], rgb.shape[1], 3), dtype=np.float64)
+        cnt = np.zeros(kept.shape, dtype=np.float64)
+        for dy, dx in _NEIGHBOURS:
+            near = _neighbour_shift(known, dy, dx)
+            acc += near[:, :, None] * _shift_block(out, dy, dx).astype(np.float64)
+            cnt += near
+
+        cand = band & ~known & (cnt > 0)
+        if not cand.any():
+            break
+        ys, xs = np.nonzero(cand)
+        mean = acc[ys, xs] / cnt[ys, xs][:, None]
+        d_core = np.sqrt(((rgb[ys, xs] - mean) ** 2).sum(axis=1)).astype(np.float32)
+        d_bg = d_bg_all[ys, xs]
+        # 只在「明显更接近底色、且确实比内侧色更像背景」时才算混边。
+        # 用 0.9 的相对余量：d_bg 与 d_core 相等时（浅色角色压在浅色底上）
+        # 两边都是合法颜色，不能因为浮点精度差就被判成污染。
+        dirty = (d_bg <= tol * 1.25) & (d_bg < d_core * 0.9)
+        if dirty.any():
+            out[ys[dirty], xs[dirty]] = np.round(mean[dirty]).astype(np.int32)
+            changed += int(dirty.sum())
+        known[ys, xs] = True
+
     if changed:
         arr[:, :, :3] = out.astype(np.uint8)
     return changed

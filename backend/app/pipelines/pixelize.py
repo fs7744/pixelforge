@@ -66,17 +66,20 @@ def pixelize(
 
     if palette != "auto" and isinstance(PALETTES.get(palette), list):
         quant = _quantize_palette(rgb, palette)
-        used = len(set(quant.getdata()))
+        used = len(quant.getcolors(maxcolors=256) or [])
         pal_name = palette
     else:
         n = max(2, min(int(colors), 256))
         method = Image.Quantize.MEDIANCUT if hasattr(Image, "Quantize") else 0
-        quant = rgb.quantize(
-            colors=n,
-            method=method,
-            dither=Image.Dither.FLOYDSTEINBERG if dither else Image.Dither.NONE,
-        ).convert("RGB")
-        used = n
+        # 先中位切分出调色板，再按需用调色板做一次有序抖动。
+        # 注意：quantize(method=MEDIANCUT, dither=...) 里的 dither 会被忽略
+        # （中位切分本身不做误差扩散），必须走 palette 模式才真正生效。
+        pal = rgb.quantize(colors=n, method=method)
+        if dither:
+            quant = rgb.quantize(palette=pal, dither=Image.Dither.FLOYDSTEINBERG).convert("RGB")
+        else:
+            quant = pal.convert("RGB")
+        used = len(quant.getcolors(maxcolors=256) or [])
         pal_name = "auto"
 
     merged = quant.convert("RGBA")

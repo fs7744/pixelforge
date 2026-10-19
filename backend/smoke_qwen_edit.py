@@ -40,7 +40,6 @@ def main() -> int:
     print(f"模型族：{detect_family(MODEL)}")
 
     provider = DiffusersProvider({"model": MODEL})
-    print(f"supports_zh（应 True，中文指令直喂不过翻译）：{provider.supports_zh}")
 
     ref = _Image.open(REF_IMAGE).convert("RGB")
     print(f"参考图：{REF_IMAGE}（{ref.size[0]}x{ref.size[1]}）")

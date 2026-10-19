@@ -9,7 +9,6 @@ type StepDef = {
   desc: string
   prompt?: string
   layerNames?: string[]
-  layerNamesEn?: string[]
   n?: number
 }
 type Workflow = { id: string; name: string; tag: string; desc: string; inputHint: string; steps: StepDef[] }

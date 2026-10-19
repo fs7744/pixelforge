@@ -12,15 +12,6 @@ import numpy as np
 from PIL import Image
 
 
-def _feather_mask(width: int, height: int, band: int) -> np.ndarray:
-    """左侧 band 像素的 0→1 渐变遮罩（用于把右图淡入左图）。"""
-    mask = np.ones((height, width), dtype=np.float32)
-    if band > 0:
-        ramp = np.linspace(0.0, 1.0, band, dtype=np.float32)
-        mask[:, :band] = ramp
-    return mask
-
-
 def extend_horizontal(img: Image.Image, times: int = 2, blend: int = 24,
                       mirror: bool = True) -> Tuple[Image.Image, dict]:
     """横向延展为 times 倍宽。
@@ -62,7 +53,8 @@ def extend_horizontal(img: Image.Image, times: int = 2, blend: int = 24,
     return canvas, meta
 
 
-def extend_vertical(img: Image.Image, times: int = 2, blend: int = 16) -> Tuple[Image.Image, dict]:
+def extend_vertical(img: Image.Image, times: int = 2) -> Tuple[Image.Image, dict]:
+    """纵向镜像延展（上下可循环）。镜像接缝天然连续，不需要淡化。"""
     base = img.convert("RGBA")
     w, h = base.size
     times = max(2, int(times))

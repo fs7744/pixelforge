@@ -462,6 +462,8 @@ async def export_zip(payload: Dict[str, List[str]]):
         index = []
         for item in items:
             p = storage.asset_path(item)
+            if not p.exists():      # 索引里有、磁盘上没了：跳过而不是整包 500
+                continue
             zf.write(p, arcname=item["file"])
             index.append({k: item[k] for k in ("id", "name", "file", "width", "height", "kind")})
         zf.writestr("index.json", json.dumps(index, ensure_ascii=False, indent=2))

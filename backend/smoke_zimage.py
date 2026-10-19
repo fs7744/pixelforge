@@ -8,7 +8,6 @@
 from __future__ import annotations
 
 import asyncio
-import os
 import sys
 import time
 from pathlib import Path
@@ -32,7 +31,6 @@ def main() -> int:
     print(f"模型族：{detect_family(MODEL)}")
 
     provider = DiffusersProvider({"model": MODEL})
-    print(f"supports_zh（应 True，中文直喂不过翻译）：{provider.supports_zh}")
 
     OUT_DIR.mkdir(parents=True, exist_ok=True)
 

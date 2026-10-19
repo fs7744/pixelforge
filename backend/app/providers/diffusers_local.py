@@ -24,7 +24,7 @@ import asyncio
 import gc
 import json
 import os
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, Optional
 
 from .base import BaseProvider, ProviderResult
 
@@ -146,14 +146,6 @@ def _torch_status() -> Dict[str, Any]:
 class DiffusersProvider(BaseProvider):
     id = "diffusers"
     label = "本地双底座（Z-Image / Qwen-Edit）"
-
-    @property
-    def supports_zh(self) -> bool:
-        """两个底座的编码器都原生吃中文（Z-Image: Qwen3-4B / Qwen-Edit: Qwen2.5-VL）。"""
-        try:
-            return detect_family(self._resolve_model()) in ("zimage", "qwen_edit")
-        except Exception:
-            return False
 
     def _resolve_model(self) -> str:
         model = (self.cfg.get("model") or "").strip()

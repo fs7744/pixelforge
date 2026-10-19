@@ -14,11 +14,12 @@ def hard_resize(img: Image.Image, size: Tuple[int, int]) -> Image.Image:
 def fit_pad(img: Image.Image, size: Tuple[int, int]) -> Image.Image:
     """等比缩放后居中留白（透明），适合任意长宽比素材。"""
     w, h = size
-    sw = w / img.width
-    sh = h / img.height
+    base = img.convert("RGBA")   # paste 的 mask 必须是 RGBA，RGB 输入会直接抛错
+    sw = w / base.width
+    sh = h / base.height
     scale = min(sw, sh)
-    new = (max(1, int(img.width * scale)), max(1, int(img.height * scale)))
-    resized = img.resize(new, Image.NEAREST)
+    new = (max(1, int(base.width * scale)), max(1, int(base.height * scale)))
+    resized = base.resize(new, Image.NEAREST)
     canvas = Image.new("RGBA", size, (0, 0, 0, 0))
     canvas.paste(resized, ((w - new[0]) // 2, (h - new[1]) // 2), resized)
     return canvas

@@ -25,7 +25,11 @@ def _load_index() -> List[Dict[str, Any]]:
 
 
 def _save_index(items: List[Dict[str, Any]]) -> None:
-    INDEX_PATH.write_text(json.dumps(items, ensure_ascii=False, indent=2), encoding="utf-8")
+    # 先写临时文件再原子替换：直接覆盖时若进程中断，index.json 会变成
+    # 半截 JSON，_load_index 只能返回空列表，整个资产库等于丢失。
+    tmp = INDEX_PATH.with_suffix(".json.tmp")
+    tmp.write_text(json.dumps(items, ensure_ascii=False, indent=2), encoding="utf-8")
+    tmp.replace(INDEX_PATH)
 
 
 def stamp_ai_label(img: Image.Image, text: str = "AI") -> Image.Image:

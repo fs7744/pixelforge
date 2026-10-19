@@ -16,9 +16,6 @@ class ProviderResult:
 class BaseProvider:
     id = "base"
     label = "Base"
-    # 底座的文本编码器是否原生支持中文。当前两个底座（Z-Image / Qwen-Edit）
-    # 都是中文原生，引擎不再做中文→英文翻译。
-    supports_zh = True
 
     def __init__(self, cfg: Dict[str, Any]):
         self.cfg = cfg or {}

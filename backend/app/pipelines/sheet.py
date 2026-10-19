@@ -1,7 +1,7 @@
 """Sprite Sheet 拆分与合成 + 引擎索引 JSON。"""
 from __future__ import annotations
 
-from typing import Dict, List, Tuple
+from typing import List, Tuple
 
 from PIL import Image
 

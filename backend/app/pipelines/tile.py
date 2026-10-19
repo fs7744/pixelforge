@@ -9,7 +9,7 @@
 """
 from __future__ import annotations
 
-from typing import Tuple
+from typing import List, Tuple
 
 import numpy as np
 from PIL import Image, ImageFilter
@@ -42,7 +42,7 @@ def make_seamless(img: Image.Image, band: int = 12, feather: int = 3) -> Tuple[I
     return result, meta
 
 
-def split_tiles(img: Image.Image, cols: int, rows: int) -> list:
+def split_tiles(img: Image.Image, cols: int, rows: int) -> List[Image.Image]:
     """按网格裁切瓦片集（供逐格检查接缝）。"""
     cols, rows = max(1, cols), max(1, rows)
     tw, th = img.width // cols, img.height // rows
