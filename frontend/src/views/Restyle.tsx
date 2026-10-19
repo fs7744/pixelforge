@@ -3,6 +3,7 @@ import { api, Asset, AssetFacets, StyleInfo } from '../api'
 import { RefPicker } from '../RefPicker'
 import { openPreview } from '../Preview'
 import { Splitter } from '../split'
+import { newTaskId, TaskProgressBar, useTaskProgress } from '../useTaskProgress'
 
 type Props = {
   /** 从素材库点「转画风」进来时带的那张图 */
@@ -37,6 +38,7 @@ export default function Restyle({ incoming, onSendToPost }: Props) {
   const [maxSide, setMaxSide] = useState(1024)
   const [pxOn, setPxOn] = useState(true)
   const [busy, setBusy] = useState(false)
+  const taskProgress = useTaskProgress()
   const [elapsed, setElapsed] = useState(0)
   const [split, setSplit] = useState(50)
   const [error, setError] = useState('')
@@ -155,6 +157,8 @@ export default function Restyle({ incoming, onSendToPost }: Props) {
     setBusy(true)
     clearOut()
     const t0 = performance.now()
+    const taskId = newTaskId()
+    taskProgress.start(taskId)
     try {
       const res = await api.restyle(
         {
@@ -164,6 +168,7 @@ export default function Restyle({ incoming, onSendToPost }: Props) {
           seed: seedNum,
           maxSide,
           pixelize: pxOn,
+          taskId,
         },
         // 资产库的图交给后端按 id 读，不做 blob 往返
         src.assetId ? null : file,
@@ -188,6 +193,7 @@ export default function Restyle({ incoming, onSendToPost }: Props) {
       setError(e.message || String(e))
     } finally {
       setBusy(false)
+      taskProgress.stop()
     }
   }
 
@@ -311,6 +317,7 @@ export default function Restyle({ incoming, onSendToPost }: Props) {
         <button className="btn btn-primary btn-block" disabled={!canRun} onClick={apply}>
           {busy ? `转换中 ${elapsed}s（约 2-4 分钟）` : out ? '再转一次' : '开始转换'}
         </button>
+        {busy && <TaskProgressBar progress={taskProgress.progress} onCancel={taskProgress.cancel} />}
         <div className="hint">全部处理在本机完成 · 结果自动存入素材库</div>
         {note && <div className="ok">{note}</div>}
         {error && <div className="err">{error}</div>}

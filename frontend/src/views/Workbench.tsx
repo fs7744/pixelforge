@@ -6,6 +6,7 @@ import { RefPicker } from '../RefPicker'
 import { Splitter } from '../split'
 import TextTaskPanel from '../TextTaskPanel'
 import ThreeViewBoard, { type BoardHandle } from '../ThreeViewBoard'
+import { newTaskId, TaskProgressBar, useTaskProgress } from '../useTaskProgress'
 
 type Props = { onSendToPost: (asset: Asset) => void }
 
@@ -255,6 +256,8 @@ export default function Workbench({ onSendToPost }: Props) {
   const [spriteProg, setSpriteProg] = useState<{ i: number; total: number; pose: string } | null>(null)
   const [spriteFrames, setSpriteFrames] = useState<Record<number, Asset>>({})
   const spriteCancel = useRef(false)
+  // 生成进度（SSE）+ 取消：单次 40 步 2-4 分钟，转圈不如给步数
+  const taskProgress = useTaskProgress()
   // 生成底色。默认「中性灰」而不是绿幕：实测模型声明 #00FF00 会画成薄荷绿
   // [90,199,126] + 径向渐变，还会把绿染到角色边缘（内圈偏底色像素 76.5% vs
   // 中性灰 33.3%）。数据见 pipelines/backdrop.py。
@@ -420,6 +423,8 @@ export default function Workbench({ onSendToPost }: Props) {
     }
     setBusy(true)
     setError('')
+    const taskId = newTaskId()
+    taskProgress.start(taskId)
     try {
       // 有参考图 = 参考图生成（图生图）：Z-Image 没有参考图输入，后端会自动改走
       // Qwen-Image-Edit。首图是主参考，其余作补充。
@@ -435,6 +440,7 @@ export default function Workbench({ onSendToPost }: Props) {
               n,
               seed: seed.trim() ? Number(seed) : null,
               refAssetIds,
+              taskId,
             },
             refItems.map((r) => r.file),
           )
@@ -449,6 +455,7 @@ export default function Workbench({ onSendToPost }: Props) {
             seed: seed.trim() ? Number(seed) : null,
             templateId: tplId,
             style: effectiveStyle,
+            taskId,
           })
       setResults((prev) => [...data.images, ...prev])
       setMeta(data.meta)
@@ -457,6 +464,7 @@ export default function Workbench({ onSendToPost }: Props) {
       setError(e.message || String(e))
     } finally {
       setBusy(false)
+      taskProgress.stop()
     }
   }
 
@@ -486,6 +494,8 @@ export default function Workbench({ onSendToPost }: Props) {
     setSpriteBusy(true)
     setError('')
     spriteCancel.current = false
+    const taskId = newTaskId()
+    taskProgress.start(taskId)
     try {
       const targets = only == null ? list.map((_, i) => i) : [only]
       for (const i of targets) {
@@ -504,6 +514,7 @@ export default function Workbench({ onSendToPost }: Props) {
             width,
             height,
             backdrop,
+            taskId,
           },
           refFile,
         )
@@ -516,6 +527,7 @@ export default function Workbench({ onSendToPost }: Props) {
     } finally {
       setSpriteProg(null)
       setSpriteBusy(false)
+      taskProgress.stop()
     }
   }
 
@@ -1093,6 +1105,9 @@ export default function Workbench({ onSendToPost }: Props) {
                   : '生成正视图'
                 : '生成'}
           </button>
+        )}
+        {(busy || boardState.busy) && (
+          <TaskProgressBar progress={taskProgress.progress} onCancel={taskProgress.cancel} />
         )}
         {isThreeView && (
           <div className="hint">

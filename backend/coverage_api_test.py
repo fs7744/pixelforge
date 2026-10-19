@@ -11,10 +11,12 @@
 
 用法：python backend/coverage_api_test.py（自动把仓库根加进 sys.path）
 """
+import atexit
 import inspect
 import io
 import json
 import os
+import signal
 import sys
 import zipfile
 from pathlib import Path
@@ -60,6 +62,49 @@ def png(img, fmt="PNG"):
 def remember(item):
     if item and item.get("id"):
         created.append(item["id"])
+
+
+_cleanup_done = False
+
+
+def cleanup_assets(verbose: bool = False) -> None:
+    """删测试资产：登记表 + 快照差集。
+
+    正常收尾与异常退出共用——测试中途挂死（SSE 流、GPU 卡住）时也要清，
+    否则库会被跑胖几百张。atexit 覆盖 SystemExit；SIGTERM 处理器把信号
+    转成 SystemExit，让 atexit 有机会执行（Linux CI 有效；Windows 的
+    强杀进程无法拦截，那种情况按时间戳手工清）。
+    """
+    global _cleanup_done
+    if _cleanup_done:
+        return
+    _cleanup_done = True
+    removed = 0
+    for aid in created:
+        try:
+            if client.delete(f"/api/assets/{aid}").status_code == 200:
+                removed += 1
+        except Exception:
+            pass
+    if verbose:
+        check("测试资产已清理", removed == len(created), f"{removed}/{len(created)}")
+    try:
+        leaked = {a["id"] for a in storage.list_assets()} - _baseline_ids - set(created)
+    except Exception:
+        leaked = set()
+    leaked_removed = 0
+    for aid in leaked:
+        try:
+            if client.delete(f"/api/assets/{aid}").status_code == 200:
+                leaked_removed += 1
+        except Exception:
+            pass
+    if verbose:
+        check("快照兜底无泄漏", leaked_removed == len(leaked), f"{leaked_removed}/{len(leaked)}")
+
+
+atexit.register(cleanup_assets)
+signal.signal(signal.SIGTERM, lambda *_: sys.exit(143))
 
 
 # ---------- 造图 ----------
@@ -1336,18 +1381,59 @@ check("启动恢复：running → failed", _n >= 1 and _st2["steps"][1]["status"
       f"recovered={_n}")
 _p.unlink(missing_ok=True)
 
-print("== 清理测试资产 ==")
-removed = 0
-for aid in created:
-    if client.delete(f"/api/assets/{aid}").status_code == 200:
-        removed += 1
-check("测试资产已清理", removed == len(created), f"{removed}/{len(created)}")
+print("== 进度总线 / SSE / 取消（移植自 FrameBaker 的队列+广播）==")
+from backend.app import progress as prog_mod  # noqa: E402
 
-# 快照兜底：登记表漏掉的多图响应产物在这一并清掉
-leaked = {a["id"] for a in storage.list_assets()} - _baseline_ids - set(created)
-leaked_removed = sum(1 for aid in leaked
-                     if client.delete(f"/api/assets/{aid}").status_code == 200)
-check("快照兜底无泄漏", leaked_removed == len(leaked), f"{leaked_removed}/{len(leaked)}")
+_tid = prog_mod.register()
+prog_mod.report(_tid, 3, 40, "第 3/40 步")
+_q = prog_mod.subscribe(_tid)
+_first = _q.get_nowait()
+check("订阅即补发当前进度", _first["type"] == "progress" and _first["step"] == 3
+      and _first["total"] == 40, str(_first))
+prog_mod.report(_tid, 40, 40, "第 40/40 步")
+_second = _q.get_nowait()
+check("report 推送增量事件", _second["step"] == 40, str(_second))
+prog_mod.finish(_tid, ok=True)
+_done_ev = _q.get_nowait()
+check("finish 发 done 终态", _done_ev["type"] == "done", str(_done_ev))
+prog_mod.unsubscribe(_tid, _q)
+
+_tid2 = prog_mod.register()
+check("cancel 已注册任务", prog_mod.cancel(_tid2) is True)
+try:
+    prog_mod.check_cancel(_tid2)
+    _cancel_raised = False
+except prog_mod.CancelledError:
+    _cancel_raised = True
+check("取消后 check_cancel 抛 CancelledError", _cancel_raised)
+check("cancel 已终态任务返回 False", prog_mod.cancel(_tid) is False)
+prog_mod.finish(_tid2, ok=False, error="已取消")  # 真实流程里由 guarded 收尾
+check("sweep 清理终态任务", prog_mod.sweep(ttl=-1) >= 2)
+
+# SSE 端点：register→finish 后拉流，应至少收到 done 事件
+_tid3 = prog_mod.register()
+prog_mod.report(_tid3, 1, 9, "第 1/9 步")
+prog_mod.finish(_tid3, ok=True)
+_r = client.get(f"/api/tasks/{_tid3}/stream")
+_events = []
+for _line in _r.text.splitlines():
+    if _line.startswith("data: "):
+        try:
+            _events.append(json.loads(_line[6:]))
+        except Exception:
+            pass
+check("SSE 流返回进度事件", _r.status_code == 200
+      and any(e["type"] == "progress" for e in _events)
+      and any(e["type"] == "done" for e in _events), f"{len(_events)} events")
+check("SSE 未知任务 → 404", client.get("/api/tasks/nosuchtask999/stream").status_code == 404)
+check("取消端点：不存在任务 ok=False",
+      client.post("/api/tasks/nosuchtask999/cancel").json().get("ok") is False)
+_tid4 = prog_mod.register()
+_r = client.post(f"/api/tasks/{_tid4}/cancel")
+check("取消端点：已注册任务 ok=True", _r.status_code == 200 and _r.json().get("ok") is True)
+
+print("== 清理测试资产 ==")
+cleanup_assets(verbose=True)
 
 print(f"\n结果：{ok} 通过 / {fail} 失败")
 raise SystemExit(1 if fail else 0)

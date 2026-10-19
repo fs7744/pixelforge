@@ -4,6 +4,7 @@ import { RefPicker } from '../RefPicker'
 import { StyleChip } from './Workbench'
 import { openPreview } from '../Preview'
 import { Splitter } from '../split'
+import { newTaskId, TaskProgressBar, useTaskProgress } from '../useTaskProgress'
 
 type Props = { incoming?: Asset | null }
 
@@ -60,6 +61,7 @@ export default function PostProcess({ incoming }: Props) {
   const [frames, setFrames] = useState<Asset[]>([])
   const [index, setIndex] = useState<any>(null)
   const [busy, setBusy] = useState(false)
+  const taskProgress = useTaskProgress()
   const [error, setError] = useState('')
   const [note, setNote] = useState('')
   const [over, setOver] = useState(false)
@@ -137,6 +139,10 @@ export default function PostProcess({ incoming }: Props) {
     setNote('')
     setOut(null)
     setFrames([])
+    // 只有 AI 管线有逐步进度；确定性管线秒级完成，不占 SSE 连接
+    const aiRun = isAiPipeline(pipeline, wmMode)
+    const taskId = aiRun ? newTaskId() : ''
+    if (aiRun) taskProgress.start(taskId)
     try {
       if (pipeline === 'matte') {
         const res = await api.matte(file, tolerance, feather)
@@ -177,6 +183,7 @@ export default function PostProcess({ incoming }: Props) {
         fd.append('times', String(seamTimes))
         fd.append('blend', '16')
         if (aiSeed) fd.append('seed', aiSeed)
+        if (taskId) fd.append('taskId', taskId)
         const res = await fetch('/api/pipeline/seamless/ai', { method: 'POST', body: fd }).then((r) => r.json())
         if (!res.asset) throw new Error(res.meta?.reason || res.detail || 'AI 延展失败')
         setOut(res.asset)
@@ -187,6 +194,7 @@ export default function PostProcess({ incoming }: Props) {
         fd.append('file', file)
         fd.append('style', restyleId)
         if (aiSeed) fd.append('seed', aiSeed)
+        if (taskId) fd.append('taskId', taskId)
         const res = await fetch('/api/pipeline/restyle', { method: 'POST', body: fd }).then((r) => r.json())
         if (!res.asset) throw new Error(res.meta?.reason || res.detail || '画风重统一失败')
         setOut(res.asset)
@@ -200,6 +208,7 @@ export default function PostProcess({ incoming }: Props) {
         const fd = new FormData()
         fd.append('file', file)
         if (aiSeed) fd.append('seed', aiSeed)
+        if (taskId) fd.append('taskId', taskId)
         const res = await fetch('/api/pipeline/watermark/ai', { method: 'POST', body: fd }).then((r) => r.json())
         if (!res.asset) throw new Error(res.meta?.reason || res.detail || 'AI 去水印失败')
         setOut(res.asset)
@@ -226,6 +235,7 @@ export default function PostProcess({ incoming }: Props) {
       setError(e.message || String(e))
     } finally {
       setBusy(false)
+      if (aiRun) taskProgress.stop()
     }
   }
 
@@ -633,6 +643,7 @@ export default function PostProcess({ incoming }: Props) {
         <button className="btn btn-primary btn-block" disabled={!file || busy} onClick={apply}>
           {busy ? (isAiPipeline(pipeline, wmMode) ? 'AI 处理中（数分钟）' : '处理中') : '应用管线'}
         </button>
+        {busy && <TaskProgressBar progress={taskProgress.progress} onCancel={taskProgress.cancel} />}
         <div className="hint">全部处理在本机完成 · 原图不上传云端</div>
         {note && <div className="ok">{note}</div>}
         {error && <div className="err">{error}</div>}

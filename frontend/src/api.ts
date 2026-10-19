@@ -166,6 +166,9 @@ export const api = {
   health: () => fetch('/api/health').then(json),
   /** 运行环境体检：依赖 / GPU / 模型底座逐项检查，detail 带修复命令 */
   doctor: (): Promise<DoctorReport> => fetch('/api/doctor').then(json),
+  /** 取消任务：provider 下一步回调抛 CancelledError 中止推理 */
+  cancelTask: (id: string) =>
+    fetch(`/api/tasks/${id}/cancel`, { method: 'POST' }).then(json),
   templates: () => fetch('/api/templates').then(json),
   styles: () => fetch('/api/styles').then(json),
   providers: () => fetch('/api/providers').then(json),
@@ -188,6 +191,8 @@ export const api = {
     n: number
     templateId?: string
     style?: string
+    /** 进度总线任务 id：传了才能订阅 SSE 进度与取消 */
+    taskId?: string
   }) =>
     fetch('/api/generate', {
       method: 'POST',
@@ -207,6 +212,7 @@ export const api = {
       seed?: number | null
       n?: number
       refAssetIds?: string[]
+      taskId?: string
     },
     files: File[] = [],
   ) => {
@@ -221,6 +227,7 @@ export const api = {
     fd.append('n', String(payload.n ?? 1))
     if (payload.seed != null) fd.append('seed', String(payload.seed))
     if (payload.refAssetIds?.length) fd.append('refAssetIds', payload.refAssetIds.join(','))
+    if (payload.taskId) fd.append('taskId', payload.taskId)
     files.forEach((f) => fd.append('refs', f))
     return fetch('/api/generate/ref', { method: 'POST', body: fd }).then(json)
   },
@@ -234,6 +241,7 @@ export const api = {
     width: number
     height: number
     maxSide?: number
+    taskId?: string
   }) =>
     fetch('/api/pipeline/threeview', {
       method: 'POST',
@@ -253,6 +261,7 @@ export const api = {
     maxSide?: number
     baseAssetId?: string
     viewAssetIds?: string[]
+    taskId?: string
   }) =>
     fetch('/api/pipeline/threeview/step', {
       method: 'POST',
@@ -319,6 +328,7 @@ export const api = {
     height?: number
     /** 生成时铺什么底色；不传则后端默认「中性灰」（比绿幕干净，见 /backdrops） */
     backdrop?: string
+    taskId?: string
   }, file?: File | null) => {
     const fd = new FormData()
     fd.append('pose', payload.pose)
@@ -332,6 +342,7 @@ export const api = {
     if (payload.width) fd.append('width', String(payload.width))
     if (payload.height) fd.append('height', String(payload.height))
     if (payload.backdrop) fd.append('backdrop', payload.backdrop)
+    if (payload.taskId) fd.append('taskId', payload.taskId)
     if (file) fd.append('file', file)
     return fetch('/api/pipeline/sprite/frame', { method: 'POST', body: fd }).then(json)
   },
@@ -362,6 +373,7 @@ export const api = {
       seed?: number | null
       maxSide?: number
       pixelize?: boolean
+      taskId?: string
     },
     file?: File | null,
   ) => {
@@ -372,6 +384,7 @@ export const api = {
     if (payload.seed != null) fd.append('seed', String(payload.seed))
     if (payload.maxSide) fd.append('maxSide', String(payload.maxSide))
     fd.append('pixelize', String(payload.pixelize ?? true))
+    if (payload.taskId) fd.append('taskId', payload.taskId)
     if (file) fd.append('file', file)
     return fetch('/api/pipeline/restyle', { method: 'POST', body: fd }).then(json)
   },
@@ -406,6 +419,7 @@ export const api = {
       colors?: number
       /** keep 保留原图 / green 绿幕 / alpha 透明（生成时就要定，改了得重生成） */
       background?: string
+      taskId?: string
     },
     file?: File | null,
   ) => {
@@ -419,6 +433,7 @@ export const api = {
     if (payload.grid) fd.append('grid', String(payload.grid))
     if (payload.colors) fd.append('colors', String(payload.colors))
     fd.append('background', payload.background || 'keep')
+    if (payload.taskId) fd.append('taskId', payload.taskId)
     if (file) fd.append('file', file)
     return fetch('/api/pipeline/char-pixel', { method: 'POST', body: fd }).then(json)
   },

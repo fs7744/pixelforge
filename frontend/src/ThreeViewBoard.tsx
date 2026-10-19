@@ -9,6 +9,7 @@ import {
 } from 'react'
 import { api, Asset } from './api'
 import { openPreview } from './Preview'
+import { newTaskId, TaskProgressBar, useTaskProgress } from './useTaskProgress'
 
 /**
  * 三视图流程画布。
@@ -145,6 +146,7 @@ const ThreeViewBoard = forwardRef<BoardHandle, Props>(function ThreeViewBoard(
   }, [view])
 
   const busy = STEPS.some((s) => nodes[s.key].status === 'running')
+  const taskProgress = useTaskProgress()
 
   const fit = useCallback(() => {
     const el = wrapRef.current
@@ -262,6 +264,11 @@ const ThreeViewBoard = forwardRef<BoardHandle, Props>(function ThreeViewBoard(
         key === 'front' ? ['side', 'back', 'strip'] : key === 'strip' ? [] : ['strip']
 
       busyRef.current = true
+      // 三视图的 front/side/back 都是 2-4 分钟的生成：订阅进度并可取消；
+      // strip 是本地拼板（毫秒级），不占 SSE
+      const isAiStep = key !== 'strip'
+      const taskId = isAiStep ? newTaskId() : undefined
+      if (taskId) taskProgress.start(taskId)
       setNodes((prev) => {
         const next = { ...prev }
         invalidate.forEach((k) => {
@@ -288,6 +295,7 @@ const ThreeViewBoard = forwardRef<BoardHandle, Props>(function ThreeViewBoard(
         height: p.height,
         steps: p.steps,
         cfg: p.cfg,
+        taskId,
       }
       const body =
         key === 'strip'
@@ -318,9 +326,10 @@ const ThreeViewBoard = forwardRef<BoardHandle, Props>(function ThreeViewBoard(
         }))
       } finally {
         busyRef.current = false
+        if (taskId) taskProgress.stop()
       }
     },
-    [onAsset],
+    [onAsset, taskProgress],
   )
 
   useImperativeHandle(ref, () => ({ start: () => void runStep('front') }), [runStep])
@@ -403,6 +412,13 @@ const ThreeViewBoard = forwardRef<BoardHandle, Props>(function ThreeViewBoard(
       <div className="tv-hint">
         拖空白处平移 · 滚轮缩放 · 拖节点标题移动 · 单步不满意的直接重跑
       </div>
+
+      {/* 生成中浮在画布底部：步数进度和取消按钮（三视图每步 2-4 分钟） */}
+      {busy && (
+        <div className="tv-progress">
+          <TaskProgressBar progress={taskProgress.progress} onCancel={taskProgress.cancel} />
+        </div>
+      )}
 
       <div
         className="tv-world"

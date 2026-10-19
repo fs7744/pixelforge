@@ -78,16 +78,20 @@ async def run_edit(
     seed: Optional[int] = None,
     model: Optional[str] = None,
     max_side: int = 1024,
+    task_id: Optional[str] = None,
 ) -> Tuple[Image.Image, Dict[str, Any]]:
     """对单张图执行一次 AI 编辑，返回（结果图, meta）。
 
     meta 含 model/steps/seed/instruction，前端可展示、可复现。
+    task_id：进度总线任务 id（SSE 推送步进 + 支持取消），None 不上报。
     """
+    from .. import progress as progress_mod
     from ..providers.diffusers_local import DiffusersProvider
 
     model_id = resolve_edit_model(model)
     work, orig = _fit(image.convert("RGB"), max_side)
     provider = DiffusersProvider({"model": model_id})
+    progress_mod.report(task_id, 0, 1, "AI 编辑中（加载模型）")
     res = await provider.generate(
         prompt=instruction,
         width=work.width,
@@ -95,6 +99,7 @@ async def run_edit(
         steps=steps,
         seed=seed,
         ref=work,
+        task_id=task_id,
     )
     out = res.images[0].convert("RGB")
     if out.size != orig:
@@ -129,6 +134,7 @@ async def remove_watermark_ai(
     seed: Optional[int] = None,
     model: Optional[str] = None,
     max_side: int = 1024,
+    task_id: Optional[str] = None,
 ) -> Tuple[Image.Image, Dict[str, Any]]:
     """AI 去水印：指令式重绘覆盖区域，按周围内容补全。
 
@@ -136,7 +142,8 @@ async def remove_watermark_ai(
     本路不需要掩码，适合 AI 出图自带的、拿不到 alpha 的合成水印。
     """
     out, meta = await run_edit(
-        img, WATERMARK_PROMPT, steps=steps, seed=seed, model=model, max_side=max_side)
+        img, WATERMARK_PROMPT, steps=steps, seed=seed, model=model, max_side=max_side,
+        task_id=task_id)
     meta["pipeline"] = "watermark_ai"
     return out, meta
 
@@ -170,6 +177,7 @@ async def extend_horizontal_ai(
     seed: Optional[int] = None,
     model: Optional[str] = None,
     max_side: int = 1024,
+    task_id: Optional[str] = None,
 ) -> Tuple[Image.Image, Dict[str, Any]]:
     """AI 左右延展：两侧补中性色画布 → outpainting → 原图像素贴回 + 接缝交叉淡化。
 
@@ -191,7 +199,8 @@ async def extend_horizontal_ai(
     canvas.paste(src, (pad, 0))
 
     out, meta = await run_edit(
-        canvas, _extend_prompt(times), steps=steps, seed=seed, model=model, max_side=max_side)
+        canvas, _extend_prompt(times), steps=steps, seed=seed, model=model,
+        max_side=max_side, task_id=task_id)
 
     # 接缝交叉淡化 + 原图内部贴回：
     # 指令要求不动原区域，但模型边缘未必严丝合缝，这里把接缝带（±b 像素）
@@ -270,6 +279,7 @@ async def restyle(
     model: Optional[str] = None,
     max_side: int = 1024,
     pixelize: bool = True,
+    task_id: Optional[str] = None,
 ) -> Tuple[Image.Image, Dict[str, Any]]:
     """画风重统一：把已有资产/旧帧重绘到选定画风。
 
@@ -285,7 +295,8 @@ async def restyle(
     if style is None:
         raise ValueError(f"未知画风: {style_id}")
     out, meta = await run_edit(
-        img, _restyle_prompt(style), steps=steps, seed=seed, model=model, max_side=max_side)
+        img, _restyle_prompt(style), steps=steps, seed=seed, model=model,
+        max_side=max_side, task_id=task_id)
     px = style.get("pixelize")
     if px and pixelize:
         out, px_meta = pixelize_pipe.pixelize(

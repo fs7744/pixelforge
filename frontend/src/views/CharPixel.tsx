@@ -3,6 +3,7 @@ import { api, Asset, AssetFacets, CharPixelLevel } from '../api'
 import { RefPicker } from '../RefPicker'
 import { openPreview } from '../Preview'
 import { Splitter } from '../split'
+import { newTaskId, TaskProgressBar, useTaskProgress } from '../useTaskProgress'
 
 type Props = {
   incoming?: Asset | null
@@ -44,6 +45,7 @@ export default function CharPixel({ incoming }: Props) {
   const [shots, setShots] = useState<Record<string, Asset>>({})
   const [history, setHistory] = useState<Run[]>([])
   const [busy, setBusy] = useState(false)
+  const taskProgress = useTaskProgress()
   const [repixelBusy, setRepixelBusy] = useState(false)
   const [elapsed, setElapsed] = useState(0)
   const [split, setSplit] = useState(50)
@@ -153,6 +155,8 @@ export default function CharPixel({ incoming }: Props) {
     setBusy(true)
     clearResult()
     const t0 = performance.now()
+    const taskId = newTaskId()
+    taskProgress.start(taskId)
     try {
       const res = await api.charPixel(
         {
@@ -165,6 +169,7 @@ export default function CharPixel({ incoming }: Props) {
           grid,
           colors,
           background: bg,
+          taskId,
         },
         src.assetId ? null : file,
       )
@@ -191,6 +196,7 @@ export default function CharPixel({ incoming }: Props) {
       setError(e.message || String(e))
     } finally {
       setBusy(false)
+      taskProgress.stop()
     }
   }
 
@@ -365,6 +371,7 @@ export default function CharPixel({ incoming }: Props) {
         <button className="btn btn-primary btn-block" disabled={!src || busy} onClick={apply}>
           {busy ? `生成中 ${elapsed}s（约 2-4 分钟）` : out ? '再生成一次' : '生成像素角色'}
         </button>
+        {busy && <TaskProgressBar progress={taskProgress.progress} onCancel={taskProgress.cancel} />}
         <div className="hint">AI 重绘（40 步）+ 本地像素化 · 结果自动存入素材库</div>
         {note && <div className="ok">{note}</div>}
         {error && <div className="err">{error}</div>}

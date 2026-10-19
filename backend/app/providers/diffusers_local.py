@@ -28,6 +28,7 @@ from typing import Any, Dict, Optional
 
 from .base import BaseProvider, ProviderResult
 from ..config import resolve_path
+from .. import progress as progress_mod
 
 _CACHE: Dict[str, Any] = {}
 _CAPS: Dict[str, Dict[str, Any]] = {}
@@ -551,7 +552,8 @@ class DiffusersProvider(BaseProvider):
     def _run_wan(self, model_id: str, prompt: str, negative: str,
                  width: int, height: int, steps: Optional[int],
                  seed: Optional[int], generator: Any,
-                 ref: Optional[Any], num_frames: int, fps: int, max_side: int):
+                 ref: Optional[Any], num_frames: int, fps: int, max_side: int,
+                 task_id: Optional[str] = None):
         """图生视频：参考图 + 动作提示词 → 帧序列（PIL 列表）。
 
         - num_frames 必须是 4k+1（Wan 时序 VAE 的要求），内部向下取整；
@@ -590,6 +592,8 @@ class DiffusersProvider(BaseProvider):
             # Wan 的 I2V 管线默认 output_type="np"（返回 ndarray），不是 "pil"。
             # 显式要 PIL：下游统一按 Image 处理，少一层 numpy 往返也少一处错位风险。
             output_type="pil",
+            # 步进回调：30 步的视频生成是全场最长的等待，进度与取消都靠它
+            callback_on_step_end=progress_mod.make_step_callback(task_id, use_steps),
         )
         imgs = _frames_to_pil(out.frames)
         return imgs, {
@@ -846,7 +850,8 @@ class DiffusersProvider(BaseProvider):
         return module
 
     def _run_zimage(self, model_id: str, prompt: str, width: int, height: int,
-                    steps: Optional[int], seed: Optional[int], generator: Any, n: int):
+                    steps: Optional[int], seed: Optional[int], generator: Any, n: int,
+                    task_id: Optional[str] = None):
         """Z-Image 文生图：8 次 DiT 前向、CFG 固定 0、1024² 原生分辨率。
 
         注意：
@@ -870,6 +875,9 @@ class DiffusersProvider(BaseProvider):
                 height=h,
                 width=w,
                 generator=generator,
+                # 步进回调：SSE 进度 + 取消检查（diffusers 每步结束调一次）
+                callback_on_step_end=progress_mod.make_step_callback(
+                    task_id, use_steps, label=f"第 {i + 1} 张"),
             )
             images.append(out.images[0].convert("RGBA"))
             if generator is not None and seed is not None:
@@ -880,7 +888,7 @@ class DiffusersProvider(BaseProvider):
     def _run_qwen_edit(self, model_id: str, prompt: str, negative: str,
                        width: int, height: int, steps: Optional[int],
                        seed: Optional[int], generator: Any, n: int,
-                       refs: Optional[Any] = None):
+                       refs: Optional[Any] = None, task_id: Optional[str] = None):
         """Qwen-Image-Edit 指令式编辑：参考图（可多张）+ 中文指令 → 编辑图。
 
         与 txt2img 的本质区别：prompt 是「编辑指令」而非「画面描述」。
@@ -928,6 +936,10 @@ class DiffusersProvider(BaseProvider):
                 true_cfg_scale=4.0,
                 guidance_scale=1.0,
                 generator=generator,
+                # 步进回调：SSE 进度 + 取消检查（40 步里每一步都报，长任务的
+                # 进度条就靠它；取消时抛 CancelledError 中止推理）
+                callback_on_step_end=progress_mod.make_step_callback(
+                    task_id, use_steps, label=f"第 {i + 1} 张"),
             )
             images.append(out.images[0].convert("RGBA"))
             if generator is not None and seed is not None:
@@ -939,7 +951,8 @@ class DiffusersProvider(BaseProvider):
 
     def _run(self, model_id: str, prompt: str, negative: str, width: int, height: int,
              steps: int, cfg: float, seed: Optional[int], n: int,
-             ref: Optional[Any] = None, refs: Optional[Any] = None):
+             ref: Optional[Any] = None, refs: Optional[Any] = None,
+             task_id: Optional[str] = None):
         torch = _require_torch()
 
         # 先看显存够不够，再决定要不要让用户干等：桌面程序占着显存时，模型会被
@@ -965,11 +978,12 @@ class DiffusersProvider(BaseProvider):
                     "（会自动改用 Qwen-Image-Edit）或下载编辑底座。"
                 )
             images, meta = self._run_zimage(model_id, prompt, width, height,
-                                            steps, seed, generator, n)
+                                            steps, seed, generator, n, task_id=task_id)
         elif family == "qwen_edit":
             images, meta = self._run_qwen_edit(model_id, prompt, negative, width, height,
                                                steps, seed, generator, n,
-                                               refs=_normalize_refs(ref, refs))
+                                               refs=_normalize_refs(ref, refs),
+                                               task_id=task_id)
         elif family == "wan":
             raise RuntimeError(
                 "Wan 是视频底座，请走 generate_video()（参考图 + 提示词 → 帧序列），"
@@ -994,6 +1008,7 @@ class DiffusersProvider(BaseProvider):
         n: int = 1,
         ref=None,
         refs: Optional[Any] = None,
+        task_id: Optional[str] = None,
     ) -> ProviderResult:
         # 入口先卡一次：缺 torch 时直接把安装指引抛给前端，
         # 而不是等 _run 里 import 出一句光秃秃的 "No module named 'torch'"
@@ -1023,10 +1038,16 @@ class DiffusersProvider(BaseProvider):
             # 蒸馏模型只需极少步数：Z-Image 9 步（8 次前向）、
             # Qwen-Image-Edit 40 步（非蒸馏）；给 28 步纯属浪费
             steps = 9 if family == "zimage" else 40
+        # 取消检查点：排队等锁之前 + 拿到锁之后。模型加载（fp8 量化可达
+        # 十几分钟）和文本编码阶段无法中断——它们不在 diffusers 的步进
+        # 回调里，只能等进入采样后的第一步。
+        progress_mod.check_cancel(task_id)
         async with _LOCK:
+            progress_mod.check_cancel(task_id)
             images, meta = await asyncio.to_thread(
                 self._run, model_id, prompt, self.cfg.get("negativePrompt", ""),
                 width, height, steps, cfg, seed, n, ref, all_refs or None,
+                task_id,
             )
         status = _torch_status()
         out_meta = {"provider": "diffusers", "model": model_id, "device": status.get("device"),
@@ -1047,6 +1068,7 @@ class DiffusersProvider(BaseProvider):
         num_frames: int = 81,
         fps: int = 24,
         max_side: int = 832,
+        task_id: Optional[str] = None,
     ) -> ProviderResult:
         """图生视频：参考图 + 提示词 → 帧序列（ProviderResult.images = 帧）。
 
@@ -1066,11 +1088,13 @@ class DiffusersProvider(BaseProvider):
         if seed is not None:
             generator = torch.Generator(
                 device="cuda" if torch.cuda.is_available() else "cpu").manual_seed(int(seed))
+        progress_mod.check_cancel(task_id)
         async with _LOCK:
+            progress_mod.check_cancel(task_id)
             images, meta = await asyncio.to_thread(
                 self._run_wan, model_id, prompt, self.cfg.get("negativePrompt", ""),
                 width, height, steps, seed, generator, ref,
-                int(num_frames), int(fps), int(max_side),
+                int(num_frames), int(fps), int(max_side), task_id,
             )
         status = _torch_status()
         out_meta = {"provider": "diffusers", "model": model_id,

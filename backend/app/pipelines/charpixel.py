@@ -258,6 +258,7 @@ async def run(
     grid: Optional[int] = None,
     colors: Optional[int] = None,
     background: str = "keep",
+    task_id: Optional[str] = None,
 ) -> Tuple[Image.Image, Image.Image, Dict[str, Any]]:
     """照片 → 像素角色，返回（AI 原稿, 像素化成品, meta）。
 
@@ -270,7 +271,8 @@ async def run(
     bg = get_background(background)
     instruction = build_prompt(level, prompt)
     draft, meta = await ai_edit.run_edit(
-        img, instruction, steps=steps, seed=seed, model=model, max_side=max_side)
+        img, instruction, steps=steps, seed=seed, model=model, max_side=max_side,
+        task_id=task_id)
 
     g = int(grid or level["grid"])
     c = int(colors or level["colors"])

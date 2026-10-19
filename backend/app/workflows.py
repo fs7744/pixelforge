@@ -18,6 +18,7 @@ import numpy as np
 from PIL import Image
 
 from . import storage
+from . import progress as progress_mod
 from .config import DATA_DIR, load_settings, resolve_path
 from .pipelines import matte as matte_pipe
 from .pipelines import resize as resize_pipe
@@ -572,6 +573,11 @@ async def _run_step_locked(run_id: str, step_id: str, overrides: Optional[Dict[s
     step_state.update({"status": "running", "error": "", "startedAt": int(time.time())})
     _save_run(run)
 
+    # 进度总线：前端订阅 /api/tasks/{id}/stream 看「第几步、哪一帧」，
+    # 也可 POST /api/tasks/{id}/cancel 中止（provider 步进回调抛取消）
+    task_id = progress_mod.register((overrides or {}).get("taskId"))
+    progress_mod.report(task_id, 0, 1, f"步骤「{step_state['name']}」开始")
+
     try:
         stype = step_def["type"]
         artifacts: List[str] = []
@@ -619,6 +625,7 @@ async def _run_step_locked(run_id: str, step_id: str, overrides: Optional[Dict[s
                     width=int(step_def.get("width") or pw),
                     height=int(step_def.get("height") or ph),
                     max_side=int(step_def.get("maxSide") or 768),
+                    task_id=task_id,
                 )
                 names = ["三视图拼板", "正视图", "侧视图", "背视图"]
                 for i, img in enumerate([strip, *views]):
@@ -644,7 +651,8 @@ async def _run_step_locked(run_id: str, step_id: str, overrides: Optional[Dict[s
                 async def _one(i: int):
                     async with sem:
                         p = overrides.get("prompt") or _fill(tpl, run, step_def, i)
-                        res = await provider.generate(p, pw, ph, n=1, **gen_kw)
+                        progress_mod.report(task_id, i, total, f"{layers[i] if layers else step_def['name']}")
+                        res = await provider.generate(p, pw, ph, n=1, task_id=task_id, **gen_kw)
                         label = layers[i] if layers else step_def["name"]
                         ids = []
                         for img in res.images:
@@ -703,8 +711,10 @@ async def _run_step_locked(run_id: str, step_id: str, overrides: Optional[Dict[s
                         gen = gen_provider if anchor is None else provider
                         p = prompt if anchor is None else (
                             _fill(edit_tpl, run, step_def, i) if edit_relay else prompt)
+                        progress_mod.report(task_id, i, n, f"动作帧 {i + 1}/{n}")
                         res = await gen.generate(p, pw, ph, n=1,
-                                                 seed=None if seed is None else int(seed) + i, **kw)
+                                                 seed=None if seed is None else int(seed) + i,
+                                                 task_id=task_id, **kw)
                         for img in res.images:
                             artifacts.append(_save_asset(
                                 img, kind="workflow", name=f"{run['id']}-{step_id}-{i:02d}",
@@ -736,7 +746,8 @@ async def _run_step_locked(run_id: str, step_id: str, overrides: Optional[Dict[s
                         meta["relayNote"] = relay_note
                 else:
                     # 一次请求 n 张（无参考图时由模型自行发散姿态）
-                    result = await provider.generate(prompt, pw, ph, n=n, seed=seed, **gen_kw)
+                    result = await provider.generate(prompt, pw, ph, n=n, seed=seed,
+                                                     task_id=task_id, **gen_kw)
                     for i, img in enumerate(result.images):
                         artifacts.append(_save_asset(
                             img, kind="workflow", name=f"{run['id']}-{step_id}-{i:02d}",
@@ -774,6 +785,7 @@ async def _run_step_locked(run_id: str, step_id: str, overrides: Optional[Dict[s
                 num_frames=int(step_def.get("numFrames", 81)),
                 fps=int(step_def.get("fps", 24)),
                 max_side=int(step_def.get("maxSide", 832)),
+                task_id=task_id,
             )
             for i, img in enumerate(res.images):
                 artifacts.append(_save_asset(
@@ -937,11 +949,18 @@ async def _run_step_locked(run_id: str, step_id: str, overrides: Optional[Dict[s
             "finishedAt": int(time.time()),
         })
         _save_run(run)
+        progress_mod.finish(task_id, ok=True)
         return run
 
+    except progress_mod.CancelledError:
+        step_state.update({"status": "failed", "error": "已取消", "finishedAt": int(time.time())})
+        _save_run(run)
+        progress_mod.finish(task_id, ok=False, error="已取消")
+        raise
     except Exception as e:
         step_state.update({"status": "failed", "error": str(e), "finishedAt": int(time.time())})
         _save_run(run)
+        progress_mod.finish(task_id, ok=False, error=str(e))
         raise
 
 

@@ -47,6 +47,7 @@ from typing import Any, Dict, List, Optional, Tuple
 from PIL import Image
 
 from . import matte as matte_pipe
+from .. import progress as progress_mod
 
 # 统一底板色：暗绿 #1B4332（与模板/工作流提示词里的「暗绿色纯色背景」一致）
 DEFAULT_BG = (27, 67, 50)
@@ -404,6 +405,7 @@ async def run_front(
     provider_cfg: Optional[Dict[str, Any]] = None,
     txt2img_model: Optional[str] = None,
     engines: Optional[Dict[str, Any]] = None,
+    task_id: Optional[str] = None,
 ) -> Tuple[Image.Image, Dict[str, Any]]:
     """第一步：正视图（txt2img）。
 
@@ -420,9 +422,10 @@ async def run_front(
     prompt = _view_prompt((subject or "").strip(), "front", sw)
 
     t = time.time()
+    progress_mod.report(task_id, 0, 3, "正视图（文生图）")
     res = await eng["txt"].generate(
         prompt=prompt, width=cw, height=ch, steps=steps,
-        cfg=cfg if cfg is not None else 7.5, seed=seed, n=1)
+        cfg=cfg if cfg is not None else 7.5, seed=seed, n=1, task_id=task_id)
     img = res.images[0].convert("RGB")
     meta: Dict[str, Any] = {
         "view": "front", "name": _VIEW_META["front"]["cn"], "mode": "txt2img",
@@ -454,6 +457,7 @@ async def run_derived(
     provider_cfg: Optional[Dict[str, Any]] = None,
     txt2img_model: Optional[str] = None,
     engines: Optional[Dict[str, Any]] = None,
+    task_id: Optional[str] = None,
 ) -> Tuple[Image.Image, Dict[str, Any]]:
     """第二/三步：侧视图、背视图。
 
@@ -469,13 +473,15 @@ async def run_derived(
                               txt2img_model=txt2img_model)
     cw, ch = cell(width, height)
     t = time.time()
+    step_no = 1 if view == "side" else 2
+    progress_mod.report(task_id, step_no, 3, f"{_VIEW_META[view]['cn']}（编辑底座接力）")
 
     if eng["editModel"]:
         from . import ai_edit
 
         out, emeta = await ai_edit.run_edit(
             base, _view_instruction(view), steps=steps, seed=seed,
-            model=eng["editModel"], max_side=max_side)
+            model=eng["editModel"], max_side=max_side, task_id=task_id)
         return out, {
             "view": view, "name": _VIEW_META[view]["cn"], "mode": "edit",
             "instruction": _view_instruction(view),
@@ -488,7 +494,7 @@ async def run_derived(
     prompt = _view_prompt((subject or "").strip(), view, sw)
     res = await eng["txt"].generate(
         prompt=prompt, width=cw, height=ch, steps=steps,
-        cfg=cfg if cfg is not None else 7.5, seed=seed, n=1)
+        cfg=cfg if cfg is not None else 7.5, seed=seed, n=1, task_id=task_id)
     meta: Dict[str, Any] = {
         "view": view, "name": _VIEW_META[view]["cn"], "mode": "txt2img",
         "prompt": prompt, "steps": res.meta.get("steps"), "seed": seed,
@@ -515,6 +521,7 @@ async def run_three_view(
     provider_id: Optional[str] = None,
     provider_cfg: Optional[Dict[str, Any]] = None,
     txt2img_model: Optional[str] = None,
+    task_id: Optional[str] = None,
 ) -> Tuple[Image.Image, List[Image.Image], Dict[str, Any]]:
     """生成角色三视图。返回（拼板图, [正, 侧, 背], meta）。
 
@@ -530,7 +537,8 @@ async def run_three_view(
                    txt2img_model=txt2img_model)
     kw: Dict[str, Any] = dict(style=style, steps=steps, cfg=cfg, seed=seed,
                               width=width, height=height,
-                              provider_cfg=provider_cfg, engines=eng)
+                              provider_cfg=provider_cfg, engines=eng,
+                              task_id=task_id)
 
     # ---- 帧 1：正视图 ----
     front, fmeta = await run_front(subject, provider_id=provider_id, **kw)

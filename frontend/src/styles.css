@@ -679,3 +679,31 @@ button, input, textarea, select { font-family: inherit; }
   border-radius: 2px; vertical-align: -1px;
   box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.25);
 }
+
+/* ---------- 任务进度（SSE）与取消 ---------- */
+/* 生成 2-4 分钟时给「第 x/y 步 + 已用时长」：转圈只说明「没死」，
+   步数才说明「还要多久」。取消按钮常驻，误点生成不用干等。 */
+.task-progress {
+  display: flex; flex-direction: column; gap: 6px;
+  border: 1px solid var(--line); padding: 8px 10px; margin-top: 8px;
+  background: rgba(255, 255, 255, 0.03);
+}
+.task-progress .bar {
+  height: 4px; background: rgba(255, 255, 255, 0.12); overflow: hidden;
+}
+.task-progress .bar > i {
+  display: block; height: 100%; background: var(--green);
+  transition: width 0.35s ease;
+}
+.task-progress .bar > i.indeterminate {
+  animation: pf-indeterminate 1.2s ease-in-out infinite alternate;
+}
+@keyframes pf-indeterminate {
+  from { opacity: 0.35; }
+  to { opacity: 1; }
+}
+.tv-progress {
+  position: absolute; left: 12px; bottom: 12px; z-index: 6; width: min(420px, 60%);
+  background: rgba(10, 10, 10, 0.92);
+}
+.tv-progress .task-progress { margin-top: 0; border-color: rgba(255,255,255,0.18); }

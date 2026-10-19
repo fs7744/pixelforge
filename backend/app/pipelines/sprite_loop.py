@@ -21,6 +21,7 @@ from PIL import Image
 from . import backdrop as backdrop_pipe
 from . import sheet as sheet_pipe
 from . import sprite as sprite_pipe
+from .. import progress as progress_mod
 
 # 用户没填动作时的兜底（也只用于提示，不写进生成结果）
 DEFAULT_POSES = ["站立", "迈步", "抬手", "落脚"]
@@ -104,6 +105,7 @@ async def run_frame(
     max_side: int = 768,
     engines: Optional[Dict[str, Any]] = None,
     backdrop: str = "neutral",
+    task_id: Optional[str] = None,
 ) -> Tuple[Image.Image, Dict[str, Any]]:
     """生成一帧。有参考图走编辑底座（保外观），没有则退回文生图。
 
@@ -121,8 +123,10 @@ async def run_frame(
     if ref is not None and eng["editModel"]:
         from . import ai_edit
 
+        progress_mod.report(task_id, index, total, f"第 {index + 1}/{total} 帧（编辑底座）")
         out, emeta = await ai_edit.run_edit(
-            ref, inst, steps=steps, seed=seed, model=eng["editModel"], max_side=max_side)
+            ref, inst, steps=steps, seed=seed, model=eng["editModel"], max_side=max_side,
+            task_id=task_id)
         return out, {
             "mode": "edit", "instruction": inst, "pose": pose,
             "index": index, "total": total, "steps": emeta.get("steps"),
@@ -132,9 +136,10 @@ async def run_frame(
 
     sw = style_words(style)
     prompt = pose_prompt(pose, index, total, subject, sw, backdrop)
+    progress_mod.report(task_id, index, total, f"第 {index + 1}/{total} 帧（文生图）")
     res = await eng["txt"].generate(
         prompt=prompt, width=max(64, width // 16 * 16), height=max(64, height // 16 * 16),
-        steps=steps, cfg=7.5, seed=seed, n=1)
+        steps=steps, cfg=7.5, seed=seed, n=1, task_id=task_id)
     meta: Dict[str, Any] = {
         "mode": "txt2img", "prompt": prompt, "pose": pose,
         "index": index, "total": total, "steps": res.meta.get("steps"),

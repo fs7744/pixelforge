@@ -5,6 +5,7 @@
 """
 from __future__ import annotations
 
+import asyncio
 import io
 import json
 import zipfile
@@ -20,6 +21,7 @@ from PIL import Image
 from pydantic import BaseModel, field_validator
 
 from . import doctor as doctor_mod
+from . import progress as progress_mod
 from . import storage, styles, templates
 from .config import (ASSETS_DIR, CHAR_PIXEL_SAMPLES_DIR, DATA_DIR, ROOT,
                      STYLE_SAMPLES_DIR, load_settings, save_settings)
@@ -71,6 +73,25 @@ async def _value_error(request, exc: ValueError):
 
 
 # ---------- 基础 ----------
+async def guarded(task_id: Optional[str], awaitable):
+    """跑一个可能耗时数分钟的任务，终态统一上报进度总线。
+
+    取消要赶在通用 except 前面：CancelledError 也是 Exception 子类，
+    不先拦它会被包装成 502「生成失败」——用户明明取消了，却看到报错。
+    499 是非标准但广泛使用的「客户端关闭请求」语义，前端据此显示「已取消」。
+    """
+    try:
+        result = await awaitable
+    except progress_mod.CancelledError:
+        progress_mod.finish(task_id, ok=False, error="已取消")
+        raise HTTPException(499, "生成已取消")
+    except Exception as e:
+        progress_mod.finish(task_id, ok=False, error=str(e))
+        raise
+    progress_mod.finish(task_id, ok=True)
+    return result
+
+
 @app.get("/api/health")
 async def health():
     s = load_settings()
@@ -85,6 +106,65 @@ async def doctor():
     修复命令。设置页一键体检用这个；启动前的文本自检走 ./start.sh --check。
     """
     return await run_in_threadpool(doctor_mod.run_doctor)
+
+
+# ---------- 任务进度（SSE）与取消 ----------
+@app.get("/api/tasks/{task_id}/stream")
+async def task_stream(task_id: str):
+    """SSE 订阅任务进度（移植自 FrameBaker 的 WS job_progress，换成 HTTP 友好形态）。
+
+    事件为 JSON：``{type: progress|done|error|cancelled, step, total, message,
+    elapsed}``。订阅即补发当前进度，终态事件后自动断开。15s 心跳防代理断连。
+
+    前端习惯「先开流再发请求」（这样第一步进度不会漏），注册会比订阅晚
+    几十毫秒——这里等最多 3 秒，别让正常时序被当成 404。
+    """
+    q = progress_mod.subscribe(task_id)
+    if q is None:
+        for _ in range(30):
+            await asyncio.sleep(0.1)
+            q = progress_mod.subscribe(task_id)
+            if q is not None:
+                break
+    if q is None:
+        raise HTTPException(404, "任务不存在或已结束")
+
+    async def _gen():
+        deadline = asyncio.get_event_loop().time() + 600  # 单流最长 10 分钟
+        try:
+            while True:
+                # 线程安全队列 → async：100ms 轮询足够（进度事件以秒计），
+                # 比 run_in_executor 每次 get 起一个线程轻
+                try:
+                    ev = q.get_nowait()
+                except Exception:
+                    if asyncio.get_event_loop().time() > deadline:
+                        break  # 任务一直不结束也不能让连接永久挂着
+                    await asyncio.sleep(0.1)
+                    continue
+                yield f"data: {json.dumps(ev, ensure_ascii=False)}\n\n"
+                if ev.get("type") in ("done", "error", "cancelled"):
+                    break
+        finally:
+            progress_mod.unsubscribe(task_id, q)
+            progress_mod.sweep()
+
+    return StreamingResponse(
+        _gen(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
+
+
+@app.post("/api/tasks/{task_id}/cancel")
+async def task_cancel(task_id: str):
+    """取消任务：置位取消标志，provider 下一步回调抛 CancelledError 中止推理。
+
+    返回 False（任务不存在或已结束）时前端就当「来不及取消」处理——
+    那一刻任务可能刚好完成，资产已经落库。
+    """
+    ok = progress_mod.cancel(task_id)
+    return {"ok": ok, "message": "已请求取消" if ok else "任务不存在或已结束"}
 
 
 @app.get("/api/templates")
@@ -175,6 +255,9 @@ class GeneratePayload(BaseModel):
     templateId: Optional[str] = None
     # 美术画风 id（见 /api/styles）；空 = 不拼风格词
     style: Optional[str] = None
+    # 进度总线任务 id：前端生成后先订阅 /api/tasks/{id}/stream 再发请求，
+    # 就能看到「第 x 步」实时进度并可取消；不传则不注册（内部调用）
+    taskId: Optional[str] = None
 
 
 @app.get("/api/styles")
@@ -200,8 +283,9 @@ async def generate(payload: GeneratePayload):
     # 没有翻译链路，也不需要负向词合并）
     styled = styles.apply_style(payload.prompt, payload.style)
     effective_prompt = styled["prompt"]
+    task_id = progress_mod.register(payload.taskId)
     try:
-        result = await provider.generate(
+        result = await guarded(task_id, provider.generate(
             prompt=effective_prompt,
             width=payload.width,
             height=payload.height,
@@ -209,7 +293,10 @@ async def generate(payload: GeneratePayload):
             cfg=payload.cfg,
             seed=payload.seed,
             n=payload.n,
-        )
+            task_id=task_id,
+        ))
+    except HTTPException:
+        raise  # 499「已取消」等已经带状态码的，别被下面包装成 502
     except Exception as e:
         raise HTTPException(502, str(e))
 
@@ -246,6 +333,7 @@ async def generate_with_refs(
     n: int = Form(1),
     refAssetIds: str = Form(""),
     refs: Optional[List[UploadFile]] = File(None),
+    taskId: str = Form(""),
 ):
     """参考图生成（图生图）：1–4 张参考图 + 指令 → Qwen-Image-Edit。
 
@@ -283,8 +371,9 @@ async def generate_with_refs(
     styled = styles.apply_style(prompt, style or None)
     w = int(width or images[0].width) // 16 * 16 or 512
     h = int(height or images[0].height) // 16 * 16 or 512
+    task_id = progress_mod.register(taskId or None)
     try:
-        result = await provider.generate(
+        result = await guarded(task_id, provider.generate(
             prompt=styled["prompt"],
             width=w,
             height=h,
@@ -293,7 +382,10 @@ async def generate_with_refs(
             seed=seed,
             n=max(1, min(int(n or 1), 4)),
             refs=images,
-        )
+            task_id=task_id,
+        ))
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(502, str(e))
 
@@ -460,6 +552,7 @@ async def pipeline_sprite_frame(
     height: int = Form(512),
     maxSide: int = Form(768),
     backdrop: str = Form("neutral"),
+    taskId: str = Form(""),
 ):
     """逐帧动作生成：一次一帧，用户填的动作原样进指令。
 
@@ -487,11 +580,13 @@ async def pipeline_sprite_frame(
     else:
         raise HTTPException(400, "逐帧生成需要一张角色参考图（refAssetId 或 file）")
 
-    img, meta = await sprite_loop.run_frame(
+    task_id = progress_mod.register(taskId or None)
+    img, meta = await guarded(task_id, sprite_loop.run_frame(
         ref, pose.strip(), index, max(1, total),
         subject=subject, style=style, steps=steps, seed=seed,
         width=width, height=height, max_side=maxSide, backdrop=backdrop,
-    )
+        task_id=task_id,
+    ))
     item = storage.save_asset(
         img, kind="generated",
         name=f"sprite-{index + 1:02d}-{pose.strip()[:8]}",
@@ -671,11 +766,14 @@ async def pipeline_watermark_ai(
     file: UploadFile = File(...),
     steps: Optional[int] = Form(None),
     seed: Optional[int] = Form(None),
+    taskId: str = Form(""),
 ):
     from .pipelines import ai_edit
 
     img = await _read_image(file)
-    out, meta = await ai_edit.remove_watermark_ai(img, steps=steps, seed=seed)
+    task_id = progress_mod.register(taskId or None)
+    out, meta = await guarded(task_id, ai_edit.remove_watermark_ai(
+        img, steps=steps, seed=seed, task_id=task_id))
     item = storage.save_asset(out, kind="watermark", meta={"pipeline": "watermark_ai", **meta})
     return {"asset": item, "meta": meta}
 
@@ -687,12 +785,14 @@ async def pipeline_seamless_ai(
     blend: int = Form(16),
     steps: Optional[int] = Form(None),
     seed: Optional[int] = Form(None),
+    taskId: str = Form(""),
 ):
     from .pipelines import ai_edit
 
     img = await _read_image(file)
-    out, meta = await ai_edit.extend_horizontal_ai(
-        img, times=times, blend=blend, steps=steps, seed=seed)
+    task_id = progress_mod.register(taskId or None)
+    out, meta = await guarded(task_id, ai_edit.extend_horizontal_ai(
+        img, times=times, blend=blend, steps=steps, seed=seed, task_id=task_id))
     item = storage.save_asset(out, kind="seamless", meta={"pipeline": "seamless_ai", **meta})
     return {"asset": item, "meta": meta}
 
@@ -708,6 +808,7 @@ async def pipeline_restyle(
     maxSide: int = Form(1024),
     # 像素类画风默认自动接像素化；关掉可以先看 AI 重绘的原始结果
     pixelize: bool = Form(True),
+    taskId: str = Form(""),
 ):
     """图片画风转换：一张图 + 目标画风 → 编辑底座按画风重绘。
 
@@ -728,8 +829,10 @@ async def pipeline_restyle(
     else:
         raise ValueError("需要一张待转换的图片（上传 file 或指定 refAssetId）")
 
-    out, meta = await ai_edit.restyle(
-        img, style, steps=steps, seed=seed, max_side=maxSide, pixelize=pixelize)
+    task_id = progress_mod.register(taskId or None)
+    out, meta = await guarded(task_id, ai_edit.restyle(
+        img, style, steps=steps, seed=seed, max_side=maxSide, pixelize=pixelize,
+        task_id=task_id))
     item = storage.save_asset(
         out, kind="restyled",
         name=f"换画风-{meta.get('styleName') or style}",
@@ -780,6 +883,7 @@ async def pipeline_char_pixel(
     colors: Optional[int] = Form(None),
     # 背景处理：keep 保留原图 / green 绿幕 / alpha 透明（绿幕→色键去背）
     background: str = Form("keep"),
+    taskId: str = Form(""),
 ):
     """人物照片 → 像素角色立绘：AI 按档位重绘，再确定性像素化收尾。
 
@@ -798,9 +902,11 @@ async def pipeline_char_pixel(
     else:
         raise ValueError("需要一张人物照片（上传 file 或指定 refAssetId）")
 
-    draft, out, meta = await charpixel.run(
+    task_id = progress_mod.register(taskId or None)
+    draft, out, meta = await guarded(task_id, charpixel.run(
         img, lv["id"], prompt, steps=steps, seed=seed,
-        max_side=maxSide, grid=grid, colors=colors, background=background)
+        max_side=maxSide, grid=grid, colors=colors, background=background,
+        task_id=task_id))
 
     draft_item = storage.save_asset(
         draft, kind="generated", name=f"人物像素化-{lv['short']}-AI原稿",
@@ -858,6 +964,8 @@ class ThreeViewPayload(BaseModel):
     width: int = 512
     height: int = 768
     maxSide: int = 768
+    # 进度总线任务 id（SSE 进度 + 取消）；不传则不注册
+    taskId: Optional[str] = None
 
 
 @app.post("/api/pipeline/threeview")
@@ -870,7 +978,8 @@ async def pipeline_threeview(payload: ThreeViewPayload):
     """
     from .pipelines import threeview as tv_pipe
 
-    strip, views, meta = await tv_pipe.run_three_view(
+    task_id = progress_mod.register(payload.taskId)
+    strip, views, meta = await guarded(task_id, tv_pipe.run_three_view(
         payload.prompt,
         style=payload.style,
         steps=payload.steps,
@@ -879,7 +988,8 @@ async def pipeline_threeview(payload: ThreeViewPayload):
         width=payload.width,
         height=payload.height,
         max_side=payload.maxSide,
-    )
+        task_id=task_id,
+    ))
     labels = ["三视图拼板", "正视图", "侧视图", "背视图"]
     items = []
     for i, img in enumerate([strip, *views]):
@@ -916,6 +1026,8 @@ class ThreeViewStepPayload(BaseModel):
     maxSide: int = 768
     baseAssetId: Optional[str] = None
     viewAssetIds: Optional[List[str]] = None
+    # 进度总线任务 id（SSE 进度 + 取消）；compose 是纯本地步骤，忽略
+    taskId: Optional[str] = None
 
 
 def _load_asset_image(asset_id: str) -> Image.Image:
@@ -969,13 +1081,18 @@ async def pipeline_threeview_step(payload: ThreeViewStepPayload):
                          "cell": [cw, ch], "compose": cmeta}}
 
     if view == "front":
-        img, vmeta = await tv_pipe.run_front(payload.prompt, **kw)
+        task_id = progress_mod.register(payload.taskId)
+        img, vmeta = await guarded(
+            task_id, tv_pipe.run_front(payload.prompt, task_id=task_id, **kw))
     elif view in ("side", "back"):
         if not payload.baseAssetId:
             raise ValueError("生成侧/背视图需要先有正视图（baseAssetId）")
         base = _load_asset_image(payload.baseAssetId)
-        img, vmeta = await tv_pipe.run_derived(
-            view, base, payload.prompt, max_side=payload.maxSide, **kw)
+        task_id = progress_mod.register(payload.taskId)
+        img, vmeta = await guarded(
+            task_id,
+            tv_pipe.run_derived(view, base, payload.prompt, max_side=payload.maxSide,
+                                task_id=task_id, **kw))
     else:
         raise ValueError(
             f"未知步骤：{view}。合法值：front（正视图）/ side（侧视图）/ "
@@ -1121,6 +1238,9 @@ class StepPayload(BaseModel):
     prompt: Optional[str] = None
     n: Optional[int] = None
     artifacts: Optional[List[str]] = None
+    # 进度总线任务 id（SSE 进度 + 取消）；generate/video 步骤会上报，
+    # 纯本地步骤忽略
+    taskId: Optional[str] = None
 
 
 @app.get("/api/workflows")
@@ -1160,6 +1280,8 @@ async def run_single_step(run_id: str, step_id: str, payload: StepPayload):
         return await run_step(run_id, step_id, payload.model_dump(exclude_none=True))
     except KeyError as e:
         raise HTTPException(404, str(e))
+    except progress_mod.CancelledError:
+        raise HTTPException(499, "已取消")
     except RuntimeError as e:
         raise HTTPException(400, str(e))
     except Exception as e:  # pragma: no cover
@@ -1173,6 +1295,8 @@ async def run_workflow_all(run_id: str):
         return await run_all(run_id)
     except KeyError as e:
         raise HTTPException(404, str(e))
+    except progress_mod.CancelledError:
+        raise HTTPException(499, "已取消")
     except Exception as e:  # pragma: no cover
         raise HTTPException(500, str(e))
 
