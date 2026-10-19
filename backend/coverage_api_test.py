@@ -361,6 +361,33 @@ check("推荐数少于画风总数（确实做了收敛）",
       all(len(ids) < len(style_ids) for k, ids in rec.items() if k != "工程"),
       f"{len(style_ids)} 种画风")
 
+print("== 三视图提示词 ==")
+# 背视图指令曾经把示例角色（灰白英短猫武士）的造型写死：后脑纯灰、灰耳廓、
+# 红披风、手中兵器。结果任何角色转背面都会长出红披风。这里守住两条底线：
+# 指令里不许出现具体外观词，外观只以参考图为准。
+from backend.app.pipelines import threeview as tv  # noqa: E402
+
+back_ins = tv._view_instruction("back")
+side_ins = tv._view_instruction("side")
+HARDCODED = ("红", "披风", "灰色", "后脑勺", "耳廓", "兵器", "条纹", "花纹",
+             "武士刀", "猫", "尾巴", "鼻梁", "头发")
+hit = [w for w in HARDCODED if w in back_ins]
+check("背视图指令不写死具体造型", not hit, str(hit))
+check("侧/背指令各不相同", back_ins != side_ins)
+check("编辑指令都以参考图为准", all("参考图" in s for s in (back_ins, side_ins)))
+check("背视图只改视角、不新增部件",
+      "只改变观察角度" in back_ins and "不新增" in back_ins)
+check("背视图禁止凭空添加",
+      "没有的衣物" in back_ins and "一件都不要出现" in back_ins)
+
+p = tv._view_prompt("角色设定：灰白英短猫武士，腰挎武士刀。", "back")
+check("重复的「角色设定：」前缀被去掉", p.count("角色设定：") == 1, p[:40])
+check("结尾句号不重复", "。。" not in p)
+check("三视角提示词各自带视角名",
+      all(tv._VIEW_META[v]["cn"] in tv._view_prompt("测试角色", v) for v in tv.VIEW_ORDER))
+check("三视角都带单角色约束",
+      all("画面中只有一个角色" in tv._view_prompt("测试角色", v) for v in tv.VIEW_ORDER))
+
 print("== 清理测试资产 ==")
 removed = 0
 for aid in created:
