@@ -377,6 +377,68 @@ async def main() -> None:
     assert mid < 20, mid
     print(f"[9f] bezier  → 端点精确 / 中点 {mid:.1f}（线性应为 50）OK")
 
+    # IK 权重：w=0 与纯 FK 完全一致，w=1 命中目标，w=0.5 介于两者之间
+    def _tip(proj, frame, bone="lower", blen=50.0):
+        m = anim_render.bone_world(proj, frame)[bone]
+        a = math.atan2(float(m[1, 0]), float(m[0, 0]))
+        return (m[0, 2] + math.cos(a) * blen, m[1, 2] + math.sin(a) * blen)
+
+    def _with_w(w: float):
+        q = json.loads(json.dumps(ik_proj))
+        q["ik"][0]["keys"][0]["w"] = w
+        return anim_model.normalize(q)
+
+    p0 = _with_w(0.0)
+    fk_only = json.loads(json.dumps(ik_proj))
+    fk_only["ik"] = []
+    fk_only = anim_model.normalize(fk_only)
+    t0, tfk = _tip(p0, 0), _tip(fk_only, 0)
+    assert abs(t0[0] - tfk[0]) < 0.5 and abs(t0[1] - tfk[1]) < 0.5, (t0, tfk)
+    th = _tip(_with_w(0.5), 0)
+    t1 = _tip(_with_w(1.0), 0)
+    d_fk = math.hypot(tfk[0] - 200, tfk[1] - 180)
+    d_half = math.hypot(th[0] - 200, th[1] - 180)
+    assert d_half < d_fk and d_half > 1, (d_fk, d_half)
+    assert math.hypot(t1[0] - 200, t1[1] - 180) < 2
+    print(f"[9g] ik 权重 → w0 与 FK 一致 / w1 命中 / w0.5 距目标 {d_half:.0f}px"
+          f"（FK {d_fk:.0f}px）OK")
+
+    # pole：目标在正下方时，肘部应落在 pole 那一侧（否则会随机翻肘）
+    pole_proj = anim_model.normalize({
+        "id": "abcdef012348", "name": "pole", "canvas": [400, 400], "frames": 1,
+        "bones": [
+            {"id": "root", "parent": None, "x": 100, "y": 100},
+            {"id": "upper", "parent": "root", "x": 140, "y": 100, "len": 60},
+            {"id": "lower", "parent": "upper", "x": 160, "y": 100, "len": 50},
+        ],
+        "ik": [{"id": "ik1", "end": "lower", "chain": 2, "pole": [220, 100],
+                "keys": [{"frame": 0, "x": 140, "y": 180}]}],
+    })
+    wm = anim_render.bone_world(pole_proj, 0)
+    root_xy = (wm["upper"][0, 2], wm["upper"][1, 2])
+    elbow = (wm["lower"][0, 2], wm["lower"][1, 2])
+    # 叉积符号：root→target 与 root→elbow，应与 root→pole 同侧
+    def _cross(p, q):
+        return (140 - root_xy[0]) * (q[1] - root_xy[1]) - (180 - root_xy[1]) * (q[0] - root_xy[0])
+    assert _cross(0, elbow) * _cross(0, (220, 100)) > 0, (elbow, root_xy)
+    print(f"[9h] pole    → 肘部 {elbow[0]:.0f},{elbow[1]:.0f} 落在 pole 一侧 OK")
+
+    # 变形关键帧：中间帧应插值到一半（控制点线性插值）
+    wproj = anim_model.normalize({
+        "id": "abcdef012349", "name": "warpk", "canvas": [100, 100], "frames": 3,
+        "bones": [{"id": "root", "parent": None, "x": 50, "y": 50}],
+        "tracks": [{"id": "t1", "assetId": "x", "bone": "root",
+                    "warpKeys": [
+                        {"frame": 0, "warp": [[0, 0]] * 9},
+                        {"frame": 2, "warp": [[10, 0]] * 9, "ease": "linear"},
+                    ]}],
+    })
+    midw = anim_render._sample_warp(wproj["tracks"][0], 1)
+    assert abs(midw[4][0] - 5) < 0.01, midw
+    assert anim_render._sample_warp(wproj["tracks"][0], 0)[4][0] == 0
+    print(f"[9i] warpKey → 中间帧控制点 dx={midw[4][0]:.1f}（0→10 的一半）OK")
+
+
     for it in (a_bar, a_blk):
         storage.delete_asset(it["id"])
 

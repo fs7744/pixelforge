@@ -168,6 +168,60 @@ function solveIk(proj: any, frame: number, base: Record<string, Aff>,
   })
 }
 
+/** 与后端 render._bezier 同一套求值，保证预览和导出曲线一致 */
+function bezierEase(t: number, bez: number[]): number {
+  const [x1, y1, x2, y2] = bez
+  const bz = (u: number, a: number, b: number) => {
+    const v = 1 - u
+    return 3 * v * v * u * a + 3 * v * u * u * b + u * u * u
+  }
+  const slope = (u: number, a: number, b: number) => {
+    const v = 1 - u
+    return 3 * v * v * a + 6 * v * u * (b - a) + 3 * u * u * (1 - b)
+  }
+  let lo = 0
+  let hi = 1
+  let u = t
+  for (let i = 0; i < 24; i++) {
+    const x = bz(u, x1, x2)
+    if (Math.abs(x - t) < 1e-5) break
+    if (x < t) lo = u
+    else hi = u
+    u = (lo + hi) / 2
+  }
+  for (let i = 0; i < 8; i++) {
+    const d = slope(u, x1, x2)
+    if (Math.abs(d) < 1e-6) break
+    u = Math.max(0, Math.min(1, u - (bz(u, x1, x2) - t) / d))
+  }
+  return bz(u, y1, y2)
+}
+
+/** 变形网格采样：有关键帧插值，没有就用静态 warp */
+function sampleWarp(t: any, frame: number): number[][] {
+  const keys = [...(t?.warpKeys || [])].sort((a: any, b: any) => a.frame - b.frame)
+  const zero = Array.from({ length: 9 }, () => [0, 0])
+  if (!keys.length) return (t?.warp || zero).map((q: number[]) => [q[0], q[1]])
+  if (frame <= keys[0].frame) return keys[0].warp
+  if (frame >= keys[keys.length - 1].frame) return keys[keys.length - 1].warp
+  for (let i = 0; i < keys.length - 1; i++) {
+    const a = keys[i]
+    const b = keys[i + 1]
+    if (frame >= a.frame && frame <= b.frame) {
+      const span = b.frame - a.frame || 1
+      let k = (frame - a.frame) / span
+      k = b.bez
+        ? bezierEase(k, b.bez)
+        : b.ease === 'ease-in' ? k * k : b.ease === 'ease-out' ? 1 - (1 - k) * (1 - k) : k
+      return a.warp.map((p: number[], j: number) => [
+        p[0] + (b.warp[j][0] - p[0]) * k,
+        p[1] + (b.warp[j][1] - p[1]) * k,
+      ])
+    }
+  }
+  return keys[0].warp
+}
+
 function boneWorld(proj: any, frame: number): Record<string, Aff> {
   const base = fkWorld(proj, frame)
   const iks = proj.ik || []
@@ -426,6 +480,47 @@ export default function Editor() {
     setMode('bone')
   }
 
+  const upsertIkWeight = (ikId: string, w: number) => {
+    update((p) => {
+      const ik = (p.ik || []).find((v: any) => v.id === ikId)
+      if (!ik) return
+      ik.keys = ik.keys || []
+      let k = ik.keys.find((v: any) => v.frame === frame)
+      if (!k) {
+        const cur = sample(ik.keys, frame)
+        k = { frame, x: cur.x, y: cur.y, w, ease: 'linear', bez: null }
+        ik.keys.push(k)
+      } else {
+        k.w = w
+      }
+      ik.keys.sort((a: any, b: any) => a.frame - b.frame)
+    })
+  }
+
+  const addWarpKey = () => {
+    if (!track) return
+    update((p) => {
+      const t = p.tracks.find((v: any) => v.id === track.id)
+      if (!t) return
+      t.warpKeys = t.warpKeys || []
+      const warp = sampleWarp(t, frame).map((q: number[]) => [q[0], q[1]])
+      const exist = t.warpKeys.find((v: any) => v.frame === frame)
+      if (exist) exist.warp = warp
+      else t.warpKeys.push({ frame, warp, ease: 'linear', bez: null })
+      t.warpKeys.sort((a: any, b: any) => a.frame - b.frame)
+    })
+    setMode('warp')
+  }
+
+  const deleteWarpKey = () => {
+    if (!track) return
+    update((p) => {
+      const t = p.tracks.find((v: any) => v.id === track.id)
+      if (!t) return
+      t.warpKeys = (t.warpKeys || []).filter((v: any) => v.frame !== frame)
+    })
+  }
+
   const deleteKey = () => {
     update((p) => {
       const obj = p.tracks.find((t: any) => t.id === selTrack)
@@ -460,6 +555,13 @@ export default function Editor() {
       return
     }
     if (mode === 'bone') {
+      for (const ik of proj.ik || []) {
+        if (ik.id === selIk && ik.pole
+            && Math.hypot(ik.pole[0] - x, ik.pole[1] - y) < 16 / zoom) {
+          dragRef.current = { kind: 'pole', id: ik.id }
+          return
+        }
+      }
       for (const ik of proj.ik || []) {
         const k = sample(ik.keys || [], frame)
         if (Math.hypot(k.x - x, k.y - y) < 16 / zoom) {
@@ -529,6 +631,13 @@ export default function Editor() {
       upsertIk(d.id, x, y)
       return
     }
+    if (d.kind === 'pole') {
+      update((p) => {
+        const ik = (p.ik || []).find((v: any) => v.id === d.id)
+        if (ik) ik.pole = [+x.toFixed(1), +y.toFixed(1)]
+      })
+      return
+    }
     if (d.kind === 'warp') {
       const m = trackMatrix(proj, track, frame)
       // 屏幕位移 → 源图像素位移：用矩阵线性部分的逆
@@ -539,9 +648,22 @@ export default function Editor() {
       update((p) => {
         const t = p.tracks.find((v: any) => v.id === selTrack)
         if (!t) return
-        t.warp = t.warp || Array(9).fill([0, 0])
-        const cur = t.warp[d.index] || [0, 0]
-        t.warp[d.index] = [cur[0] + sx, cur[1] + sy]
+        // 第一次拖变形就切到「关键帧模式」：把当前静态形状作为第 0 帧的基准，
+        // 否则一动就把其它帧的形状抹平了
+        if (!t.warpKeys?.length) {
+          const seed = (t.warp || Array(9).fill([0, 0])).map((q: number[]) => [q[0], q[1]])
+          t.warpKeys = frame === 0 ? [] : [{ frame: 0, warp: seed, ease: 'linear', bez: null }]
+        }
+        const base = sampleWarp(t, frame).map((q: number[]) => [q[0], q[1]])
+        base[d.index] = [base[d.index][0] + sx, base[d.index][1] + sy]
+        let k = t.warpKeys.find((v: any) => v.frame === frame)
+        if (!k) {
+          k = { frame, warp: base, ease: 'linear', bez: null }
+          t.warpKeys.push(k)
+        } else {
+          k.warp = base
+        }
+        t.warpKeys.sort((a: any, b: any) => a.frame - b.frame)
       })
     }
   }
@@ -614,6 +736,7 @@ export default function Editor() {
     }
   }
 
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   const warpPoints = (t: any, a?: Asset): Pt[] => {
     const w = a?.width || 64
     const h = a?.height || 64
@@ -621,7 +744,7 @@ export default function Editor() {
     for (let r = 0; r < 3; r++) {
       for (let c = 0; c < 3; c++) {
         const base: Pt = [(c * w) / 2, (r * h) / 2]
-        const off = t.warp?.[r * 3 + c] || [0, 0]
+        const off = sampleWarp(t, frame)[r * 3 + c] || [0, 0]
         pts.push([base[0] + off[0], base[1] + off[1]])
       }
     }
@@ -849,6 +972,24 @@ export default function Editor() {
                     </g>
                   )
                 })}
+                {/* pole：蓝钻，决定肘/膝朝哪边 */}
+                {(proj.ik || []).filter((ik: any) => ik.id === selIk && ik.pole).map((ik: any) => (
+                  <g key={`pole-${ik.id}`}>
+                    <line x1={ik.pole[0]} y1={ik.pole[1]}
+                          x2={sample(ik.keys || [], frame).x}
+                          y2={sample(ik.keys || [], frame).y}
+                          stroke="rgba(91,87,235,0.45)" strokeDasharray="3 5"
+                          strokeWidth={1 / zoom} />
+                    <rect
+                      x={ik.pole[0] - 7 / zoom}
+                      y={ik.pole[1] - 7 / zoom}
+                      width={14 / zoom}
+                      height={14 / zoom}
+                      transform={`rotate(45 ${ik.pole[0]} ${ik.pole[1]})`}
+                      fill="#5B57EB"
+                    />
+                  </g>
+                ))}
                 {/* 变形网格 */}
                 {mode === 'warp' && track && (() => {
                   const m = trackMatrix(proj, track, frame)
@@ -892,6 +1033,8 @@ export default function Editor() {
               <button className="btn btn-ghost" onClick={() => upsertKey('track', {})}>+ 轨道关键帧</button>
               <button className="btn btn-ghost" onClick={() => upsertKey('bone', {})}>+ 骨骼关键帧</button>
               <button className="btn btn-ghost" onClick={deleteKey}>删轨道关键帧</button>
+              <button className="btn btn-ghost" onClick={addWarpKey}>+ 变形关键帧</button>
+              <button className="btn btn-ghost" onClick={deleteWarpKey}>删变形关键帧</button>
               <div className="grow" />
               <span className="hint">帧率 {proj.fps} · 共 {proj.frames} 帧</span>
             </div>
@@ -900,6 +1043,7 @@ export default function Editor() {
                 const tk = (track?.keyframes || []).some((k: any) => k.frame === i)
                 const bk = (bones.find((b: any) => b.id === selBone)?.keys || [])
                   .some((k: any) => k.frame === i)
+                const wk = (track?.warpKeys || []).some((k: any) => k.frame === i)
                 return (
                   <button key={i} className={`frame-cell ${i === frame ? 'on' : ''}`}
                           onClick={() => setFrame(i)}>
@@ -907,6 +1051,7 @@ export default function Editor() {
                     <span className="marks">
                       {tk && <i className="mk track" />}
                       {bk && <i className="mk bone" />}
+                      {wk && <i className="mk warp" />}
                     </span>
                   </button>
                 )
@@ -1027,6 +1172,26 @@ export default function Editor() {
               <div className="hint">
                 拖两个黄点改曲线；y 可以拖出框外做过冲。曲线记在**目标帧**上，
                 表示「走完这一段时怎么减速」。
+              </div>
+            </>
+          )
+        })()}
+
+        {(() => {
+          const ik = (proj?.ik || []).find((v: any) => v.id === selIk)
+          if (!ik) return null
+          const wv = sample(ik.keys || [], frame).w ?? 1
+          return (
+            <>
+              <div className="label" style={{ marginTop: 10 }}>
+                IK 权重 {Math.round(wv * 100)}%（0 = 跟 FK，1 = 跟目标）
+              </div>
+              <input type="range" min={0} max={1} step={0.01} value={wv}
+                     style={{ width: '100%' }}
+                     onChange={(e) => upsertIkWeight(ik.id, +e.target.value)} />
+              <div className="hint">
+                半权重是「手搭上去但没完全跟」的过渡，可以逐帧打点做权重动画；
+                蓝菱形是 pole，决定肘/膝往哪边弯。
               </div>
             </>
           )

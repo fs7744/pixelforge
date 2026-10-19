@@ -1693,10 +1693,13 @@ _proj["bones"].append({"id": "arm", "name": "臂", "parent": "root",
                        "x": _proj["bones"][0]["x"] + 40, "y": _proj["bones"][0]["y"],
                        "len": 60, "keys": []})
 _proj["ik"] = [{"id": "ik1", "name": "手部 IK", "end": "arm", "chain": 2,
+                "pole": [_proj["bones"][0]["x"] + 90, _proj["bones"][0]["y"] - 10],
                 "keys": [{"frame": 0, "x": _proj["bones"][0]["x"] + 50,
-                          "y": _proj["bones"][0]["y"] - 30}]}]
+                          "y": _proj["bones"][0]["y"] - 30, "w": 0.5}]}]
 _proj["tracks"] = [{"id": "t1", "name": "条", "assetId": _tex["id"], "bone": "arm",
                     "pivot": [20, 20],
+                    "warpKeys": [{"frame": 0, "warp": [[0, 0]] * 9},
+                                 {"frame": 3, "warp": [[6, 0]] * 9, "bez": [0.4, 0, 0.2, 1]}],
                     "keyframes": [{"frame": 0, "x": 0},
                                   {"frame": 3, "x": 20, "bez": [0.6, 0, 0.4, 1]}]}]
 _r = client.put(f"/api/anim/projects/{_pid}", json=_proj)
@@ -1706,6 +1709,13 @@ _saved = _r.json() if _r.status_code == 200 else {}
 check("IK 目标落盘（链长/关键帧）",
       len(_saved.get("ik") or []) == 1 and _saved["ik"][0]["chain"] == 2,
       str(_saved.get("ik"))[:120])
+check("IK pole 与权重落盘",
+      bool(_saved.get("ik") and _saved["ik"][0].get("pole"))
+      and abs(_saved["ik"][0]["keys"][0].get("w", 1) - 0.5) < 1e-6,
+      str(_saved.get("ik"))[:140])
+check("变形关键帧落盘",
+      len((_saved.get("tracks") or [{}])[0].get("warpKeys") or []) == 2,
+      str((_saved.get("tracks") or [{}])[0].get("warpKeys"))[:140])
 check("关键帧贝塞尔落盘",
       (_saved.get("tracks") or [{}])[0]["keyframes"][-1].get("bez") == [0.6, 0.0, 0.4, 1.0],
       str((_saved.get("tracks") or [{}])[0].get("keyframes")))

@@ -216,6 +216,9 @@ def normalize(proj: Dict[str, Any]) -> Dict[str, Any]:
         for k in (it.get("keys") or [])[:MAX_FRAMES]:
             ks.append({"frame": max(0, min(int(_num(k.get("frame"), 0)), out["frames"] - 1)),
                        "x": round(_num(k.get("x")), 2), "y": round(_num(k.get("y")), 2),
+                       # 权重：0 = 完全听 FK，1 = 完全听 IK；中间是混合，
+                       # 做「手扶墙时手臂半跟随」这类过渡靠它
+                       "w": max(0.0, min(round(_num(k.get("w"), 1.0), 3), 1.0)),
                        "ease": k.get("ease") if k.get("ease") in
                        ("linear", "ease-in", "ease-out") else "linear",
                        "bez": _bez(k.get("bez"))})
@@ -224,9 +227,13 @@ def normalize(proj: Dict[str, Any]) -> Dict[str, Any]:
             dedup_ik[k["frame"]] = k
         if not dedup_ik:
             continue
+        pole = it.get("pole")
+        pole_xy = None
+        if isinstance(pole, (list, tuple)) and len(pole) >= 2:
+            pole_xy = [round(_num(pole[0]), 2), round(_num(pole[1]), 2)]
         iks.append({"id": str(it.get("id") or f"ik{len(iks)}"),
                     "name": str(it.get("name") or f"IK {len(iks) + 1}"),
-                    "end": eid, "chain": chain,
+                    "end": eid, "chain": chain, "pole": pole_xy,
                     "keys": [dedup_ik[i] for i in sorted(dedup_ik)]})
     out["ik"] = iks
 
@@ -248,11 +255,23 @@ def normalize(proj: Dict[str, Any]) -> Dict[str, Any]:
         dedup: Dict[int, Dict[str, Any]] = {}
         for k in sorted(ks, key=lambda x: x["frame"]):
             dedup[k["frame"]] = k
-        warp = t.get("warp")
-        if isinstance(warp, list) and len(warp) == 9:
-            warp = [[round(_num(p[0]), 2), round(_num(p[1]), 2)] for p in warp]
-        else:
-            warp = [[0.0, 0.0] for _ in range(9)]
+        def _warp(v) -> List[List[float]]:
+            if isinstance(v, list) and len(v) == 9 and all(
+                    isinstance(q, (list, tuple)) and len(q) >= 2 for q in v):
+                return [[round(_num(q[0]), 2), round(_num(q[1]), 2)] for q in v]
+            return [[0.0, 0.0] for _ in range(9)]
+
+        warp = _warp(t.get("warp"))
+        warp_keys = []
+        for k in (t.get("warpKeys") or [])[:MAX_FRAMES]:
+            warp_keys.append({"frame": max(0, min(int(_num(k.get("frame"), 0)), out["frames"] - 1)),
+                              "warp": _warp(k.get("warp")),
+                              "ease": k.get("ease") if k.get("ease") in
+                              ("linear", "ease-in", "ease-out") else "linear",
+                              "bez": _bez(k.get("bez"))})
+        wdedup: Dict[int, Dict[str, Any]] = {}
+        for k in sorted(warp_keys, key=lambda x: x["frame"]):
+            wdedup[k["frame"]] = k
         pivot = t.get("pivot") or [0, 0]
         fx = []
         for s in (t.get("fx") or [])[:64]:
@@ -282,6 +301,7 @@ def normalize(proj: Dict[str, Any]) -> Dict[str, Any]:
             "bone": str(t.get("bone") or "root"),
             "pivot": [round(_num(pivot[0]), 2), round(_num(pivot[1]), 2)],
             "warp": warp,
+            "warpKeys": [wdedup[i] for i in sorted(wdedup)],
             "keyframes": [dedup[i] for i in sorted(dedup)],
             "fx": fx,
             "opacity": max(0.0, min(round(_num(t.get("opacity"), 1.0), 4), 1.0)),

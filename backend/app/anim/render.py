@@ -92,14 +92,18 @@ def _bezier(t: float, x1: float, y1: float, x2: float, y2: float) -> float:
 def _sample(keys: Sequence[Dict[str, Any]], frame: int) -> Dict[str, float]:
     """关键帧采样：线性 + 缓动；首帧前/末帧后保持端点值（不外推）。"""
     if not keys:
-        return {"x": 0.0, "y": 0.0, "rot": 0.0, "scale": 1.0, "opacity": 1.0}
+        return {"x": 0.0, "y": 0.0, "rot": 0.0, "scale": 1.0, "opacity": 1.0, "w": 1.0}
     ks = sorted(keys, key=lambda k: k["frame"])
     if frame <= ks[0]["frame"]:
         return {k: float(ks[0].get(k, 0.0)) for k in ("x", "y", "rot")} | {
-            "scale": float(ks[0].get("scale", 1.0)), "opacity": float(ks[0].get("opacity", 1.0))}
+            "scale": float(ks[0].get("scale", 1.0)),
+            "opacity": float(ks[0].get("opacity", 1.0)),
+            "w": float(ks[0].get("w", 1.0))}
     if frame >= ks[-1]["frame"]:
         return {k: float(ks[-1].get(k, 0.0)) for k in ("x", "y", "rot")} | {
-            "scale": float(ks[-1].get("scale", 1.0)), "opacity": float(ks[-1].get("opacity", 1.0))}
+            "scale": float(ks[-1].get("scale", 1.0)),
+            "opacity": float(ks[-1].get("opacity", 1.0)),
+            "w": float(ks[-1].get("w", 1.0))}
     for a, b in zip(ks, ks[1:]):
         if a["frame"] <= frame <= b["frame"]:
             span = b["frame"] - a["frame"]
@@ -114,8 +118,11 @@ def _sample(keys: Sequence[Dict[str, Any]], frame: int) -> Dict[str, float]:
                 out[k] = float(a.get(k, d)) + (float(b.get(k, d)) - float(a.get(k, d))) * t
             out["scale"] = float(a.get("scale", 1.0)) + (float(b.get("scale", 1.0)) - float(a.get("scale", 1.0))) * t
             out["opacity"] = float(a.get("opacity", 1.0)) + (float(b.get("opacity", 1.0)) - float(a.get("opacity", 1.0))) * t
+            # IK 权重也走同一条采样：漏掉它的话，w 永远回到默认 1.0，
+            # 界面上拖权重会发现「怎么拖都没反应」
+            out["w"] = float(a.get("w", 1.0)) + (float(b.get("w", 1.0)) - float(a.get("w", 1.0))) * t
             return out
-    return {"x": 0.0, "y": 0.0, "rot": 0.0, "scale": 1.0, "opacity": 1.0}
+    return {"x": 0.0, "y": 0.0, "rot": 0.0, "scale": 1.0, "opacity": 1.0, "w": 1.0}
 
 
 def _fk_world(proj: Dict[str, Any], frame: int,
@@ -164,6 +171,33 @@ def _matrix_angle(m: np.ndarray) -> float:
 
 def _matrix_scale(m: np.ndarray) -> float:
     return max(0.01, math.hypot(float(m[0, 0]), float(m[1, 0])))
+
+
+def _apply_pole(pts: List[np.ndarray], pole: np.ndarray) -> List[np.ndarray]:
+    """极向校正：中间关节不在 pole 那一侧时，把链条沿 root→end 直线镜像。
+
+    FABRIK 只保证「长度对、末端到位」，肘/膝该朝哪边它不管——不加这个，
+    同一组目标在不同起始姿势下会随机翻肘。镜像不会移动末端（末端在直线上）。
+    """
+    if len(pts) < 3:
+        return pts
+    a, b = pts[0], pts[-1]
+    line = b - a
+    L = float(np.linalg.norm(line))
+    if L < 1e-3:
+        return pts
+    n = np.array([-line[1], line[0]]) / L
+
+    def side(p: np.ndarray) -> float:
+        return float(np.dot(p - a, n))
+
+    if side(pts[1]) * side(pole) >= 0:
+        return pts
+    out = [a.copy()]
+    for p in pts[1:-1]:
+        out.append(a + (p - a) - 2 * side(p) * n)
+    out.append(b.copy())
+    return out
 
 
 def _solve_ik(proj: Dict[str, Any], frame: int,
@@ -233,12 +267,31 @@ def _solve_ik(proj: Dict[str, Any], frame: int,
             if float(np.linalg.norm(pts[-1] - target)) < 0.5:
                 break
 
+    pole = ik.get("pole")
+    if pole and len(pts) >= 3:
+        pts = _apply_pole(pts, np.array(pole, dtype=np.float64))
+
+    # 权重：把「IK 解」和「当前 FK 位姿」按 w 混合。
+    # 位置线性插值、角度走最短弧（差角归一化到 ±180，否则 170°→-170°
+    # 会被当成绕一大圈，手臂直接抡过去）。
+    # 权重曲线可能过冲（回弹 bez），夹回 0..1：超出去会把姿态推到 IK 解之外，
+    # 表现为「明明 w=1 却差几像素」
+    w = max(0.0, min(float(_sample(ik.get("keys") or [], frame).get("w", 1.0)), 1.0))
     for i, b_id in enumerate(chain):
+        cur = override.get(b_id)
+        if cur:
+            fk_pos = np.array([cur[0], cur[1]], dtype=np.float64)
+            fk_ang, fk_sc = cur[2], cur[3]
+        else:
+            m = base.get(b_id, np.eye(3))
+            fk_pos = np.array([m[0, 2], m[1, 2]], dtype=np.float64)
+            fk_ang = math.degrees(_matrix_angle(m))
+            fk_sc = _matrix_scale(m)
         d = pts[i + 1] - pts[i]
-        ang = math.degrees(math.atan2(float(d[1]), float(d[0])))
-        # 保持该骨骼原有的缩放：override 里存的第 4 项就是缩放值本身
-        sc = override[b_id][3] if b_id in override else _matrix_scale(base.get(b_id, np.eye(3)))
-        override[b_id] = (float(pts[i][0]), float(pts[i][1]), ang, sc)
+        ik_ang = math.degrees(math.atan2(float(d[1]), float(d[0])))
+        pos = fk_pos + (pts[i] - fk_pos) * w
+        diff = (ik_ang - fk_ang + 180.0) % 360.0 - 180.0
+        override[b_id] = (float(pos[0]), float(pos[1]), fk_ang + diff * w, fk_sc)
 
 
 def bone_world(proj: Dict[str, Any], frame: int) -> Dict[str, np.ndarray]:
@@ -303,6 +356,28 @@ def _blend(base: Image.Image, layer: Image.Image, mode: str,
     return Image.fromarray((out * 255).astype(np.uint8), "RGBA")
 
 
+def _sample_warp(track: Dict[str, Any], frame: int) -> List[List[float]]:
+    """变形网格采样：有关键帧就插值，没有就用静态 warp。"""
+    keys = track.get("warpKeys") or []
+    if not keys:
+        return track.get("warp") or []
+    ks = sorted(keys, key=lambda k: k["frame"])
+    if frame <= ks[0]["frame"]:
+        return ks[0]["warp"]
+    if frame >= ks[-1]["frame"]:
+        return ks[-1]["warp"]
+    for a, b in zip(ks, ks[1:]):
+        if a["frame"] <= frame <= b["frame"]:
+            span = b["frame"] - a["frame"] or 1
+            t = (frame - a["frame"]) / span
+            bez = b.get("bez")
+            t = _bezier(t, *bez) if bez else _ease(t, b.get("ease") or "linear")
+            return [[a["warp"][i][0] + (b["warp"][i][0] - a["warp"][i][0]) * t,
+                     a["warp"][i][1] + (b["warp"][i][1] - a["warp"][i][1]) * t]
+                    for i in range(9)]
+    return ks[-1]["warp"]
+
+
 def render_frame(proj: Dict[str, Any], frame: int,
                  loader) -> Image.Image:
     """渲染单帧。loader(asset_id) -> PIL.Image（由调用方决定怎么取图）。"""
@@ -318,7 +393,7 @@ def render_frame(proj: Dict[str, Any], frame: int,
         if src is None:
             continue
         src = src.convert("RGBA")
-        src = warp_image(src, t.get("warp") or [])
+        src = warp_image(src, _sample_warp(t, frame))
         k = _sample(t.get("keyframes") or [], frame)
         px, py = t.get("pivot") or [src.width / 2, src.height / 2]
         world = worlds.get(t.get("bone") or "root", iw)
