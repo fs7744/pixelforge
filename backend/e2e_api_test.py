@@ -23,6 +23,8 @@ from backend.app.main import app
 from backend.app import storage
 
 client = TestClient(app)
+_BASE = {a["id"] for a in storage.list_assets()}
+
 ok = 0
 fail = 0
 
@@ -138,6 +140,17 @@ run_id = run.json()["id"]
 check("GET /api/runs 含新 run", any(r["id"] == run_id for r in client.get("/api/runs").json()["runs"]))
 detail = client.get(f"/api/runs/{run_id}")
 check("GET run 详情", detail.status_code == 200 and detail.json()["id"] == run_id)
+
+# 收尾：本轮新造的资产全删（e2e 会跑若干管线，不清理一次能胖几十张）
+storage._INDEX_CACHE = None
+_leaked = [a for a in storage.list_assets() if a["id"] not in _BASE]
+for _a in _leaked:
+    try:
+        storage.delete_asset(_a["id"])
+    except Exception:
+        pass
+if _leaked:
+    print(f"[cleanup] 清掉本轮产物 {len(_leaked)} 个")
 
 print(f"\n结果：{ok} 通过 / {fail} 失败")
 raise SystemExit(1 if fail else 0)

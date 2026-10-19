@@ -19,6 +19,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import numpy as np
 from PIL import Image, ImageDraw
 
+from backend.app import storage  # noqa: E402
+from backend.app import godot_export  # noqa: E402
 from backend.app.pipelines import matte, resize, sheet
 
 OUT = Path(__file__).resolve().parents[1] / "data" / "tmp"
@@ -46,6 +48,9 @@ def make_fake_sheet() -> Image.Image:
 
 
 async def main() -> None:
+    # 基线：跑完把本轮新造的资产全删掉。以前只删「登记过的那几个」，
+    # 管线内部产出的帧/表/图层全留了下来，跑一次胖几十张。
+    _base = {a["id"] for a in storage.list_assets()}
     sheet_img = make_fake_sheet()
     sheet_img.save(OUT / "smoke-sheet.png")
     print(f"[1] 素材     → {sheet_img.size} 4×4 合成网格")
@@ -89,7 +94,6 @@ async def main() -> None:
     print("[6] alpha    → 四角透明 OK")
 
     # 资产 sha256 溯源 + 写坏不如写炸（移植自 h3 的 digest / write_json）
-    from backend.app import storage
     item = storage.save_asset(merged, kind="smoke", name="smoke-zero-rgb")
     assert item.get("sha256"), "save_asset 未记录 sha256"
     import hashlib
@@ -104,7 +108,6 @@ async def main() -> None:
     print("[7] digest   → sha256 记录一致 / NaN 写入被拒绝 OK")
 
     # Godot 导出包带 SHA256SUMS 清单（移植自 h3 的 delivery.assemble）
-    from backend.app import godot_export
     sheet_item = storage.save_asset(merged, kind="sheet", name="smoke-godot-sheet")
     fake_run = {"id": "smoke00000000", "steps": [
         {"id": "sprite_sheet", "meta": {"frameSize": {"w": 32, "h": 32}, "frames": 16, "cols": 4}}]}
@@ -332,6 +335,16 @@ async def main() -> None:
     png = io.BytesIO()
     rpg.save(png, "PNG")
     print(f"[8] export   → rpgmaker png {len(png.getvalue())} bytes")
+
+    storage._INDEX_CACHE = None
+    leaked = [a for a in storage.list_assets() if a["id"] not in _base]
+    for a in leaked:
+        try:
+            storage.delete_asset(a["id"])
+        except Exception:
+            pass
+    if leaked:
+        print(f"[cleanup] 清掉本轮产物 {len(leaked)} 个")
     print("\nALL CHECKS PASSED")
 
 
