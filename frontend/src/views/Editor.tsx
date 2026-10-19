@@ -65,18 +65,116 @@ function sample(keys: any[], frame: number) {
   return base
 }
 
-function boneWorld(proj: any, frame: number): Record<string, Aff> {
+type IkOverride = Record<string, { x: number; y: number; ang: number; sc: number }>
+
+function fkWorld(proj: any, frame: number, ov?: IkOverride): Record<string, Aff> {
   const bones: any[] = proj.bones || []
   const out: Record<string, Aff> = {}
-  for (const b of bones) {
-    const k = sample(b.keys || [], frame)
-    const local = chain(T(k.x, k.y), R(k.rot), S(k.scale))
-    const parent = b.parent ? bones.find((x) => x.id === b.parent) : null
-    out[b.id] = parent && out[parent.id]
-      ? chain(out[parent.id], T(b.x - parent.x, b.y - parent.y), local)
-      : chain(T(b.x, b.y), local)
+  const seen = new Set<string>()
+  const build = (b: any): Aff => {
+    if (out[b.id]) return out[b.id]
+    if (seen.has(b.id)) return (out[b.id] = I)   // 环：兜底，别让递归爆栈
+    seen.add(b.id)
+    const o = ov?.[b.id]
+    let m: Aff
+    if (o) {
+      m = chain(T(o.x, o.y), R(o.ang), S(o.sc))
+    } else {
+      const k = sample(b.keys || [], frame)
+      const local = chain(T(k.x, k.y), R(k.rot), S(k.scale))
+      const p = b.parent ? bones.find((x) => x.id === b.parent) : null
+      m = p ? chain(build(p), T(b.x - p.x, b.y - p.y), local) : chain(T(b.x, b.y), local)
+    }
+    out[b.id] = m
+    return m
   }
+  bones.forEach(build)
   return out
+}
+
+const matAngle = (m: Aff) => Math.atan2(m.b, m.a)
+const matScale = (m: Aff) => Math.max(0.01, Math.hypot(m.a, m.b))
+
+/** FABRIK：与后端 render._solve_ik 同一套算法，保证叠加层和成图一致 */
+function solveIk(proj: any, frame: number, base: Record<string, Aff>,
+                 ov: IkOverride, ik: any) {
+  const bones: any[] = proj.bones || []
+  const ids: string[] = []
+  let cur = ik.end
+  while (cur && ids.length < (ik.chain || 2)) {
+    const b = bones.find((x) => x.id === cur)
+    if (!b) break
+    ids.push(cur)
+    cur = b.parent
+  }
+  ids.reverse()
+  if (ids.length < 2) return
+
+  const pos = ids.map((id) => {
+    const o = ov[id]
+    if (o) return { x: o.x, y: o.y }
+    const m = base[id] || I
+    return { x: m.e, y: m.f }
+  })
+  const angs = ids.map((id) => (ov[id] ? (ov[id].ang * Math.PI) / 180 : matAngle(base[id] || I)))
+  const lens = ids.map((id) => bones.find((x) => x.id === id)?.len || 60)
+  const last = pos[pos.length - 1]
+  const tip = {
+    x: last.x + Math.cos(angs[angs.length - 1]) * lens[lens.length - 1],
+    y: last.y + Math.sin(angs[angs.length - 1]) * lens[lens.length - 1],
+  }
+  const pts = [...pos, tip]
+  const k = sample(ik.keys || [], frame)
+  const root = { ...pts[0] }
+  const total = lens.reduce((a, b) => a + b, 0)
+  const dx = k.x - root.x
+  const dy = k.y - root.y
+  const reach = Math.hypot(dx, dy)
+
+  if (reach >= total) {
+    const ux = dx / (reach || 1)
+    const uy = dy / (reach || 1)
+    let cx = root.x
+    let cy = root.y
+    for (let i = 0; i < lens.length; i++) {
+      cx += ux * lens[i]
+      cy += uy * lens[i]
+      pts[i + 1] = { x: cx, y: cy }
+    }
+  } else {
+    for (let it = 0; it < 12; it++) {
+      pts[pts.length - 1] = { x: k.x, y: k.y }
+      for (let i = pts.length - 2; i >= 0; i--) {
+        const vx = pts[i].x - pts[i + 1].x
+        const vy = pts[i].y - pts[i + 1].y
+        const n = Math.hypot(vx, vy) || 1
+        pts[i] = { x: pts[i + 1].x + (vx / n) * lens[i], y: pts[i + 1].y + (vy / n) * lens[i] }
+      }
+      pts[0] = { ...root }
+      for (let i = 0; i < pts.length - 1; i++) {
+        const vx = pts[i + 1].x - pts[i].x
+        const vy = pts[i + 1].y - pts[i].y
+        const n = Math.hypot(vx, vy) || 1
+        pts[i + 1] = { x: pts[i].x + (vx / n) * lens[i], y: pts[i].y + (vy / n) * lens[i] }
+      }
+      if (Math.hypot(pts[pts.length - 1].x - k.x, pts[pts.length - 1].y - k.y) < 0.5) break
+    }
+  }
+
+  ids.forEach((id, i) => {
+    const ang = (Math.atan2(pts[i + 1].y - pts[i].y, pts[i + 1].x - pts[i].x) * 180) / Math.PI
+    const sc = ov[id]?.sc ?? matScale(base[id] || I)
+    ov[id] = { x: pts[i].x, y: pts[i].y, ang, sc }
+  })
+}
+
+function boneWorld(proj: any, frame: number): Record<string, Aff> {
+  const base = fkWorld(proj, frame)
+  const iks = proj.ik || []
+  if (!iks.length) return base
+  const ov: IkOverride = {}
+  iks.forEach((ik: any) => solveIk(proj, frame, base, ov, ik))
+  return Object.keys(ov).length ? fkWorld(proj, frame, ov) : base
 }
 
 function trackMatrix(proj: any, t: any, frame: number): Aff {
@@ -84,6 +182,80 @@ function trackMatrix(proj: any, t: any, frame: number): Aff {
   const k = sample(t.keyframes || [], frame)
   const [px, py] = t.pivot || [0, 0]
   return chain(w, T(k.x, k.y), R(k.rot), S(k.scale), T(-px, -py))
+}
+
+type CurveProps = { bez: number[]; onChange: (b: number[]) => void }
+
+/** 关键帧缓动曲线：x=时间、y=进度，两个控制点可拖。y 允许出界（做回弹） */
+function CurveEditor({ bez, onChange }: CurveProps) {
+  const ref = useRef<SVGSVGElement>(null)
+  const drag = useRef<number | null>(null)
+  const W = 150
+  const P = 14
+  const sx = (x: number) => P + x * (W - 2 * P)
+  const sy = (y: number) => P + (1 - y) * (W - 2 * P)
+  const toUnit = (cx: number, cy: number): [number, number] => {
+    const r = ref.current!.getBoundingClientRect()
+    return [
+      Math.max(0, Math.min(1, (cx - r.left - P) / (W - 2 * P))),
+      Math.max(-0.6, Math.min(1.6, 1 - (cy - r.top - P) / (W - 2 * P))),
+    ]
+  }
+  const move = (e: React.PointerEvent) => {
+    if (drag.current == null) return
+    const [x, y] = toUnit(e.clientX, e.clientY)
+    const next = [...bez]
+    next[drag.current * 2] = +x.toFixed(3)
+    next[drag.current * 2 + 1] = +y.toFixed(3)
+    onChange(next)
+  }
+  const [x1, y1, x2, y2] = bez
+  return (
+    <svg
+      ref={ref}
+      className="curve"
+      width={W}
+      height={W}
+      viewBox={`0 0 ${W} ${W}`}
+      onPointerMove={move}
+      onPointerUp={() => { drag.current = null }}
+      onPointerLeave={() => { drag.current = null }}
+    >
+      {[0.25, 0.5, 0.75].map((g) => (
+        <g key={g}>
+          <line x1={sx(g)} y1={P} x2={sx(g)} y2={W - P} stroke="rgba(255,255,255,0.06)" />
+          <line x1={P} y1={sy(g)} x2={W - P} y2={sy(g)} stroke="rgba(255,255,255,0.06)" />
+        </g>
+      ))}
+      <rect x={P} y={P} width={W - 2 * P} height={W - 2 * P} fill="none" stroke="var(--line)" />
+      <line x1={P} y1={sy(0)} x2={sx(x1)} y2={sy(y1)} stroke="rgba(255,213,0,0.45)" />
+      <line x1={W - P} y1={sy(1)} x2={sx(x2)} y2={sy(y2)} stroke="rgba(255,213,0,0.45)" />
+      <path
+        d={`M ${sx(0)} ${sy(0)} C ${sx(x1)} ${sy(y1)} ${sx(x2)} ${sy(y2)} ${sx(1)} ${sy(1)}`}
+        fill="none"
+        stroke="#00FF88"
+        strokeWidth={2}
+      />
+      {[0, 1].map((i) => {
+        const px = i === 0 ? x1 : x2
+        const py = i === 0 ? y1 : y2
+        return (
+          <circle
+            key={i}
+            cx={sx(px)}
+            cy={sy(py)}
+            r={5}
+            fill="#FFD500"
+            style={{ cursor: 'grab' }}
+            onPointerDown={(e) => {
+              drag.current = i
+              ;(e.target as Element).setPointerCapture?.(e.pointerId)
+            }}
+          />
+        )
+      })}
+    </svg>
+  )
 }
 
 export default function Editor() {
@@ -96,6 +268,8 @@ export default function Editor() {
   const [mode, setMode] = useState<Mode>('select')
   const [selTrack, setSelTrack] = useState('')
   const [selBone, setSelBone] = useState('root')
+  const [selIk, setSelIk] = useState('')
+  const [curveOwner, setCurveOwner] = useState('track')
   const [bump, setBump] = useState(0)
   const [zoom, setZoom] = useState(1)
   const [brush, setBrush] = useState({ brush: 'slash', color: '#ffcc33', size: 14 })
@@ -138,7 +312,11 @@ export default function Editor() {
     setSize([p.canvas[0], p.canvas[1]])
     setFrame(0)
     setSelTrack(p.tracks?.[0]?.id || '')
-    setSelBone(p.bones?.[0]?.id || 'root')
+    // 有 IK 就默认选中第一个、并把骨骼切到链末端：
+    // 否则右侧曲线面板拿不到 IK 关键帧，看起来像「IK 不能调曲线」
+    const firstIk = (p.ik || [])[0]
+    setSelIk(firstIk?.id || '')
+    setSelBone(firstIk?.end || p.bones?.[0]?.id || 'root')
     setBump((b) => b + 1)
     dirtyRef.current = false
   }
@@ -212,6 +390,42 @@ export default function Editor() {
     })
   }
 
+  const upsertIk = (ikId: string, x: number, y: number) => {
+    update((p) => {
+      const ik = (p.ik || []).find((v: any) => v.id === ikId)
+      if (!ik) return
+      ik.keys = ik.keys || []
+      let k = ik.keys.find((v: any) => v.frame === frame)
+      if (!k) {
+        k = { frame, x, y, ease: 'linear', bez: null }
+        ik.keys.push(k)
+      } else {
+        k.x = x
+        k.y = y
+      }
+      ik.keys.sort((a: any, b: any) => a.frame - b.frame)
+    })
+  }
+
+  const addIk = () => {
+    const b = bones.find((v: any) => v.id === selBone)
+    if (!b || !b.parent) {
+      setNote('根骨骼没有父级，做不了 IK；先给它加一根子骨骼')
+      return
+    }
+    const w = worlds[selBone]
+    const id = Math.random().toString(16).slice(2, 8)
+    update((p) => {
+      p.ik = p.ik || []
+      p.ik.push({
+        id, name: `IK ${p.ik.length + 1}`, end: selBone, chain: 2,
+        keys: [{ frame, x: (w?.e ?? b.x) + 50, y: (w?.f ?? b.y) - 30, ease: 'linear', bez: null }],
+      })
+    })
+    setSelIk(id)
+    setMode('bone')
+  }
+
   const deleteKey = () => {
     update((p) => {
       const obj = p.tracks.find((t: any) => t.id === selTrack)
@@ -246,6 +460,13 @@ export default function Editor() {
       return
     }
     if (mode === 'bone') {
+      for (const ik of proj.ik || []) {
+        const k = sample(ik.keys || [], frame)
+        if (Math.hypot(k.x - x, k.y - y) < 16 / zoom) {
+          dragRef.current = { kind: 'ik', id: ik.id }
+          return
+        }
+      }
       const w = boneWorld(proj, frame)[selBone]
       if (w) {
         const [bx, by] = apply(w, 0, 0)
@@ -302,6 +523,10 @@ export default function Editor() {
           k.y += dy
         })
       }
+      return
+    }
+    if (d.kind === 'ik') {
+      upsertIk(d.id, x, y)
       return
     }
     if (d.kind === 'warp') {
@@ -455,6 +680,41 @@ export default function Editor() {
           )}
         </div>
 
+        <div className="section-title" style={{ marginTop: 14 }}>IK 目标</div>
+        <button className="btn btn-ghost btn-block" onClick={addIk}>
+          + 给「{bones.find((b: any) => b.id === selBone)?.name || selBone}」加 IK
+        </button>
+        <div className="chips mt8">
+          {(proj?.ik || []).map((ik: any) => (
+            <button key={ik.id}
+                    className={`chip ${ik.id === selIk ? 'on' : ''}`}
+                    title={`${ik.chain} 节链`}
+                    onClick={() => { setSelIk(ik.id); setSelBone(ik.end); setMode('bone') }}>
+              {ik.name}
+            </button>
+          ))}
+          {!proj?.ik?.length && <span className="hint">还没有 IK 目标</span>}
+        </div>
+        {(() => {
+          const ik = (proj?.ik || []).find((v: any) => v.id === selIk)
+          if (!ik) return null
+          return (
+            <div style={{ marginTop: 6 }}>
+              <div className="label">链长 {ik.chain} 节</div>
+              <input type="range" min={2} max={4} value={ik.chain} style={{ width: '100%' }}
+                     onChange={(e) => update((p) => {
+                       const v = (p.ik || []).find((x: any) => x.id === ik.id)
+                       if (v) v.chain = +e.target.value
+                     })} />
+              <button className="btn btn-ghost btn-block" style={{ marginTop: 4 }}
+                      onClick={() => {
+                        update((p) => { p.ik = (p.ik || []).filter((x: any) => x.id !== ik.id) })
+                        setSelIk('')
+                      }}>删除 IK 目标</button>
+            </div>
+          )
+        })()}
+
         <div className="section-title" style={{ marginTop: 14 }}>轨道</div>
         <button className="btn btn-ghost btn-block" onClick={() => setPicker((v) => !v)}>
           {picker ? '收起素材' : '+ 从素材库添加'}
@@ -568,6 +828,27 @@ export default function Editor() {
                     </g>
                   )
                 })}
+                {/* IK 目标：红叉手柄，虚线连到链末关节 */}
+                {(proj.ik || []).map((ik: any) => {
+                  const k = sample(ik.keys || [], frame)
+                  const end = worlds[ik.end]
+                  const ex = end ? end.e : 0
+                  const ey = end ? end.f : 0
+                  return (
+                    <g key={ik.id}>
+                      <line x1={ex} y1={ey} x2={k.x} y2={k.y}
+                            stroke="rgba(255,90,90,0.55)" strokeDasharray="4 4"
+                            strokeWidth={1 / zoom} />
+                      <circle cx={k.x} cy={k.y} r={9 / zoom} fill="none"
+                              stroke={ik.id === selIk ? '#ff5a5a' : 'rgba(255,90,90,0.75)'}
+                              strokeWidth={2 / zoom} />
+                      <line x1={k.x - 13 / zoom} y1={k.y} x2={k.x + 13 / zoom} y2={k.y}
+                            stroke="#ff5a5a" strokeWidth={1 / zoom} />
+                      <line x1={k.x} y1={k.y - 13 / zoom} x2={k.x} y2={k.y + 13 / zoom}
+                            stroke="#ff5a5a" strokeWidth={1 / zoom} />
+                    </g>
+                  )
+                })}
                 {/* 变形网格 */}
                 {mode === 'warp' && track && (() => {
                   const m = trackMatrix(proj, track, frame)
@@ -675,6 +956,78 @@ export default function Editor() {
               <div className="label" style={{ marginTop: 8 }}>骨骼旋转 {Math.round(bk.rot)}°</div>
               <input type="range" min={-180} max={180} value={bk.rot} style={{ width: '100%' }}
                      onChange={(e) => upsertKey('bone', { rot: +e.target.value })} />
+            </>
+          )
+        })()}
+
+        {(() => {
+          // 曲线归属可以是轨道 / 骨骼 / IK 目标：三者都能打关键帧，
+          // 只给轨道做曲线编辑器的话，IK 的缓动就没地方调了
+          const owners: { id: string; label: string; keys: any[] }[] = []
+          const tk = track?.keyframes || []
+          if (tk.length) owners.push({ id: 'track', label: '轨道', keys: tk })
+          const bk = bones.find((b: any) => b.id === selBone)?.keys || []
+          if (bk.length) owners.push({ id: 'bone', label: '骨骼', keys: bk })
+          const curIk = (proj?.ik || []).find((v: any) => v.id === selIk)
+          if (curIk?.keys?.length) owners.push({ id: 'ik', label: 'IK', keys: curIk.keys })
+          const usable = owners.filter((o) => o.keys.length >= 2)
+          if (!usable.length) {
+            return (
+              <div className="hint" style={{ marginTop: 10 }}>
+                至少要有两个关键帧才能调曲线（轨道 / 骨骼 / IK 任一有就行）
+              </div>
+            )
+          }
+          const owner = usable.find((o) => o.id === curveOwner) || usable[0]
+          const list = [...owner.keys].sort((a: any, b: any) => a.frame - b.frame)
+          const dest = list.find((k: any) => k.frame > frame) || list[list.length - 1]
+          const prev = [...list].filter((k: any) => k.frame < dest.frame).pop()
+          if (!prev) return null
+          const bez = dest.bez || [0.42, 0, 0.58, 1]
+          const setBez = (b: number[] | null) => update((p) => {
+            let arr: any[] = []
+            if (owner.id === 'track') {
+              arr = p.tracks.find((x: any) => x.id === selTrack)?.keyframes || []
+            } else if (owner.id === 'bone') {
+              arr = p.bones.find((x: any) => x.id === selBone)?.keys || []
+            } else {
+              arr = (p.ik || []).find((x: any) => x.id === curIk?.id)?.keys || []
+            }
+            const k = arr.find((x: any) => x.frame === dest.frame)
+            if (!k) return
+            k.bez = b
+            if (b) k.ease = 'linear'
+          })
+          return (
+            <>
+              <div className="section-title" style={{ marginTop: 14 }}>
+                曲线 · 第 {prev.frame + 1}→{dest.frame + 1} 帧
+              </div>
+              {usable.length > 1 && (
+                <div className="chips" style={{ marginBottom: 6 }}>
+                  {usable.map((o) => (
+                    <button key={o.id} className={`chip sm ${o.id === owner.id ? 'on' : ''}`}
+                            onClick={() => setCurveOwner(o.id)}>{o.label}</button>
+                  ))}
+                </div>
+              )}
+              <CurveEditor bez={bez} onChange={setBez} />
+              <div className="chips mt8">
+                {([
+                  ['线性', null],
+                  ['缓入出', [0.42, 0, 0.58, 1]],
+                  ['缓入', [0.42, 0, 1, 1]],
+                  ['缓出', [0, 0, 0.58, 1]],
+                  ['回弹', [0.34, 1.56, 0.64, 1]],
+                ] as [string, number[] | null][]).map(([label, v]) => (
+                  <button key={label} className={`chip sm ${!dest.bez && v === null ? 'on' : ''}`}
+                          onClick={() => setBez(v)}>{label}</button>
+                ))}
+              </div>
+              <div className="hint">
+                拖两个黄点改曲线；y 可以拖出框外做过冲。曲线记在**目标帧**上，
+                表示「走完这一段时怎么减速」。
+              </div>
             </>
           )
         })()}

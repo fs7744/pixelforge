@@ -1689,12 +1689,26 @@ _proj = _r.json()
 _pid = _proj.get("id")
 check("创建动画工程", _r.status_code == 200 and bool(_pid), _r.text[:80])
 
-_proj["tracks"] = [{"id": "t1", "name": "条", "assetId": _tex["id"], "bone": "root",
+_proj["bones"].append({"id": "arm", "name": "臂", "parent": "root",
+                       "x": _proj["bones"][0]["x"] + 40, "y": _proj["bones"][0]["y"],
+                       "len": 60, "keys": []})
+_proj["ik"] = [{"id": "ik1", "name": "手部 IK", "end": "arm", "chain": 2,
+                "keys": [{"frame": 0, "x": _proj["bones"][0]["x"] + 50,
+                          "y": _proj["bones"][0]["y"] - 30}]}]
+_proj["tracks"] = [{"id": "t1", "name": "条", "assetId": _tex["id"], "bone": "arm",
                     "pivot": [20, 20],
-                    "keyframes": [{"frame": 0, "x": 0}, {"frame": 3, "x": 20}]}]
+                    "keyframes": [{"frame": 0, "x": 0},
+                                  {"frame": 3, "x": 20, "bez": [0.6, 0, 0.4, 1]}]}]
 _r = client.put(f"/api/anim/projects/{_pid}", json=_proj)
 check("保存工程（含轨道/关键帧）",
       _r.status_code == 200 and len(_r.json().get("tracks") or []) == 1, _r.text[:100])
+_saved = _r.json() if _r.status_code == 200 else {}
+check("IK 目标落盘（链长/关键帧）",
+      len(_saved.get("ik") or []) == 1 and _saved["ik"][0]["chain"] == 2,
+      str(_saved.get("ik"))[:120])
+check("关键帧贝塞尔落盘",
+      (_saved.get("tracks") or [{}])[0]["keyframes"][-1].get("bez") == [0.6, 0.0, 0.4, 1.0],
+      str((_saved.get("tracks") or [{}])[0].get("keyframes")))
 
 _r = client.get(f"/api/anim/projects/{_pid}/frame/0.png")
 check("取单帧 PNG", _r.status_code == 200

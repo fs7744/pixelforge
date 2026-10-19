@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import io
+import math
 import json
 import sys
 import zipfile
@@ -328,6 +329,53 @@ async def main() -> None:
     assert msk.size == nrm_src.size and nmeta["solidRatio"] < 0.6, nmeta
     print(f"[9d] normals → 法线 {nrm.size} · 中心 {nrm.getpixel((12, 12))} · "
           f"金属占比 {nmeta['metalRatio'] * 100:.0f}% OK")
+
+    # IK：两节骨链伸向目标点，末端应落在目标上（2px 内）
+    ik_proj = anim_model.normalize({
+        "id": "abcdef012346", "name": "ik", "canvas": [400, 400], "frames": 2,
+        "bones": [
+            {"id": "root", "parent": None, "x": 100, "y": 100},
+            {"id": "upper", "parent": "root", "x": 140, "y": 100, "len": 60},
+            {"id": "lower", "parent": "upper", "x": 160, "y": 100, "len": 50},
+        ],
+        "ik": [{"id": "ik1", "end": "lower", "chain": 2,
+                "keys": [{"frame": 0, "x": 200, "y": 180}]}],
+    })
+    w = anim_render.bone_world(ik_proj, 0)
+    m = w["lower"]
+    ang = math.atan2(float(m[1, 0]), float(m[0, 0]))
+    tip = (m[0, 2] + math.cos(ang) * 50, m[1, 2] + math.sin(ang) * 50)
+    err = math.hypot(tip[0] - 200, tip[1] - 180)
+    assert err < 2.0, f"IK 末端偏差 {err:.2f}px（应在 2px 内）"
+
+    # 够不着的目标：链条伸直朝向目标，末端距离 = 总骨长
+    far = json.loads(json.dumps(ik_proj))
+    far["ik"][0]["keys"][0].update({"x": 500, "y": 100})
+    w2 = anim_render.bone_world(far, 0)
+    m2 = w2["lower"]
+    ang2 = math.atan2(float(m2[1, 0]), float(m2[0, 0]))
+    tip2 = (m2[0, 2] + math.cos(ang2) * 50, m2[1, 2] + math.sin(ang2) * 50)
+    root_xy = (w2["upper"][0, 2], w2["upper"][1, 2])
+    assert abs(math.hypot(tip2[0] - root_xy[0], tip2[1] - root_xy[1]) - 110) < 2, \
+        (tip2, root_xy)
+    print(f"[9e] ik      → 两节链命中目标（误差 {err:.2f}px）/ 超距伸直 OK")
+
+    # 贝塞尔缓动：端点固定、强 ease-in 在前半段明显落后于线性
+    bz = anim_render._bezier
+    assert bz(0, 0.9, 0, 1, 0.2) == 0.0 and bz(1, 0.9, 0, 1, 0.2) == 1.0
+    assert bz(0.3, 0.9, 0, 1, 0.2) < 0.2, bz(0.3, 0.9, 0, 1, 0.2)
+    assert abs(bz(0.5, 0.42, 0, 0.58, 1) - 0.5) < 0.02    # 对称曲线中点仍在 0.5
+    # 采样确实用了 bez（而不是忽略它退回 ease）
+    bproj = anim_model.normalize({
+        "id": "abcdef012347", "name": "bez", "canvas": [100, 100], "frames": 3,
+        "bones": [{"id": "root", "parent": None, "x": 50, "y": 50}],
+        "tracks": [{"id": "t1", "assetId": "x", "bone": "root",
+                    "keyframes": [{"frame": 0, "y": 0},
+                                  {"frame": 2, "y": 100, "bez": [0.9, 0, 1, 0.2]}]}],
+    })
+    mid = anim_render._sample(bproj["tracks"][0]["keyframes"], 1)["y"]
+    assert mid < 20, mid
+    print(f"[9f] bezier  → 端点精确 / 中点 {mid:.1f}（线性应为 50）OK")
 
     for it in (a_bar, a_blk):
         storage.delete_asset(it["id"])

@@ -47,6 +47,48 @@ def _ease(t: float, kind: str) -> float:
     return t
 
 
+def _bezier(t: float, x1: float, y1: float, x2: float, y2: float) -> float:
+    """cubic-bezier(x1,y1,x2,y2) 在时间 t 的取值（CSS 语义）。
+
+    曲线是参数式 (x(u), y(u))，要的是「x = t 时的 y」，所以先解 u 再取 y。
+    先牛顿迭代（快，通常 3-4 次收敛），失败退回二分（慢但不会发散）——
+    只靠牛顿的话，控制点贴近端点时导数接近 0，会直接飞出去。
+    """
+    t = max(0.0, min(1.0, t))
+    if t <= 0.0:
+        return 0.0
+    if t >= 1.0:
+        return 1.0
+
+    def beziers(u: float, a: float, b: float) -> float:
+        # 三次贝塞尔，端点固定在 0/1，中间两个控制点 a、b
+        v = 1 - u
+        return 3 * v * v * u * a + 3 * v * u * u * b + u ** 3
+
+    def slope(u: float, a: float, b: float) -> float:
+        v = 1 - u
+        return 3 * v * v * a + 6 * v * u * (b - a) + 3 * u * u * (1 - b)
+
+    # 先二分出粗解，再牛顿精修：单纯二分要 40+ 次才够精度
+    lo, hi, u = 0.0, 1.0, t
+    for _ in range(24):
+        x = beziers(u, x1, x2)
+        if abs(x - t) < 1e-5:
+            break
+        if x < t:
+            lo = u
+        else:
+            hi = u
+        u = (lo + hi) * 0.5
+    for _ in range(8):
+        d = slope(u, x1, x2)
+        if abs(d) < 1e-6:
+            break
+        u -= (beziers(u, x1, x2) - t) / d
+        u = max(0.0, min(1.0, u))
+    return beziers(u, y1, y2)
+
+
 def _sample(keys: Sequence[Dict[str, Any]], frame: int) -> Dict[str, float]:
     """关键帧采样：线性 + 缓动；首帧前/末帧后保持端点值（不外推）。"""
     if not keys:
@@ -62,8 +104,11 @@ def _sample(keys: Sequence[Dict[str, Any]], frame: int) -> Dict[str, float]:
         if a["frame"] <= frame <= b["frame"]:
             span = b["frame"] - a["frame"]
             t = 0.0 if span == 0 else (frame - a["frame"]) / span
-            # 缓动取**后一帧**的 ease：表示「走到这一帧时怎么减速」
-            t = _ease(t, b.get("ease") or "linear")
+            # 缓动取**后一帧**的 ease/bez：表示「走到这一帧时怎么减速」。
+            # 有 bez 就优先 bez —— 曲线编辑器存的是 4 个控制点，
+            # 命名缓动只是给不想调曲线的人准备的快捷档。
+            bez = b.get("bez")
+            t = _bezier(t, *bez) if bez else _ease(t, b.get("ease") or "linear")
             out = {}
             for k, d in (("x", 0.0), ("y", 0.0), ("rot", 0.0)):
                 out[k] = float(a.get(k, d)) + (float(b.get(k, d)) - float(a.get(k, d))) * t
@@ -73,23 +118,139 @@ def _sample(keys: Sequence[Dict[str, Any]], frame: int) -> Dict[str, float]:
     return {"x": 0.0, "y": 0.0, "rot": 0.0, "scale": 1.0, "opacity": 1.0}
 
 
-def bone_world(proj: Dict[str, Any], frame: int) -> Dict[str, np.ndarray]:
-    """每根骨骼在该帧的世界矩阵（含父级级联）。"""
+def _fk_world(proj: Dict[str, Any], frame: int,
+              override: Optional[Dict[str, tuple]] = None) -> Dict[str, np.ndarray]:
+    """纯 FK：父级级联。override 用来替换 IK 解算出的骨骼世界位姿。
+
+    override[bid] = (x, y, 角度, 缩放)：IK 直接把关节世界坐标喂进来，
+    再按这个坐标反推矩阵 —— 比「改欧拉角再级联」稳，不会因为父级缩放
+    把角度算歪（那条路上只要父骨骼带非等比缩放就必错）。
+    """
     bones = {b["id"]: b for b in proj.get("bones") or []}
     out: Dict[str, np.ndarray] = {}
-    for bid, b in bones.items():
-        rest = _T(b["x"], b["y"])
-        k = _sample(b.get("keys") or [], frame)
-        local = _T(k["x"], k["y"]) @ _R(k["rot"]) @ _S(k["scale"])
-        parent = b.get("parent")
-        if parent and parent in out:
-            pb = bones[parent]
-            # 子骨骼的静止位是绝对坐标：换算成相对父骨骼的偏移再接矩阵链
-            off = _T(b["x"] - pb["x"], b["y"] - pb["y"])
-            out[bid] = out[parent] @ off @ local
+    override = override or {}
+
+    def build(bid: str, seen: set) -> np.ndarray:
+        if bid in out:
+            return out[bid]
+        if bid in seen:      # 环（normalize 已拦，这里兜底防递归爆栈）
+            out[bid] = np.eye(3)
+            return out[bid]
+        seen.add(bid)
+        b = bones[bid]
+        if bid in override:
+            x, y, ang, sc = override[bid]
+            m = _T(x, y) @ _R(ang) @ _S(sc)
         else:
-            out[bid] = rest @ local
+            k = _sample(b.get("keys") or [], frame)
+            local = _T(k["x"], k["y"]) @ _R(k["rot"]) @ _S(k["scale"])
+            parent = b.get("parent")
+            if parent and parent in bones:
+                pb = bones[parent]
+                m = build(parent, seen) @ _T(b["x"] - pb["x"], b["y"] - pb["y"]) @ local
+            else:
+                m = _T(b["x"], b["y"]) @ local
+        out[bid] = m
+        return m
+
+    for bid in bones:
+        build(bid, set())
     return out
+
+
+def _matrix_angle(m: np.ndarray) -> float:
+    return math.atan2(float(m[1, 0]), float(m[0, 0]))
+
+
+def _matrix_scale(m: np.ndarray) -> float:
+    return max(0.01, math.hypot(float(m[0, 0]), float(m[1, 0])))
+
+
+def _solve_ik(proj: Dict[str, Any], frame: int,
+              base: Dict[str, np.ndarray], override: Dict[str, tuple],
+              ik: Dict[str, Any], iterations: int = 12) -> None:
+    """FABRIK 解 2D 骨链，把结果写进 override。
+
+    为什么用 FABRIK 而不是解析二骨：解析式只对两节闭式可解，手臂一旦是
+    三节（大臂/小臂/手）就得写分支；FABRIK 对 N 节统一，十几行就够，
+    迭代 12 次在像素级已经收敛。
+
+    关节取「骨骼原点的世界坐标」，末端 effector 再沿最后一节的朝向伸出
+    该骨骼的 len —— 骨骼在数据里是一个点，长度靠 len 补足。
+    """
+    bones = {b["id"]: b for b in proj.get("bones") or []}
+    chain: List[str] = []
+    bid = ik.get("end")
+    while bid and bid in bones and len(chain) < int(ik.get("chain") or 2):
+        chain.append(bid)
+        bid = bones[bid].get("parent")
+    chain.reverse()
+    if len(chain) < 2:
+        return
+
+    pos: List[np.ndarray] = []
+    angs: List[float] = []
+    lens: List[float] = []
+    for b_id in chain:
+        if b_id in override:
+            x, y, ang, _sc = override[b_id]
+            pos.append(np.array([x, y], dtype=np.float64))
+            angs.append(math.radians(ang))
+        else:
+            m = base.get(b_id, np.eye(3))
+            pos.append(np.array([m[0, 2], m[1, 2]], dtype=np.float64))
+            angs.append(_matrix_angle(m))
+        lens.append(float(bones[b_id].get("len") or 60))
+
+    tip = pos[-1] + np.array([math.cos(angs[-1]), math.sin(angs[-1])]) * lens[-1]
+    pts = pos + [tip]                      # 关节 0..n，pts[n] 为末端
+    target = np.array([_sample(ik.get("keys") or [], frame)[k] for k in ("x", "y")],
+                      dtype=np.float64)
+    root = pts[0].copy()
+    total = float(sum(lens))
+    reach = float(np.linalg.norm(target - root))
+
+    if reach >= total:
+        # 够不着：整条链朝目标方向伸直（比反复迭代更稳定，也符合直觉）
+        d = (target - root) / (reach or 1.0)
+        cur = root.copy()
+        pts = [cur.copy()]
+        for L in lens:
+            cur = cur + d * L
+            pts.append(cur.copy())
+    else:
+        for _ in range(iterations):
+            pts[-1] = target.copy()
+            for i in range(len(pts) - 2, -1, -1):
+                v = pts[i] - pts[i + 1]
+                n = float(np.linalg.norm(v)) or 1.0
+                pts[i] = pts[i + 1] + v / n * lens[i]
+            pts[0] = root.copy()
+            for i in range(len(pts) - 1):
+                v = pts[i + 1] - pts[i]
+                n = float(np.linalg.norm(v)) or 1.0
+                pts[i + 1] = pts[i] + v / n * lens[i]
+            if float(np.linalg.norm(pts[-1] - target)) < 0.5:
+                break
+
+    for i, b_id in enumerate(chain):
+        d = pts[i + 1] - pts[i]
+        ang = math.degrees(math.atan2(float(d[1]), float(d[0])))
+        # 保持该骨骼原有的缩放：override 里存的第 4 项就是缩放值本身
+        sc = override[b_id][3] if b_id in override else _matrix_scale(base.get(b_id, np.eye(3)))
+        override[b_id] = (float(pts[i][0]), float(pts[i][1]), ang, sc)
+
+
+def bone_world(proj: Dict[str, Any], frame: int) -> Dict[str, np.ndarray]:
+    """每根骨骼在该帧的世界矩阵（FK + IK 覆盖）。"""
+    base = _fk_world(proj, frame)
+    iks = proj.get("ik") or []
+    if not iks:
+        return base
+    override: Dict[str, tuple] = {}
+    for ik in iks:
+        _solve_ik(proj, frame, base, override, ik)
+    return _fk_world(proj, frame, override) if override else base
 
 
 # ---------- 自由变形 ----------

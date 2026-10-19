@@ -131,6 +131,22 @@ def _num(v: Any, default: float = 0.0) -> float:
     return f if f == f and abs(f) != float("inf") else default
 
 
+def _bez(v: Any) -> Optional[List[float]]:
+    """cubic-bezier 控制点：只收 4 个数，x 夹到 [0,1]（CSS 同样约束）。
+
+    y 允许超出 0..1 —— 过冲（anticipation / 回弹）就是靠它做的，
+    夹掉 y 等于把曲线编辑器的表达力砍掉一半。
+    """
+    if not isinstance(v, (list, tuple)) or len(v) != 4:
+        return None
+    try:
+        x1, y1, x2, y2 = (float(v[0]), float(v[1]), float(v[2]), float(v[3]))
+    except (TypeError, ValueError):
+        return None
+    return [round(max(0.0, min(x1, 1.0)), 3), round(y1, 3),
+            round(max(0.0, min(x2, 1.0)), 3), round(y2, 3)]
+
+
 def normalize(proj: Dict[str, Any]) -> Dict[str, Any]:
     """清洗工程：补齐字段、夹取范围、去重 id、关键帧排序。
 
@@ -153,13 +169,16 @@ def normalize(proj: Dict[str, Any]) -> Dict[str, Any]:
                       "parent": (str(b["parent"]) if b.get("parent") else None),
                       "x": round(_num(b.get("x"), out["canvas"][0] / 2), 2),
                       "y": round(_num(b.get("y"), out["canvas"][1] / 2), 2),
+                      # 骨长：IK 解算与末端伸出方向都靠它；缺省 60px
+                      "len": max(4.0, round(_num(b.get("len"), 60), 2)),
                       # 骨骼自身也能打关键帧（根骨骼整体位移、手臂摆动）
                       "keys": [{"frame": max(0, min(int(_num(k.get("frame"), 0)), out["frames"] - 1)),
                                 "x": round(_num(k.get("x")), 2), "y": round(_num(k.get("y")), 2),
                                 "rot": round(_num(k.get("rot")), 2),
                                 "scale": max(0.01, round(_num(k.get("scale"), 1.0), 4)),
                                 "ease": k.get("ease") if k.get("ease") in
-                                ("linear", "ease-in", "ease-out") else "linear"}
+                                ("linear", "ease-in", "ease-out") else "linear",
+                                "bez": _bez(k.get("bez"))}
                                for k in (b.get("keys") or [])[:MAX_FRAMES]]})
     if not bones:
         bones = [{"id": "root", "name": "根骨骼", "parent": None,
@@ -180,6 +199,37 @@ def normalize(proj: Dict[str, Any]) -> Dict[str, Any]:
             seen_chain.add(cur["id"])
             cur = next((x for x in bones if x["id"] == cur["parent"]), None)
 
+    # IK 目标：只允许挂在已存在的骨骼上；链长按祖先数量截断，
+    # 免得写了 6 节但只有 2 根父骨骼时解算出 NaN
+    iks: List[Dict[str, Any]] = []
+    for it in (out.get("ik") or [])[:8]:
+        eid = str(it.get("end") or "").strip()
+        if eid not in ids:
+            continue
+        depth = 1
+        cur = next((x for x in bones if x["id"] == eid), None)
+        while cur and cur.get("parent") and depth < 6:
+            depth += 1
+            cur = next((x for x in bones if x["id"] == cur["parent"]), None)
+        chain = max(2, min(int(_num(it.get("chain"), 2)), depth))
+        ks = []
+        for k in (it.get("keys") or [])[:MAX_FRAMES]:
+            ks.append({"frame": max(0, min(int(_num(k.get("frame"), 0)), out["frames"] - 1)),
+                       "x": round(_num(k.get("x")), 2), "y": round(_num(k.get("y")), 2),
+                       "ease": k.get("ease") if k.get("ease") in
+                       ("linear", "ease-in", "ease-out") else "linear",
+                       "bez": _bez(k.get("bez"))})
+        dedup_ik: Dict[int, Dict[str, Any]] = {}
+        for k in sorted(ks, key=lambda x: x["frame"]):
+            dedup_ik[k["frame"]] = k
+        if not dedup_ik:
+            continue
+        iks.append({"id": str(it.get("id") or f"ik{len(iks)}"),
+                    "name": str(it.get("name") or f"IK {len(iks) + 1}"),
+                    "end": eid, "chain": chain,
+                    "keys": [dedup_ik[i] for i in sorted(dedup_ik)]})
+    out["ik"] = iks
+
     tracks = []
     for t in (out.get("tracks") or [])[:MAX_TRACKS]:
         tid = str(t.get("id") or "").strip()
@@ -192,7 +242,8 @@ def normalize(proj: Dict[str, Any]) -> Dict[str, Any]:
                        "rot": round(_num(k.get("rot")), 2),
                        "scale": max(0.01, round(_num(k.get("scale"), 1.0), 4)),
                        "opacity": max(0.0, min(round(_num(k.get("opacity"), 1.0), 4), 1.0)),
-                       "ease": k.get("ease") if k.get("ease") in ("linear", "ease-in", "ease-out") else "linear"})
+                       "ease": k.get("ease") if k.get("ease") in ("linear", "ease-in", "ease-out") else "linear",
+                       "bez": _bez(k.get("bez"))})
         # 同一帧多个关键帧只留最后一个，渲染时不必再挑
         dedup: Dict[int, Dict[str, Any]] = {}
         for k in sorted(ks, key=lambda x: x["frame"]):
