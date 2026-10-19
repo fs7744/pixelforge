@@ -250,6 +250,85 @@ async def main() -> None:
     assert _dm["order"] == [0, 1, 2], _dm["order"]   # 背景 → 高处小物件 → 低处大遮挡
     print(f"[7i] layers   → 层序按底边高度：{_dm['order']}（面积大≠更近）OK")
 
+    # ---------- 动画引擎：骨骼 FK / 关键帧 / 自由变形 / 多轨 / 笔刷 / 法线 ----------
+    from backend.app.anim import fx as anim_fx
+    from backend.app.anim import model as anim_model
+    from backend.app.anim import normals as anim_normals
+    from backend.app.anim import render as anim_render
+
+    bar = Image.new("RGBA", (60, 20), (0, 0, 0, 0))
+    ImageDraw.Draw(bar).rectangle((0, 0, 59, 19), fill=(240, 80, 60, 255))
+    block = Image.new("RGBA", (20, 20), (0, 0, 0, 0))
+    ImageDraw.Draw(block).rectangle((0, 0, 19, 19), fill=(60, 120, 240, 255))
+    a_bar = storage.save_asset(bar, kind="generated", name="smoke-anim-bar")
+    a_blk = storage.save_asset(block, kind="generated", name="smoke-anim-block")
+    tex = {a_bar["id"]: bar, a_blk["id"]: block}.get
+
+    proj = anim_model.normalize({
+        "id": "abcdef012345", "name": "smoke", "canvas": [200, 200],
+        "fps": 12, "frames": 3,
+        "bones": [
+            {"id": "root", "name": "根", "parent": None, "x": 100, "y": 100},
+            {"id": "arm", "name": "臂", "parent": "root", "x": 140, "y": 100,
+             "keys": [{"frame": 0, "rot": 0}, {"frame": 2, "rot": 90}]},
+            {"id": "hand", "name": "手", "parent": "arm", "x": 160, "y": 100},
+        ],
+        "tracks": [
+            {"id": "t1", "name": "横条", "assetId": a_bar["id"], "bone": "root",
+             "pivot": [30, 10], "keyframes": [{"frame": 0, "x": 0}, {"frame": 2, "x": 20}]},
+            {"id": "t2", "name": "方块", "assetId": a_blk["id"], "bone": "hand",
+             "pivot": [10, 10], "keyframes": [{"frame": 0}]},
+        ],
+    })
+    assert len(proj["tracks"]) == 2 and proj["bones"][1]["parent"] == "root"
+    f0 = anim_render.render_frame(proj, 0, tex)
+    assert f0.getpixel((160, 100))[3] > 200, f0.getpixel((160, 100))
+    f1 = anim_render.render_frame(proj, 1, tex)
+    # 横条：x 0→20 的第 1 帧应插值到 10，左端从 70 移到 80
+    assert f1.getpixel((72, 100))[3] < 40 and f1.getpixel((82, 100))[3] > 200, \
+        (f1.getpixel((72, 100)), f1.getpixel((82, 100)))
+    f2 = anim_render.render_frame(proj, 2, tex)
+    # 臂转 90°：手（相对臂 +20,0）绕臂关节转到 (140,120)
+    assert f2.getpixel((140, 120))[3] > 200, f2.getpixel((140, 120))
+    print("[9] anim     → 骨骼 FK（父转子跟）/ 关键帧插值 / 多轨合成 OK")
+
+    # 自由变形：整格右移 5px → 内容整体右移，左侧 5 列露空
+    # （方向约定：控制点是「把内容推向哪」，往右拖就该往右走）
+    stripe = Image.new("RGBA", (20, 20), (60, 120, 240, 255))
+    ImageDraw.Draw(stripe).rectangle((8, 0, 11, 19), fill=(255, 255, 255, 255))
+    shifted = anim_render.warp_image(stripe, [[5, 0]] * 9)
+    assert shifted.getpixel((0, 10))[3] == 0, shifted.getpixel((0, 10))
+    assert shifted.getpixel((15, 10))[0] > 200, shifted.getpixel((15, 10))
+    print("[9b] warp    → 3×3 控制点双线性变形（方向/边界正确）OK")
+
+    # 笔刷：五种笔刷都要能画出不透明像素，且同数据两次渲染完全一致
+    strokes = [{"brush": b, "color": "#ffcc33", "size": 10,
+                "points": [[20, 40], [60, 60], [100, 45]], "from": 0, "to": 2}
+               for b in anim_fx.BRUSHES]
+    fx1 = anim_fx.render(strokes, (160, 120), frame=1)
+    fx2 = anim_fx.render(strokes, (160, 120), frame=1)
+    assert fx1.getbbox() is not None, "笔刷没画出东西"
+    assert fx1.tobytes() == fx2.tobytes(), "同笔迹两次渲染不一致"
+    # 帧区间之外不画
+    assert anim_fx.render(strokes, (160, 120), frame=9).getbbox() is None
+    print(f"[9c] fx      → {len(anim_fx.BRUSHES)} 种笔刷可复现渲染 OK")
+
+    # 法线 + 材质掩码：平铺色块的中心应接近「正对镜头」(128,128,255)
+    nrm_src = Image.new("RGBA", (24, 24), (0, 0, 0, 0))
+    ImageDraw.Draw(nrm_src).rectangle((6, 6, 17, 17), fill=(200, 200, 200, 255))
+    nrm, msk, nmeta = anim_normals.analyze(nrm_src)
+    cx, cy, cz, ca = nrm.getpixel((12, 12))
+    # 中心是「大致朝镜头」而不是精确 (128,128)：距离变换在偶数尺寸上峰值
+    # 落在像素之间，梯度不会严格为零
+    assert abs(cx - 128) < 45 and abs(cy - 128) < 45 and cz > 235, nrm.getpixel((12, 12))
+    assert nrm.getpixel((0, 0))[3] == 0, "透明区应是 alpha=0"
+    assert msk.size == nrm_src.size and nmeta["solidRatio"] < 0.6, nmeta
+    print(f"[9d] normals → 法线 {nrm.size} · 中心 {nrm.getpixel((12, 12))} · "
+          f"金属占比 {nmeta['metalRatio'] * 100:.0f}% OK")
+
+    for it in (a_bar, a_blk):
+        storage.delete_asset(it["id"])
+
     png = io.BytesIO()
     rpg.save(png, "PNG")
     print(f"[8] export   → rpgmaker png {len(png.getvalue())} bytes")

@@ -7,10 +7,11 @@ import PostProcess from './views/PostProcess'
 import Restyle from './views/Restyle'
 import CharPixel from './views/CharPixel'
 import Library from './views/Library'
+import Editor from './views/Editor'
 import SettingsView from './views/Settings'
 import PreviewOverlay from './Preview'
 
-type Tab = 'workbench' | 'restyle' | 'charpixel' | 'workflow' | 'post' | 'library' | 'settings'
+type Tab = 'workbench' | 'restyle' | 'charpixel' | 'workflow' | 'post' | 'editor' | 'library' | 'settings'
 
 const TABS: { id: Tab; label: string }[] = [
   { id: 'workbench', label: '生成工作台' },
@@ -18,6 +19,7 @@ const TABS: { id: Tab; label: string }[] = [
   { id: 'charpixel', label: '人物像素化' },
   { id: 'workflow', label: '工作流' },
   { id: 'post', label: '后处理' },
+  { id: 'editor', label: '动画编辑' },
   { id: 'library', label: '素材库' },
   { id: 'settings', label: '模型设置' },
 ]
@@ -120,6 +122,7 @@ function Shell() {
         />
       )}
       {tab === 'post' && <PostProcess incoming={pending} />}
+      {tab === 'editor' && <Editor />}
       {tab === 'library' && (
         <Library
           onRestyle={(asset) => {

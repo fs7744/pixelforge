@@ -13,6 +13,7 @@ const PIPELINES = [
   { id: 'video', name: '视频/GIF 导入', tag: 'EXTRACT', desc: '录像/GIF 拆成帧资产，可选逐帧抠图（绿幕直接可用）' },
   { id: 'refnorm', name: '参考图规范化', tag: 'NORMALIZE', desc: '裁主体 → 方形画布 → 底部对齐基线，参考图几何一致重跑才可比' },
   { id: 'layers', name: '场景语义分层', tag: 'LAYERED', desc: '一张场景图拆成 N 张同坐标 RGBA 图层，视差与前景替换直接用' },
+  { id: 'normals', name: '法线 / 材质掩码', tag: 'NORMAL+METAL', desc: '逐帧几何法线 + 金属高光掩码，Godot/Unity 直接吃' },
   { id: 'resize', name: '尺寸规整', tag: 'NEAREST', desc: '最近邻硬缩放 / 等比留白 / RPGMaker 一键' },
   { id: 'sheet', name: 'Sprite Sheet 拆分', tag: 'N×M', desc: '按行列拆帧并生成引擎索引 JSON' },
   { id: 'pixelize', name: '像素化对齐', tag: 'PALETTE', desc: '分块单色 + 限定调色板，把 AI 图变成规整像素风' },
@@ -71,6 +72,11 @@ export default function PostProcess({ incoming }: Props) {
   const [layN, setLayN] = useState(4)
   const [laySteps, setLaySteps] = useState(50)
   const [layRes, setLayRes] = useState(640)
+  // 法线：强度/模糊/掩码模式（阈值高=只挑最亮的金属高光）
+  const [nrmStrength, setNrmStrength] = useState(1.3)
+  const [nrmBlur, setNrmBlur] = useState(2)
+  const [nrmMode, setNrmMode] = useState('highlight')
+  const [nrmTh, setNrmTh] = useState(0.6)
   const [styles, setStyles] = useState<StyleInfo[]>([])
   const [restyleId, setRestyleId] = useState('')
   const [aiSeed, setAiSeed] = useState('')
@@ -200,6 +206,25 @@ export default function PostProcess({ incoming }: Props) {
         const warn = res.meta.warnings?.length ? ` · ${res.meta.warnings.join('；')}` : ''
         setNote(
           `${res.meta.layerCount} 层 · ${res.meta.size[0]}×${res.meta.size[1]} · 覆盖率 ${cov}%${warn}`,
+        )
+      } else if (pipeline === 'normals') {
+        const res = await api.normals(
+          {
+            strength: nrmStrength,
+            blur: nrmBlur,
+            metalMode: nrmMode,
+            metalThreshold: nrmTh,
+            preview: true,
+          },
+          file,
+        )
+        if (!res.normal) throw new Error(res.detail || '法线生成失败')
+        setOut(res.preview || res.normal)
+        const pct = Math.round((res.meta?.metalRatio || 0) * 100)
+        const cov = Math.round((res.meta?.solidRatio || 0) * 100)
+        setNote(
+          `法线 ${res.meta?.size?.join('×')} · 不透明 ${cov}% · 金属掩码 ${pct}%` +
+          ` · 法线图与掩码已存入素材库（OpenGL 切空间${res.meta?.flipGreen ? '，已翻转绿通道' : ''}）`,
         )
       } else if (pipeline === 'video') {
         const res = await api.videoFrames(
@@ -606,6 +631,39 @@ export default function PostProcess({ incoming }: Props) {
               与「生成四遍再抠纯色键」的区别：这是拆**同一张**图，透视和轮廓天然对齐，
               每层自带 alpha，叠起来没有接缝。需要 Qwen-Image-Layered 底座（约 57.7GB，
               未下载时提示 PYTHONPATH=. python backend/fetch_qwen_layered.py）。
+            </div>
+          </>
+        )}
+
+        {pipeline === 'normals' && (
+          <>
+            <div className="label">法线强度 {nrmStrength.toFixed(2)}</div>
+            <input type="range" min={0.2} max={3} step={0.05} value={nrmStrength}
+                   style={{ width: '100%' }}
+                   onChange={(e) => setNrmStrength(+e.target.value)} />
+            <div className="label" style={{ marginTop: 8 }}>模糊 {nrmBlur.toFixed(1)}px</div>
+            <input type="range" min={0.5} max={8} step={0.5} value={nrmBlur}
+                   style={{ width: '100%' }}
+                   onChange={(e) => setNrmBlur(+e.target.value)} />
+            <div className="label" style={{ marginTop: 8 }}>材质掩码</div>
+            <div className="chips mt8">
+              {[['highlight', '高光（亮+低饱和）'], ['chroma', '彩色金属'], ['none', '不生成']].map(([v, l]) => (
+                <button key={v} className={`chip sm ${nrmMode === v ? 'on' : ''}`}
+                        onClick={() => setNrmMode(v)}>{l}</button>
+              ))}
+            </div>
+            {nrmMode !== 'none' && (
+              <>
+                <div className="label" style={{ marginTop: 8 }}>阈值 {nrmTh.toFixed(2)}</div>
+                <input type="range" min={0.2} max={0.95} step={0.01} value={nrmTh}
+                       style={{ width: '100%' }}
+                       onChange={(e) => setNrmTh(+e.target.value)} />
+              </>
+            )}
+            <div className="hint">
+              高度场由「内缩距离 78% + 亮度 22%」反推：边缘圆润、内部鼓起，属于几何近似，
+              不是 h3 那种逐帧标注传播。薄片、遮挡边界会有偏差；正对镜头的平面也可能带一点假斜率。
+              结果给 Godot/Unity 的 2D 光照用，绿通道朝上（OpenGL 约定）。
             </div>
           </>
         )}

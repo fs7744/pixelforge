@@ -43,6 +43,9 @@ KIND_LABELS: Dict[str, str] = {
     "frame": "帧",
     "sheet": "精灵表",
     "layer": "图层",
+    "normal": "法线",
+    "mask": "材质掩码",
+    "normalpreview": "法线预览",
 }
 
 # 管线标签：三视图这类「同 kind 不同来源」的东西只能靠它区分——

@@ -1680,6 +1680,61 @@ from backend.app.providers.diffusers_local import detect_family as _df  # noqa: 
 check("detect_family 认 Layered", _df(_with_tmp) == "qwen_layered", _df(_with_tmp))
 shutil.rmtree(_with_tmp, ignore_errors=True)
 
+print("== 动画工程与法线端点 ==")
+_tex = storage.save_asset(Image.new("RGBA", (40, 40), (200, 60, 60, 255)),
+                          kind="generated", name="anim-test-tex")
+remember(_tex)
+_r = client.post("/api/anim/projects", json={"name": "端点测试", "canvas": [120, 120], "frames": 4})
+_proj = _r.json()
+_pid = _proj.get("id")
+check("创建动画工程", _r.status_code == 200 and bool(_pid), _r.text[:80])
+
+_proj["tracks"] = [{"id": "t1", "name": "条", "assetId": _tex["id"], "bone": "root",
+                    "pivot": [20, 20],
+                    "keyframes": [{"frame": 0, "x": 0}, {"frame": 3, "x": 20}]}]
+_r = client.put(f"/api/anim/projects/{_pid}", json=_proj)
+check("保存工程（含轨道/关键帧）",
+      _r.status_code == 200 and len(_r.json().get("tracks") or []) == 1, _r.text[:100])
+
+_r = client.get(f"/api/anim/projects/{_pid}/frame/0.png")
+check("取单帧 PNG", _r.status_code == 200
+      and _r.headers.get("content-type") == "image/png" and len(_r.content) > 60,
+      f"{_r.status_code} {len(_r.content)}")
+check("帧号越界 → 400",
+      client.get(f"/api/anim/projects/{_pid}/frame/99.png").status_code == 400)
+
+_r = client.post(f"/api/anim/projects/{_pid}/render",
+                 json={"frames": "0-2", "cols": 2, "normals": True})
+_names = []
+if _r.status_code == 200 and _r.content[:2] == b"PK":
+    with zipfile.ZipFile(io.BytesIO(_r.content)) as _zf:
+        _names = _zf.namelist()
+check("导出 ZIP 200", _r.status_code == 200 and _r.content[:2] == b"PK",
+      f"{_r.status_code} {_r.text[:120]}")
+check("ZIP 含帧/拼图/法线/工程",
+      "sheet.png" in _names and "project.json" in _names
+      and any(n.startswith("frames/") for n in _names)
+      and any(n.startswith("normals/") for n in _names), str(_names[:6]))
+check("工程出现在列表",
+      any(p.get("id") == _pid for p in client.get("/api/anim/projects").json()["projects"]))
+check("删除工程", client.delete(f"/api/anim/projects/{_pid}").status_code == 200)
+check("删除后再取 → 404", client.get(f"/api/anim/projects/{_pid}").status_code == 404)
+
+_nbuf = io.BytesIO()
+Image.new("RGBA", (32, 32), (220, 220, 220, 255)).save(_nbuf, "PNG")
+_r = client.post("/api/pipeline/normals",
+                 files={"file": ("n.png", _nbuf.getvalue(), "image/png")},
+                 data={"strength": "1.0", "metalMode": "highlight"})
+_j = _r.json() if _r.status_code == 200 else {}
+for _k in ("normal", "mask", "preview"):
+    remember(_j.get(_k))
+check("normals 端点返回 法线/掩码/预览", _r.status_code == 200
+      and all(_j.get(k) for k in ("normal", "mask", "preview")), _r.text[:100])
+check("normals 无输入 → 400", client.post("/api/pipeline/normals", data={}).status_code == 400)
+_r = client.post("/api/pipeline/normals/batch",
+                 json={"frameAssetIds": [_tex["id"], _tex["id"]]})
+check("normals 批量 ZIP", _r.status_code == 200 and _r.content[:2] == b"PK", str(_r.status_code))
+
 print("== 清理测试资产 ==")
 cleanup_assets(verbose=True)
 

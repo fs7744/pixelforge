@@ -572,4 +572,80 @@ export const api = {
       body: JSON.stringify(payload),
     }).then(json),
   runAll: (runId: string) => fetch(`/api/runs/${runId}/run-all`, { method: 'POST' }).then(json),
+
+  // ---- 动画编辑器 ----
+  animList: (): Promise<{ projects: any[] }> => fetch('/api/anim/projects').then(json),
+  animCreate: (payload: { name?: string; canvas?: [number, number]; frames?: number }) =>
+    fetch('/api/anim/projects', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    }).then(json),
+  animGet: (id: string) => fetch(`/api/anim/projects/${id}`).then(json),
+  animSave: (id: string, proj: any) =>
+    fetch(`/api/anim/projects/${id}`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(proj),
+    }).then(json),
+  animDelete: (id: string) =>
+    fetch(`/api/anim/projects/${id}`, { method: 'DELETE' }).then(json),
+  /** 单帧 PNG；bust 用于编辑后强制刷新（后端已带 no-store，双保险） */
+  animFrameUrl: (id: string, index: number, scale = 1, bust = 0) =>
+    `/api/anim/projects/${id}/frame/${index}.png?scale=${scale}&t=${bust}`,
+  animRender: async (id: string, payload: {
+    frames?: string; scale?: number; cols?: number; normals?: boolean; name?: string
+  }) => {
+    const res = await fetch(`/api/anim/projects/${id}/render`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    })
+    if (!res.ok) {
+      const d = await res.json().catch(() => ({}))
+      throw new Error(d.detail || '导出失败')
+    }
+    const blob = await res.blob()
+    const url = URL.createObjectURL(blob)
+    const a = document.createElement('a')
+    a.href = url
+    a.download = `${payload.name || 'anim'}.zip`
+    a.click()
+    setTimeout(() => URL.revokeObjectURL(url), 1000)
+  },
+
+  // ---- 法线 / 材质掩码 ----
+  normals: (
+    payload: {
+      strength?: number; blur?: number; metalMode?: string
+      metalThreshold?: number; flipGreen?: boolean; preview?: boolean; assetId?: string
+    } = {},
+    file?: File | null,
+  ) => {
+    const fd = new FormData()
+    if (file) fd.append('file', file)
+    if (payload.assetId) fd.append('refAssetId', payload.assetId)
+    fd.append('strength', String(payload.strength ?? 1.3))
+    fd.append('blur', String(payload.blur ?? 2))
+    fd.append('metalMode', payload.metalMode || 'highlight')
+    fd.append('metalThreshold', String(payload.metalThreshold ?? 0.6))
+    fd.append('flipGreen', String(payload.flipGreen ?? false))
+    fd.append('preview', String(payload.preview ?? true))
+    return fetch('/api/pipeline/normals', { method: 'POST', body: fd }).then(json)
+  },
+  normalsBatch: async (frameAssetIds: string[], opts: Record<string, any> = {}) => {
+    const res = await fetch('/api/pipeline/normals/batch', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ frameAssetIds, ...opts }),
+    })
+    if (!res.ok) throw new Error('批量法线失败')
+    const blob = await res.blob()
+    const url = URL.createObjectURL(blob)
+    const a = document.createElement('a')
+    a.href = url
+    a.download = 'normals.zip'
+    a.click()
+    setTimeout(() => URL.revokeObjectURL(url), 1000)
+  },
 }

@@ -8,6 +8,7 @@ from __future__ import annotations
 import asyncio
 import io
 import json
+import urllib.parse
 import zipfile
 from contextlib import asynccontextmanager
 from typing import Any, Dict, List, Optional
@@ -15,7 +16,7 @@ from typing import Any, Dict, List, Optional
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.concurrency import run_in_threadpool
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, StreamingResponse
+from fastapi.responses import FileResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from PIL import Image
 from pydantic import BaseModel, field_validator
@@ -1437,6 +1438,265 @@ async def run_workflow_all(run_id: str):
         raise HTTPException(499, "已取消")
     except Exception as e:  # pragma: no cover
         raise HTTPException(500, str(e))
+
+
+# ---------- 动画编辑（骨骼 / 多轨 / 自由变形 / 特效笔刷 / 法线） ----------
+def _parse_frames(spec: Optional[str], total: int) -> List[int]:
+    """帧范围解析："0-11" / "0,2,4" / 空 = 全部。越界截断，不报错。"""
+    if not spec:
+        return list(range(total))
+    out: List[int] = []
+    for part in str(spec).split(","):
+        part = part.strip()
+        if not part:
+            continue
+        if "-" in part:
+            a, b = part.split("-", 1)
+            try:
+                lo, hi = int(a), int(b)
+            except ValueError:
+                continue
+            out.extend(range(max(0, lo), min(total - 1, hi) + 1))
+        else:
+            try:
+                i = int(part)
+            except ValueError:
+                continue
+            if 0 <= i < total:
+                out.append(i)
+    return sorted(set(out)) or list(range(total))
+
+
+def _anim_loader():
+    """同一次渲染内复用已解码的贴图：十来条轨道共用一张图时不该读十遍盘。"""
+    cache: Dict[str, Image.Image] = {}
+
+    def load(aid: str):
+        if aid not in cache:
+            item = storage.get_asset(aid)
+            if not item:
+                return None
+            cache[aid] = Image.open(storage.asset_path(item)).convert("RGBA")
+        return cache[aid]
+
+    return load
+
+
+@app.get("/api/anim/projects")
+async def anim_projects():
+    from .anim import model as anim_model
+
+    return {"projects": anim_model.list_projects()}
+
+
+@app.post("/api/anim/projects")
+async def anim_project_create(payload: Optional[Dict[str, Any]] = None):
+    from .anim import model as anim_model
+
+    p = payload or {}
+    canvas = p.get("canvas") or [512, 512]
+    return anim_model.create(p.get("name") or "", canvas, int(p.get("frames") or 12))
+
+
+@app.get("/api/anim/projects/{pid}")
+async def anim_project_get(pid: str):
+    from .anim import model as anim_model
+
+    proj = anim_model.get(pid)
+    if not proj:
+        raise HTTPException(404, "工程不存在")
+    return proj
+
+
+@app.put("/api/anim/projects/{pid}")
+async def anim_project_save(pid: str, payload: Dict[str, Any]):
+    from .anim import model as anim_model
+
+    if not anim_model.get(pid):
+        raise HTTPException(404, "工程不存在")
+    payload["id"] = pid
+    try:
+        proj = anim_model.normalize(payload)
+    except Exception as e:
+        raise HTTPException(400, f"工程数据不合法：{e}")
+    return anim_model.save(proj)
+
+
+@app.delete("/api/anim/projects/{pid}")
+async def anim_project_delete(pid: str):
+    from .anim import model as anim_model
+
+    if not anim_model.delete(pid):
+        raise HTTPException(404, "工程不存在")
+    return {"ok": True}
+
+
+@app.get("/api/anim/projects/{pid}/frame/{index}.png")
+async def anim_frame_png(pid: str, index: int, scale: float = 1.0):
+    from .anim import model as anim_model
+    from .anim import render as anim_render
+
+    proj = anim_model.get(pid)
+    if not proj:
+        raise HTTPException(404, "工程不存在")
+    if not (0 <= index < int(proj["frames"])):
+        raise HTTPException(400, f"帧号越界：{index}")
+    img = await run_in_threadpool(anim_render.render_frame, proj, index, _anim_loader())
+    if scale and abs(scale - 1.0) > 1e-3:
+        img = img.resize((max(1, round(img.width * scale)),
+                          max(1, round(img.height * scale))), Image.NEAREST)
+    buf = io.BytesIO()
+    img.save(buf, "PNG")
+    # 编辑中随时会变，禁止浏览器缓存，否则改完参数看到的是旧帧
+    return Response(content=buf.getvalue(), media_type="image/png",
+                    headers={"Cache-Control": "no-store"})
+
+
+class AnimRenderPayload(BaseModel):
+    frames: Optional[str] = None
+    scale: float = 1.0
+    cols: int = 4
+    normals: bool = False
+
+
+@app.post("/api/anim/projects/{pid}/render")
+async def anim_project_render(pid: str, payload: AnimRenderPayload):
+    """导出：帧序列 + 预览拼图 + 工程 JSON（可选逐帧法线/掩码）。"""
+    from .anim import model as anim_model
+    from .anim import normals as anim_normals
+    from .anim import render as anim_render
+
+    proj = anim_model.get(pid)
+    if not proj:
+        raise HTTPException(404, "工程不存在")
+    idx = _parse_frames(payload.frames, int(proj["frames"]))
+    scale = max(0.1, min(float(payload.scale or 1.0), 4.0))
+    loader = _anim_loader()
+
+    def _build() -> bytes:
+        pairs = anim_render.render_frames(proj, idx, loader, scale=scale)
+        buf = io.BytesIO()
+        with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+            for i, img in pairs:
+                b = io.BytesIO()
+                img.save(b, "PNG")
+                zf.writestr(f"frames/{i:03d}.png", b.getvalue())
+            sheet = anim_render.sheet([im for _, im in pairs], cols=int(payload.cols or 4))
+            b = io.BytesIO()
+            sheet.save(b, "PNG")
+            zf.writestr("sheet.png", b.getvalue())
+            if payload.normals:
+                # 逐帧法线：只对**导出的帧**做，别把整段都算一遍
+                for i, img in pairs:
+                    if img.getchannel("A").getbbox() is None:
+                        continue
+                    nrm, msk, _m = anim_normals.analyze(img)
+                    nb, mb = io.BytesIO(), io.BytesIO()
+                    nrm.save(nb, "PNG")
+                    msk.save(mb, "PNG")
+                    zf.writestr(f"normals/{i:03d}_normal.png", nb.getvalue())
+                    zf.writestr(f"normals/{i:03d}_metal.png", mb.getvalue())
+            zf.writestr("project.json", json.dumps(proj, ensure_ascii=False, indent=1))
+            zf.writestr("README.txt",
+                        "frames/ 逐帧 PNG（scale 已应用，未烧 AI 角标）\n"
+                        "sheet.png 预览拼图\nnormals/ OpenGL 切空间法线 + 材质掩码\n"
+                        "project.json 可直接再导入编辑器\n")
+        return buf.getvalue()
+
+    data = await run_in_threadpool(_build)
+    raw = f"{proj.get('name') or 'anim'}-{pid}.zip"
+    # HTTP 头只能放 latin-1：中文工程名直接塞进去会在响应阶段抛
+    # UnicodeEncodeError（测试里就是这么炸的）。ASCII 兜底 + RFC 5987 双写。
+    ascii_name = "".join(ch if ch.isascii() and ch not in ' "\\' else "_"
+                         for ch in raw) or f"anim-{pid}.zip"
+    quoted = urllib.parse.quote(raw)
+    return Response(content=data, media_type="application/zip",
+                    headers={"Content-Disposition":
+                             f"attachment; filename=\"{ascii_name}\"; filename*=UTF-8''{quoted}"})
+
+
+@app.post("/api/pipeline/normals")
+async def pipeline_normals(
+    file: Optional[UploadFile] = File(None),
+    refAssetId: str = Form(""),
+    strength: float = Form(1.3),
+    blur: float = Form(2.0),
+    metalMode: str = Form("highlight"),
+    metalThreshold: float = Form(0.6),
+    flipGreen: bool = Form(False),
+    preview: bool = Form(True),
+):
+    """逐帧几何法线 + 材质掩码（近似，说明见 anim/normals.py 顶部）。"""
+    from .anim import normals as anim_normals
+
+    if file is not None:
+        img = await _read_image(file)
+    elif refAssetId:
+        img = _load_asset_image(refAssetId)
+    else:
+        raise HTTPException(400, "需要一张图（上传 file 或指定 refAssetId）")
+
+    nrm, msk, meta = await run_in_threadpool(
+        anim_normals.analyze, img, strength=strength, blur=blur,
+        metal_mode=metalMode, metal_threshold=metalThreshold, flip_green=flipGreen)
+    n_item = storage.save_asset(nrm, kind="normal", name="法线图",
+                                meta={"pipeline": "normals", **meta})
+    m_item = storage.save_asset(msk, kind="mask", name="材质掩码",
+                                meta={"pipeline": "normals", "layer": "metal"})
+    out = {"normal": n_item, "mask": m_item, "meta": meta}
+    if preview:
+        pv = await run_in_threadpool(anim_normals.compose_preview, img, nrm, msk)
+        out["preview"] = storage.save_asset(pv, kind="normalpreview", name="法线打光预览",
+                                            meta={"pipeline": "normals"})
+    return out
+
+
+class NormalsBatchPayload(BaseModel):
+    frameAssetIds: List[str]
+    strength: float = 1.3
+    blur: float = 2.0
+    metalMode: str = "highlight"
+    metalThreshold: float = 0.6
+    flipGreen: bool = False
+
+
+@app.post("/api/pipeline/normals/batch")
+async def pipeline_normals_batch(payload: NormalsBatchPayload):
+    """整段动画一次算法线：返回 ZIP（normals/ + masks/ + 说明）。"""
+    from .anim import normals as anim_normals
+
+    ids = [i for i in payload.frameAssetIds if i][:240]
+    if not ids:
+        raise HTTPException(400, "没有可处理的帧")
+
+    def _build() -> bytes:
+        buf = io.BytesIO()
+        done = 0
+        with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+            for n, aid in enumerate(ids):
+                item = storage.get_asset(aid)
+                if not item:
+                    continue
+                img = Image.open(storage.asset_path(item)).convert("RGBA")
+                nrm, msk, _m = anim_normals.analyze(
+                    img, strength=payload.strength, blur=payload.blur,
+                    metal_mode=payload.metalMode,
+                    metal_threshold=payload.metalThreshold,
+                    flip_green=payload.flipGreen)
+                nb, mb = io.BytesIO(), io.BytesIO()
+                nrm.save(nb, "PNG")
+                msk.save(mb, "PNG")
+                zf.writestr(f"normals/{n:03d}_normal.png", nb.getvalue())
+                zf.writestr(f"masks/{n:03d}_metal.png", mb.getvalue())
+                done += 1
+            zf.writestr("README.txt",
+                        f"共 {done} 帧。法线为 OpenGL 切空间；DirectX 需翻转绿通道。\n"
+                        "几何法线由内缩距离+亮度反推，非标注传播，薄片/遮挡边界会有偏差。\n")
+        return buf.getvalue()
+
+    data = await run_in_threadpool(_build)
+    return Response(content=data, media_type="application/zip",
+                    headers={"Content-Disposition": 'attachment; filename="normals.zip"'})
 
 
 # ---------- 静态资源 ----------
