@@ -81,6 +81,8 @@ button, input, textarea, select { font-family: inherit; }
   width: var(--panel-right, 320px);
 }
 .stage { flex: 1 1 auto; padding: 18px; display: flex; flex-direction: column; gap: 14px; min-width: 0; overflow-y: auto; }
+/* 三视图流程画布要自己吃掉整块高度，不能让它跟着内容滚 */
+.stage.canvas { padding: 0; gap: 0; overflow: hidden; }
 
 /* 分栏拖拽条：视觉上压在边界线上，净占位 0，不吃中间画布空间 */
 .split {
@@ -374,3 +376,86 @@ button, input, textarea, select { font-family: inherit; }
 .ref-pick:hover:not(:disabled) { border-color: var(--line); }
 .ref-pick.on { border-color: var(--green); }
 .ref-pick:disabled { opacity: 0.35; cursor: not-allowed; }
+
+/* ---------- 三视图流程画布 ---------- */
+.tv-wrap {
+  position: relative; flex: 1; min-height: 0; overflow: hidden;
+  border: 2px solid var(--white); background: #08080a; cursor: grab;
+  touch-action: none;
+}
+.tv-wrap.on { cursor: grabbing; }
+/* 网格跟着画布一起平移缩放，看得出自己在动 */
+.tv-grid {
+  position: absolute; inset: 0; pointer-events: none;
+  background-image:
+    linear-gradient(rgba(255, 255, 255, 0.045) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(255, 255, 255, 0.045) 1px, transparent 1px);
+  background-size: 28px 28px;
+}
+
+.tv-toolbar {
+  position: absolute; left: 12px; top: 12px; z-index: 6;
+  display: flex; align-items: center; gap: 6px;
+  background: rgba(10, 10, 10, 0.9); border: 1px solid var(--line); padding: 6px 8px;
+}
+.tv-toolbar .btn { height: 32px; padding: 0 10px; font-size: 13px; }
+.tv-zoom {
+  font-family: var(--mono); font-size: 16px; color: var(--green);
+  min-width: 52px; text-align: center;
+}
+.tv-hint {
+  position: absolute; right: 12px; top: 12px; z-index: 6;
+  font-size: 12px; color: var(--muted);
+  background: rgba(10, 10, 10, 0.9); border: 1px solid rgba(255, 255, 255, 0.15);
+  padding: 8px 12px; max-width: 46%;
+}
+
+.tv-world { position: absolute; left: 0; top: 0; width: 0; height: 0; transform-origin: 0 0; }
+.tv-links { position: absolute; left: 0; top: 0; overflow: visible; pointer-events: none; }
+
+.tv-node {
+  position: absolute; display: flex; flex-direction: column;
+  background: #101014; border: 1px solid var(--line);
+  box-shadow: 6px 6px 0 rgba(0, 0, 0, 0.5);
+}
+.tv-node.done { border-color: var(--green); }
+.tv-node.running { border-color: var(--yellow); box-shadow: 0 0 0 1px var(--yellow), 6px 6px 0 rgba(0, 0, 0, 0.5); }
+.tv-node.error { border-color: var(--pink); }
+.tv-node.stale { opacity: 0.5; }
+
+.tv-head {
+  display: flex; align-items: center; gap: 8px; padding: 8px 10px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.15); cursor: grab;
+  user-select: none;
+}
+.tv-idx { font-family: var(--chip); font-size: 11px; color: var(--green); }
+.tv-title { font-size: 14px; font-weight: 600; flex: 1; }
+.tv-status {
+  font-family: var(--chip); font-size: 10px; padding: 3px 6px;
+  border: 1px solid currentColor; color: var(--muted); white-space: nowrap;
+}
+.tv-status.done { color: var(--green); }
+.tv-status.running { color: var(--yellow); }
+.tv-status.error { color: var(--pink); }
+
+.tv-body {
+  height: 300px; background: #0b0b0e; display: grid; place-items: center; overflow: hidden;
+}
+.tv-body img { width: 100%; height: 100%; object-fit: contain; display: block; }
+.tv-ph {
+  text-align: center; color: var(--muted); font-size: 13px; line-height: 2; padding: 16px;
+}
+.tv-ph b { color: var(--white); font-size: 14px; }
+
+.tv-foot { padding: 8px 10px; display: flex; flex-direction: column; gap: 6px; }
+.tv-meta {
+  font-family: var(--mono); font-size: 14px; color: var(--muted);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.tv-warn { font-size: 12px; color: var(--yellow); line-height: 1.6; }
+.tv-err {
+  font-size: 12px; color: var(--pink); line-height: 1.6;
+  max-height: 76px; overflow-y: auto; word-break: break-word;
+}
+.tv-acts { display: flex; gap: 6px; }
+.tv-acts .btn { height: 32px; padding: 0 8px; font-size: 13px; flex: 1; }

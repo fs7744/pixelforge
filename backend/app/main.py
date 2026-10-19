@@ -497,6 +497,94 @@ async def pipeline_threeview(payload: ThreeViewPayload):
     return {"images": items, "meta": meta}
 
 
+# ---------- 三视图分步（流程画布用：一步一请求，单步可重跑） ----------
+class ThreeViewStepPayload(BaseModel):
+    """分步请求：view 决定这一步做什么，其余参数按需给。
+
+    front   → prompt / style / 宽高 / 步数 / 种子
+    side    → baseAssetId（正视图资产）+ 上面这些（编辑器不用宽高，但兜底要用）
+    back    → 同上
+    compose → viewAssetIds（正、侧、背顺序）+ 宽高（决定单格尺寸）
+    """
+
+    view: str = "front"
+    prompt: str = ""
+    style: Optional[str] = None
+    steps: Optional[int] = None
+    cfg: Optional[float] = None
+    seed: Optional[int] = None
+    width: int = 512
+    height: int = 768
+    maxSide: int = 768
+    baseAssetId: Optional[str] = None
+    viewAssetIds: Optional[List[str]] = None
+
+
+def _load_asset_image(asset_id: str) -> Image.Image:
+    item = storage.get_asset(asset_id)
+    if not item:
+        raise HTTPException(404, f"资产不存在：{asset_id}")
+    path = storage.asset_path(item)
+    if not path.exists():
+        raise HTTPException(404, f"资产文件缺失：{asset_id}")
+    return Image.open(path).convert("RGB")
+
+
+@app.post("/api/pipeline/threeview/step")
+async def pipeline_threeview_step(payload: ThreeViewStepPayload):
+    """三视图分步生成：一次只做一步，任何一步都能单独重跑。
+
+    为什么拆开：整套一次跑完要 5-9 分钟，中间任何一张不满意都得从头再来，
+    而实际上「正面对了、侧面歪了」是最常见的情况。分步后前端按
+    front → side → back → compose 串成流程，用户看完一张再决定下一步，
+    不满意就换个种子重跑那一步，后面的步骤自动作废。
+
+    每一步都落成资产，用 asset.id 串起下一步。
+    """
+    from .pipelines import threeview as tv_pipe
+
+    view = (payload.view or "front").strip().lower()
+    kw: Dict[str, Any] = dict(
+        style=payload.style, steps=payload.steps, cfg=payload.cfg,
+        seed=payload.seed, width=payload.width, height=payload.height,
+    )
+
+    if view == "compose":
+        ids = [i for i in (payload.viewAssetIds or []) if i]
+        if len(ids) != 3:
+            raise ValueError(f"拼板需要按 正/侧/背 顺序给 3 张图，收到 {len(ids)} 张")
+        imgs = [_load_asset_image(i) for i in ids]
+        cw, ch = tv_pipe._cell(payload.width, payload.height)
+        strip, cmeta = tv_pipe.compose_three_view(imgs, cell=(cw, ch))
+        item = storage.save_asset(
+            strip, kind="generated", name="threeview-三视图拼板",
+            meta={"pipeline": "threeview", "view": "三视图拼板", "compose": cmeta},
+            ai_label=False,
+        )
+        return {"images": [item], "step": "compose",
+                "meta": {"pipeline": "threeview", "step": "compose",
+                         "cell": [cw, ch], "compose": cmeta}}
+
+    if view == "front":
+        img, vmeta = await tv_pipe.run_front(payload.prompt, **kw)
+    elif view in ("side", "back"):
+        if not payload.baseAssetId:
+            raise ValueError("生成侧/背视图需要先有正视图（baseAssetId）")
+        base = _load_asset_image(payload.baseAssetId)
+        img, vmeta = await tv_pipe.run_derived(
+            view, base, payload.prompt, max_side=payload.maxSide, **kw)
+    else:
+        raise ValueError(f"未知步骤：{view}")
+
+    item = storage.save_asset(
+        img, kind="generated", name=f"threeview-{vmeta['name']}",
+        meta={"pipeline": "threeview", "step": view, **vmeta},
+        ai_label=False,
+    )
+    return {"images": [item], "step": view,
+            "meta": {"pipeline": "threeview", "step": view, **vmeta}}
+
+
 # ---------- 资产库 ----------
 @app.get("/api/assets")
 async def assets(kind: Optional[str] = None):

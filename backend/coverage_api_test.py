@@ -11,6 +11,7 @@
 
 用法：PYTHONPATH=. python backend/coverage_api_test.py
 """
+import inspect
 import io
 import zipfile
 
@@ -387,6 +388,48 @@ check("三视角提示词各自带视角名",
       all(tv._VIEW_META[v]["cn"] in tv._view_prompt("测试角色", v) for v in tv.VIEW_ORDER))
 check("三视角都带单角色约束",
       all("画面中只有一个角色" in tv._view_prompt("测试角色", v) for v in tv.VIEW_ORDER))
+
+print("== 三视图分步（流程画布） ==")
+r = client.post("/api/pipeline/threeview/step", json={"view": "side", "prompt": "x"})
+check("分步：side 缺基准图 → 400", r.status_code == 400, r.status_code)
+r = client.post("/api/pipeline/threeview/step", json={"view": "back", "prompt": "x"})
+check("分步：back 缺基准图 → 400", r.status_code == 400, r.status_code)
+r = client.post("/api/pipeline/threeview/step", json={"view": "nope"})
+check("分步：未知步骤 → 400", r.status_code == 400, r.status_code)
+r = client.post("/api/pipeline/threeview/step",
+                json={"view": "compose", "viewAssetIds": ["a", "b"]})
+check("分步：拼板张数不足 → 400", r.status_code == 400, r.status_code)
+r = client.post("/api/pipeline/threeview/step", json={
+    "view": "compose", "width": 240, "height": 360,
+    "viewAssetIds": ["deadbeef0001", "deadbeef0002", "deadbeef0003"]})
+check("分步：拼板引用不存在的资产 → 404", r.status_code == 404, r.status_code)
+
+check("分步：run_front / run_derived 是独立入口",
+      callable(tv.run_front) and callable(tv.run_derived)
+      and "engines" in inspect.signature(tv.run_front).parameters)
+
+# 真拼一次（纯 CPU，不烧 GPU）：三张纯色块图 → 检查格数与尺寸
+tv_ids = []
+for i in range(3):
+    im = Image.new("RGB", (240, 360), (27, 67, 50))
+    d = ImageDraw.Draw(im)
+    d.rectangle([80, 40, 160, 330], fill=(230, 230 - i * 40, 40))
+    aid = storage.save_asset(im, kind="generated", name=f"tv-step-{i}")["id"]
+    tv_ids.append(aid)
+    created.append(aid)
+r = client.post("/api/pipeline/threeview/step", json={
+    "view": "compose", "width": 240, "height": 360, "viewAssetIds": tv_ids})
+body = r.json() if r.status_code == 200 else {}
+item = (body.get("images") or [{}])[0]
+check("分步：三张 → 拼板生成", r.status_code == 200, r.status_code)
+# 单格对齐到 16 → (240, 352)；拼板 = 3 格 + 2 条 12px 缝
+check("分步：拼板尺寸 = 3 格 + 2 缝",
+      item.get("width") == 744 and item.get("height") == 352,
+      f"{item.get('width')}x{item.get('height')}")
+check("分步：拼板 meta 含三视角",
+      len(((body.get("meta") or {}).get("compose") or {}).get("views") or []) == 3)
+if item.get("id"):
+    created.append(item["id"])
 
 print("== 清理测试资产 ==")
 removed = 0

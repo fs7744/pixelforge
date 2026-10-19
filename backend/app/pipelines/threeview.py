@@ -472,7 +472,169 @@ def compose_three_view(
 
 
 # --------------------------------------------------------------------------- #
-# 主管线
+# 单步执行：正视图 / 侧背视图 / （拼板走 compose_three_view）
+# 分步界面按这三步推进，任何一步都能单独重跑；run_three_view 只是把它们串起来。
+# --------------------------------------------------------------------------- #
+def _cell(width: int, height: int) -> Tuple[int, int]:
+    """对齐到 16 的倍数（下采样约束），最小 64。"""
+    return max(64, int(width) // 16 * 16), max(64, int(height) // 16 * 16)
+
+
+def _engines(*, provider_id: Optional[str] = None,
+             provider_cfg: Optional[Dict[str, Any]] = None,
+             txt2img_model: Optional[str] = None) -> Dict[str, Any]:
+    """解析这一步要用的底座：正视图走 txt2img，侧/背视图走编辑底座。
+
+    分步生成时每个请求都重新解析一次——中途可能刚在设置页换过默认
+    Provider，也可能有别的请求把模型换进换出了。代价只有一次设置读取
+    加几个目录判断，不值得做缓存。
+    """
+    from ..config import ROOT, load_settings
+    from ..providers import get_provider
+    from ..providers.diffusers_local import DiffusersProvider, detect_family
+
+    settings = load_settings()
+    pid = provider_id or settings.get("activeProvider") or "diffusers"
+    pcfg = provider_cfg if provider_cfg is not None else \
+        (settings.get("providers") or {}).get(pid) or {}
+    active = get_provider(pid, pcfg)
+
+    # 当前 Provider 是编辑器（不能从零出图）时，正视图借 txt2img 底座生成
+    is_editor = (
+        getattr(active, "id", "") == "diffusers"
+        and detect_family(active._resolve_model()) == "qwen_edit"
+    )
+    txt_model = txt2img_model or str(ROOT / "models" / "z-image-turbo")
+    if is_editor and not os.path.isdir(txt_model):
+        raise RuntimeError(
+            "当前 Provider 是 Qwen-Image-Edit 编辑器（无法从零出图），"
+            f"但找不到 txt2img 底座：{txt_model}。请先下载 Z-Image-Turbo，"
+            "或在设置里把默认 Provider 换成生成底座。"
+        )
+    txt = DiffusersProvider({**pcfg, "model": txt_model}) if is_editor else active
+
+    edit_model: Optional[str] = None
+    edit_fallback: Optional[str] = None
+    try:
+        from . import ai_edit
+
+        edit_model = ai_edit.resolve_edit_model(None)
+    except Exception as e:  # noqa: BLE001
+        edit_fallback = str(e)
+    return {
+        "pid": pid, "txt": txt, "isEditor": is_editor,
+        "editModel": edit_model, "editFallback": edit_fallback,
+    }
+
+
+async def run_front(
+    subject: str,
+    *,
+    style: Optional[str] = None,
+    steps: Optional[int] = None,
+    cfg: Optional[float] = None,
+    seed: Optional[int] = None,
+    width: int = 512,
+    height: int = 768,
+    provider_id: Optional[str] = None,
+    provider_cfg: Optional[Dict[str, Any]] = None,
+    txt2img_model: Optional[str] = None,
+    engines: Optional[Dict[str, Any]] = None,
+) -> Tuple[Image.Image, Dict[str, Any]]:
+    """第一步：正视图（txt2img）。
+
+    三视图的起点必须是文生图——编辑器只能改已有图，不能从零创作。
+    后两张的全部造型都由这一张决定，所以它值得单独重跑。
+    """
+    from ..styles import apply_style
+
+    eng = engines or _engines(provider_id=provider_id, provider_cfg=provider_cfg,
+                              txt2img_model=txt2img_model)
+    styled = apply_style((subject or "").strip(), style)
+    cw, ch = _cell(width, height)
+    prompt = _view_prompt(styled["prompt"], "front")
+
+    t = time.time()
+    res = await eng["txt"].generate(
+        prompt=prompt, width=cw, height=ch, steps=steps,
+        cfg=cfg if cfg is not None else 7.5, seed=seed, n=1)
+    img = res.images[0].convert("RGB")
+    meta: Dict[str, Any] = {
+        "view": "front", "name": _VIEW_META["front"]["cn"], "mode": "txt2img",
+        "prompt": prompt, "steps": res.meta.get("steps"), "seed": seed,
+        "seconds": round(time.time() - t, 1), "cell": [cw, ch],
+        "style": styled.get("style"),
+        "txt2imgModel": eng["txt"]._resolve_model()
+        if hasattr(eng["txt"], "_resolve_model") else eng["pid"],
+    }
+    if styled.get("suggestPost"):
+        meta["suggestPost"] = styled["suggestPost"]
+    return img, meta
+
+
+async def run_derived(
+    view: str,
+    base: Image.Image,
+    subject: str,
+    *,
+    style: Optional[str] = None,
+    steps: Optional[int] = None,
+    cfg: Optional[float] = None,
+    seed: Optional[int] = None,
+    width: int = 512,
+    height: int = 768,
+    max_side: int = 768,
+    provider_id: Optional[str] = None,
+    provider_cfg: Optional[Dict[str, Any]] = None,
+    txt2img_model: Optional[str] = None,
+    engines: Optional[Dict[str, Any]] = None,
+) -> Tuple[Image.Image, Dict[str, Any]]:
+    """第二/三步：侧视图、背视图。
+
+    优先走编辑底座指令接力（外观保持最好）；编辑器不可用时退回同种子
+    txt2img——一致性弱一些，但仍保证「一张图一个角色、三张不重叠」。
+    """
+    from ..styles import apply_style
+
+    if view not in ("side", "back"):
+        raise ValueError(f"未知视角：{view}")
+
+    eng = engines or _engines(provider_id=provider_id, provider_cfg=provider_cfg,
+                              txt2img_model=txt2img_model)
+    cw, ch = _cell(width, height)
+    t = time.time()
+
+    if eng["editModel"]:
+        from . import ai_edit
+
+        out, emeta = await ai_edit.run_edit(
+            base, _view_instruction(view), steps=steps, seed=seed,
+            model=eng["editModel"], max_side=max_side)
+        return out, {
+            "view": view, "name": _VIEW_META[view]["cn"], "mode": "edit",
+            "instruction": _view_instruction(view),
+            "steps": emeta.get("steps"), "seed": seed,
+            "seconds": round(time.time() - t, 1), "cell": [cw, ch],
+            "editModel": eng["editModel"],
+        }
+
+    styled = apply_style((subject or "").strip(), style)
+    prompt = _view_prompt(styled["prompt"], view)
+    res = await eng["txt"].generate(
+        prompt=prompt, width=cw, height=ch, steps=steps,
+        cfg=cfg if cfg is not None else 7.5, seed=seed, n=1)
+    meta: Dict[str, Any] = {
+        "view": view, "name": _VIEW_META[view]["cn"], "mode": "txt2img",
+        "prompt": prompt, "steps": res.meta.get("steps"), "seed": seed,
+        "seconds": round(time.time() - t, 1), "cell": [cw, ch],
+    }
+    if eng["editFallback"]:
+        meta["editFallback"] = eng["editFallback"]
+    return res.images[0].convert("RGB"), meta
+
+
+# --------------------------------------------------------------------------- #
+# 主管线（一次跑完，CLI / 工作流用；分步界面走各自的函数）
 # --------------------------------------------------------------------------- #
 async def run_three_view(
     subject: str,
@@ -495,103 +657,37 @@ async def run_three_view(
     - 帧 2+ 优先走 Qwen-Image-Edit 指令接力（外观保持最好）；
       编辑底座缺失时退回同种子 txt2img × 3（meta.editFallback 记录原因）。
     """
-    from ..config import ROOT, load_settings
-    from ..providers import get_provider
-    from ..providers.diffusers_local import DiffusersProvider, detect_family
     from ..styles import apply_style
-    from . import ai_edit
 
     t0 = time.time()
-    settings = load_settings()
-    pid = provider_id or settings.get("activeProvider") or "diffusers"
-    pcfg = provider_cfg if provider_cfg is not None else \
-        (settings.get("providers") or {}).get(pid) or {}
-    active = get_provider(pid, pcfg)
+    eng = _engines(provider_id=provider_id, provider_cfg=provider_cfg,
+                   txt2img_model=txt2img_model)
+    kw: Dict[str, Any] = dict(style=style, steps=steps, cfg=cfg, seed=seed,
+                              width=width, height=height,
+                              provider_cfg=provider_cfg, engines=eng)
 
-    # 双底座接力：当前 Provider 是编辑器（不能从零出图）时，
-    # 帧 1 借 txt2img 底座生成——与动画工作流 action_frames 同一套约定。
-    is_editor = (
-        getattr(active, "id", "") == "diffusers"
-        and detect_family(active._resolve_model()) == "qwen_edit"
-    )
-    txt_model = txt2img_model or str(ROOT / "models" / "z-image-turbo")
-    if is_editor and not os.path.isdir(txt_model):
-        raise RuntimeError(
-            "当前 Provider 是 Qwen-Image-Edit 编辑器（无法从零出图），"
-            f"但找不到 txt2img 底座：{txt_model}。请先下载 Z-Image-Turbo，"
-            "或在设置里把默认 Provider 换成生成底座。"
-        )
-
-    # 两个底座都是中文原生，提示词原样送，不做任何语言转换
-    subj = (subject or "").strip()
-    styled = apply_style(subj, style)
-    if is_editor:
-        txt = DiffusersProvider({**pcfg, "model": txt_model})
-    else:
-        txt = active
-
-    cw = max(64, int(width) // 16 * 16)
-    ch = max(64, int(height) // 16 * 16)
-    gen_cfg = cfg if cfg is not None else 7.5
-
-    # ---- 帧 1：正视图（txt2img） ----
-    t1 = time.time()
-    p_front = _view_prompt(styled["prompt"], "front")
-    res = await txt.generate(prompt=p_front, width=cw, height=ch,
-                             steps=steps, cfg=gen_cfg, seed=seed, n=1)
-    front = res.images[0].convert("RGB")
+    # ---- 帧 1：正视图 ----
+    front, fmeta = await run_front(subject, provider_id=provider_id, **kw)
     views = [front]
-    per_view: List[Dict[str, Any]] = [{
-        "view": "front", "name": _VIEW_META["front"]["cn"], "mode": "txt2img",
-        "prompt": p_front, "steps": res.meta.get("steps"), "seed": seed,
-        "seconds": round(time.time() - t1, 1),
-    }]
+    per_view: List[Dict[str, Any]] = [fmeta]
 
-    # ---- 帧 2/3：侧/背视图 ----
-    edit_model: Optional[str] = None
-    edit_fallback: Optional[str] = None
-    try:
-        edit_model = ai_edit.resolve_edit_model(None)
-    except Exception as e:  # noqa: BLE001
-        edit_fallback = str(e)
+    # ---- 帧 2/3：侧/背视图（编辑底座接力，缺失时退回 txt2img） ----
+    for key in ("side", "back"):
+        out, vmeta = await run_derived(
+            key, front, subject, max_side=max_side, provider_id=provider_id, **kw)
+        views.append(out)
+        per_view.append(vmeta)
 
-    if edit_model:
-        for key in ("side", "back"):
-            t1 = time.time()
-            out, emeta = await ai_edit.run_edit(
-                front, _view_instruction(key), steps=steps, seed=seed,
-                model=edit_model, max_side=max_side)
-            views.append(out)
-            per_view.append({
-                "view": key, "name": _VIEW_META[key]["cn"], "mode": "edit",
-                "instruction": _view_instruction(key),
-                "steps": emeta.get("steps"), "seed": seed,
-                "seconds": round(time.time() - t1, 1),
-            })
-        mode = "txt2img→edit-relay"
-    else:
-        # 无编辑底座：同种子 txt2img × 3。一致性弱，但三张独立、绝不重叠。
-        for key in ("side", "back"):
-            t1 = time.time()
-            p = _view_prompt(styled["prompt"], key)
-            r = await txt.generate(prompt=p, width=cw, height=ch,
-                                   steps=steps, cfg=gen_cfg, seed=seed, n=1)
-            views.append(r.images[0].convert("RGB"))
-            per_view.append({
-                "view": key, "name": _VIEW_META[key]["cn"], "mode": "txt2img",
-                "prompt": p, "steps": r.meta.get("steps"), "seed": seed,
-                "seconds": round(time.time() - t1, 1),
-            })
-        mode = "txt2img×3"
-
+    cw, ch = _cell(width, height)
     strip, cmeta = compose_three_view(views, cell=(cw, ch))
+    styled = apply_style((subject or "").strip(), style)
     meta: Dict[str, Any] = {
         "pipeline": "threeview",
-        "subject": subj,
+        "subject": (subject or "").strip(),
         "style": styled.get("style"),
-        "mode": mode,
-        "txt2imgModel": txt._resolve_model() if hasattr(txt, "_resolve_model") else pid,
-        "editModel": edit_model,
+        "mode": "txt2img→edit-relay" if eng["editModel"] else "txt2img×3",
+        "txt2imgModel": fmeta.get("txt2imgModel"),
+        "editModel": eng["editModel"],
         "cell": [cw, ch],
         "views": per_view,
         "compose": cmeta,
@@ -599,8 +695,8 @@ async def run_three_view(
         "promptLang": "zh",
         "seconds": round(time.time() - t0, 1),
     }
-    if edit_fallback:
-        meta["editFallback"] = edit_fallback
+    if eng["editFallback"]:
+        meta["editFallback"] = eng["editFallback"]
     if styled.get("suggestPost"):
         meta["suggestPost"] = styled["suggestPost"]
     return strip, views, meta

@@ -158,6 +158,25 @@ export const api = {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(payload),
     }).then(json),
+  // 分步版：view = front | side | back | compose，一次只做一步，可单独重跑
+  threeviewStep: (payload: {
+    view: 'front' | 'side' | 'back' | 'compose'
+    prompt?: string
+    style?: string
+    steps?: number
+    cfg?: number
+    seed?: number | null
+    width: number
+    height: number
+    maxSide?: number
+    baseAssetId?: string
+    viewAssetIds?: string[]
+  }) =>
+    fetch('/api/pipeline/threeview/step', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    }).then(json),
   assets: (kind?: string) =>
     fetch(`/api/assets${kind && kind !== '全部' ? `?kind=${kind}` : ''}`).then(json),
   delAsset: (id: string) => fetch(`/api/assets/${id}`, { method: 'DELETE' }).then(json),

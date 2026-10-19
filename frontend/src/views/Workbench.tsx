@@ -4,6 +4,7 @@ import { api, Asset, ProviderInfo, StyleInfo, Template } from '../api'
 import { openPreview } from '../Preview'
 import { Splitter } from '../split'
 import TextTaskPanel from '../TextTaskPanel'
+import ThreeViewBoard, { type BoardHandle } from '../ThreeViewBoard'
 
 type Props = { onSendToPost: (asset: Asset) => void }
 
@@ -177,6 +178,10 @@ export default function Workbench({ onSendToPost }: Props) {
   const [refAssetIds, setRefAssetIds] = useState<string[]>([])
   const [pickerOpen, setPickerOpen] = useState(false)
   const [library, setLibrary] = useState<Asset[]>([])
+  // 三视图流程画布：四步分开跑，单步可重跑。hasFront/boardBusy 只用来同步左栏按钮
+  const boardRef = useRef<BoardHandle>(null)
+  const [boardState, setBoardState] = useState({ hasFront: false, busy: false })
+  const isThreeView = tplId === 'char_three_view'
 
   useEffect(() => {
     api.templates().then((d) => {
@@ -272,12 +277,16 @@ export default function Workbench({ onSendToPost }: Props) {
   }
 
   const run = async () => {
+    // 三视图走流程画布：一次只推进一张，任何一步都能单独重跑
+    if (isThreeView) {
+      boardRef.current?.start()
+      return
+    }
     setBusy(true)
     setError('')
     try {
       // 有参考图 = 参考图生成（图生图）：Z-Image 没有参考图输入，后端会自动改走
-      // Qwen-Image-Edit。这条路径优先于三视图模板——三视图是「三张独立文生图」，
-      // 与参考图语义冲突。
+      // Qwen-Image-Edit。首图是主参考，其余作补充。
       const data = refItems.length || refAssetIds.length
         ? await api.generateRef(
             {
@@ -293,28 +302,18 @@ export default function Workbench({ onSendToPost }: Props) {
             },
             refItems.map((r) => r.file),
           )
-        : tplId === 'char_three_view'
-          ? await api.threeview({
-              prompt,
-              style: styleId || undefined,
-              steps,
-              cfg,
-              seed: seed.trim() ? Number(seed) : null,
-              width,
-              height,
-            })
-          : await api.generate({
-              prompt,
-              provider,
-              width,
-              height,
-              steps,
-              cfg,
-              n,
-              seed: seed.trim() ? Number(seed) : null,
-              templateId: tplId,
-              style: styleId || undefined,
-            })
+        : await api.generate({
+            prompt,
+            provider,
+            width,
+            height,
+            steps,
+            cfg,
+            n,
+            seed: seed.trim() ? Number(seed) : null,
+            templateId: tplId,
+            style: styleId || undefined,
+          })
       setResults((prev) => [...data.images, ...prev])
       setMeta(data.meta)
       if (data.images[0]) setSelected(data.images[0].id)
@@ -324,6 +323,12 @@ export default function Workbench({ onSendToPost }: Props) {
       setBusy(false)
     }
   }
+
+  // 画布每出一张就并进历史记录，右栏和结果区都能看到
+  const handleBoardAsset = useCallback((a: Asset) => {
+    setResults((prev) => [a, ...prev])
+    setSelected(a.id)
+  }, [])
 
   const current = results.find((r) => r.id === selected)
   const currentTpl = templates.find((t) => t.id === tplId)
@@ -456,7 +461,7 @@ export default function Workbench({ onSendToPost }: Props) {
           </div>
         )}
 
-        {!isTextTask && (
+        {!isTextTask && !isThreeView && (
         <div>
           <div className="row between" style={{ alignItems: 'center' }}>
             <div className="label" style={{ marginBottom: 0 }}>
@@ -532,11 +537,6 @@ export default function Workbench({ onSendToPost }: Props) {
               ? `已选 ${totalRefs} 张：走 Qwen-Image-Edit 指令式生成，输出尺寸用上方「宽/高」。第一张是主参考，其余作补充（如正面+侧面、角色+场景）。`
               : '不选 = 文生图（Z-Image）。需要按参考图生成时加图，会自动改用编辑底座；首图是主参考。'}
           </div>
-          {totalRefs > 0 && tplId === 'char_three_view' && (
-            <div className="hint" style={{ marginTop: 4, color: 'var(--yellow)' }}>
-              当前模板是三视图（三张独立文生图），已选参考图时按单张参考图生成处理。
-            </div>
-          )}
         </div>
         )}
 
@@ -566,7 +566,16 @@ export default function Workbench({ onSendToPost }: Props) {
           <div className="row" style={{ marginTop: 6 }}>
             <div className="grow">
               <div className="label">数量</div>
-              <input className="input" type="number" min={1} max={4} value={n} onChange={(e) => setN(+e.target.value)} />
+              <input
+                className="input"
+                type="number"
+                min={1}
+                max={4}
+                value={n}
+                disabled={isThreeView}
+                title={isThreeView ? '三视图固定一张一张出，每步单独重跑' : undefined}
+                onChange={(e) => setN(+e.target.value)}
+              />
             </div>
             <div className="grow">
               <div className="label">种子（空=随机）</div>
@@ -577,9 +586,25 @@ export default function Workbench({ onSendToPost }: Props) {
         )}
 
         {!isTextTask && (
-          <button className="btn btn-primary btn-block" disabled={busy || !prompt.trim()} onClick={run}>
-            {busy ? '生成中' : '生成'}
+          <button
+            className="btn btn-primary btn-block"
+            disabled={busy || boardState.busy || !prompt.trim()}
+            onClick={run}
+          >
+            {busy || boardState.busy
+              ? '生成中'
+              : isThreeView
+                ? boardState.hasFront
+                  ? '重生成正视图'
+                  : '生成正视图'
+                : '生成'}
           </button>
+        )}
+        {isThreeView && (
+          <div className="hint">
+            三视图按「正 → 侧 → 背 → 拼板」分四步跑，每张出来都能先看一眼；
+            不满意就单独重跑那一步，不用整套重来。
+          </div>
         )}
         {meta?.note && <div className="hint">{meta.note}</div>}
         {meta?.mode === 'ref2img' && (
@@ -599,7 +624,17 @@ export default function Workbench({ onSendToPost }: Props) {
 
       <Splitter side="left" />
 
-      <main className="stage">
+      <main className={`stage ${isThreeView ? 'canvas' : ''}`}>
+        {isThreeView ? (
+          <ThreeViewBoard
+            ref={boardRef}
+            params={{ prompt, styleId, width, height, steps, cfg, seed }}
+            onAsset={handleBoardAsset}
+            onChange={setBoardState}
+            onSendToPost={onSendToPost}
+          />
+        ) : (
+        <>
         <div className="row between">
           <div className="section-title">生成结果</div>
           <div className="row">
@@ -650,6 +685,8 @@ export default function Workbench({ onSendToPost }: Props) {
               </div>
             ))}
           </div>
+        )}
+        </>
         )}
       </main>
 

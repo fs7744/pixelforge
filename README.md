@@ -110,6 +110,7 @@ mkdir -p ~/.u2net && curl -L -o ~/.u2net/u2net.onnx \
 | 模块 | 说明 |
 |---|---|
 | 生成工作台 | 10 个提示词模板 × 6 分类，14 种游戏美术画风，参数面板，结果网格，一键送后处理 |
+| 角色三视图 | 无限画布式流程：正面 → 侧面 → 背面 → 拼板，四步分开跑，任何一步不满意单独重跑 |
 | 素材库 | 本地落盘 + 索引 + 筛选 + 批量 ZIP |
 | 图片预览 | 点击任意图片全屏查看，滚轮缩放、拖拽平移，放大 ≥2 倍用最近邻渲染（像素不糊） |
 | 抠图 | u2net 深度抠图 → GrabCut → 颜色键三级降级；硬边 alpha + 边缘去污，不产生半透明白边 |
@@ -124,7 +125,6 @@ mkdir -p ~/.u2net && curl -L -o ~/.u2net/u2net.onnx \
 | AI 标识 | 默认关闭；下载时可用 `?label=1` 临时补角标 |
 
 工作流 API：
-
 ```
 POST /api/workflows/{id}/runs          创建工作流（输入 + 参数）
 POST /api/runs/{id}/steps/{step}/run   执行单步（可重跑）
@@ -133,6 +133,21 @@ GET  /api/runs/{id}                    查询步骤状态与产物
 ```
 
 步骤类型：`generate` / `dedup` / `blend` / `compose` / `normalize` / `montage` / `godot` / `godot_parallax`。
+
+角色三视图 API（工作台的流程画布走这条，一步一请求，单步可重跑）：
+
+```
+POST /api/pipeline/threeview/step
+     { view: "front", prompt, style, width, height, steps, cfg, seed }
+     { view: "side" | "back", baseAssetId, ... }      # baseAssetId = 正视图资产 id
+     { view: "compose", viewAssetIds: [正, 侧, 背], width, height }
+→ { images: [asset], step, meta }
+
+POST /api/pipeline/threeview      # 一次性跑完四步（工作流 / 脚本用）
+```
+
+分工：正视图是唯一需要文生图的一步（编辑器不能从零创作），侧/背都由它推导，
+所以重跑正视图会让后面三张自动作废；重跑侧/背只作废拼板。
 
 ---
 
