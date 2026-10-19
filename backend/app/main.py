@@ -398,7 +398,10 @@ async def pipeline_sprite_frame(
 
 
 class SpriteComposePayload(BaseModel):
-    """逐帧结果拼板：按顺序给帧资产 id，cols 决定每行几帧。"""
+    """逐帧结果拼板：按顺序给帧资产 id，cols 决定每行几帧。
+
+    colors > 0：取全局色板再让每帧映射回它（帧间不偏色）；0 = 不锁色。
+    """
 
     frameAssetIds: List[str]
     cols: int = 4
@@ -407,6 +410,7 @@ class SpriteComposePayload(BaseModel):
     matte: bool = True
     tolerance: int = 80
     feather: int = 0
+    colors: int = 0
 
 
 @app.post("/api/pipeline/sprite/compose")
@@ -424,6 +428,7 @@ async def pipeline_sprite_compose(payload: SpriteComposePayload):
     sheet, frames, index, meta = sprite_loop.compose(
         imgs, cols=payload.cols, size=payload.size, anchor=payload.anchor,
         matte=payload.matte, tolerance=payload.tolerance, feather=payload.feather,
+        colors=payload.colors,
     )
     frame_items = [
         storage.save_asset(

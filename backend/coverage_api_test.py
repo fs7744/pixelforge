@@ -899,6 +899,102 @@ check("分步：拼板 meta 含三视角",
 if item.get("id"):
     created.append(item["id"])
 
+print("== 移植自 D:/code/gen：全局色板 / 一致性指标 / 光流插帧 / 色相去污 ==")
+# 来源：game-asset-video-sprites（sprite-postprocess.py：全局锁色 + BOX 缩放 + metrics）、
+# h3-character-studio（key_pixels：按色相抓暗部溢色）、FrameRonin（双向光流插帧）。
+from backend.app.pipelines import inbetween as ib_pipe  # noqa: E402
+from backend.app.pipelines import metrics as met_pipe  # noqa: E402
+from backend.app.pipelines import palette as pal_pipe  # noqa: E402
+from backend.app.pipelines import pixelize as pixelize_pipe  # noqa: E402
+from backend.app.pipelines import sprite_loop as sl_pipe  # noqa: E402
+
+# ---- 全局色板：限量素材的 k 收敛到真实色数，且色板不重复 ----
+_cp_imgs = []
+for _col in [(200, 100, 50), (20, 40, 60), (240, 240, 240)]:
+    _im = Image.new("RGB", (32, 32), _col)
+    _d = ImageDraw.Draw(_im)
+    _d.rectangle([8, 8, 24, 24], fill=(10, 10, 10))
+    _cp_imgs.append(_im)
+_pal = pal_pipe.extract_palette(_cp_imgs, k=6)
+check("色板无重复色（k 收敛到真实颜色数）", len(set(_pal)) == len(_pal), str(_pal))
+check("色板取到四种主色", len(_pal) == 4, str(_pal))
+_locked = pal_pipe.apply_palette(_cp_imgs[0], _pal)
+check("锁色后只剩色板内颜色",
+      not (set(_locked.convert("RGB").getdata()) - set(_pal)))
+_px_out, _px_meta = pixelize_pipe.pixelize(_cp_imgs[0], shared_palette=_pal, downsample="box")
+check("pixelize 支持共享色板", _px_meta["palette"] == "shared"
+      and _px_meta["sharedPalette"] == len(_pal), str(_px_meta.get("palette")))
+check("pixelize 支持 BOX 降采样", _px_meta["downsample"] == "box")
+check("pixelize 默认仍是最近邻（不改变既有行为）",
+      pixelize_pipe.pixelize(_cp_imgs[0])[1]["downsample"] == "nearest")
+
+# ---- 一致性指标 ----
+_cp_m = met_pipe.sheet_metrics(_cp_imgs, _pal)
+check("指标含首尾衔接与帧间差",
+      all(k in _cp_m for k in ("seam_ratio", "step_mean", "step_max")), str(_cp_m)[:120])
+check("锁色后色板外颜色为 0", _cp_m.get("off_palette_colors_max") == 0,
+      str(_cp_m.get("off_palette_colors_max")))
+check("单帧不崩（只返回基础信息）", "note" in met_pipe.sheet_metrics([_cp_imgs[0]]))
+check("结论可读且可行动", isinstance(met_pipe.metrics_verdict(_cp_m), list))
+
+# ---- compose：锁色 + 指标进 meta ----
+_cp_frames = []
+for _i, _col in enumerate([(200, 100, 50), (210, 110, 60), (190, 90, 40)]):
+    _im = Image.new("RGB", (96, 96), (30, 30, 40))
+    _d = ImageDraw.Draw(_im)
+    _d.ellipse([24 + _i * 6, 20, 72 + _i * 6, 80], fill=_col)
+    _cp_frames.append(_im)
+_sheet, _frames, _index, _cmeta = sl_pipe.compose(
+    _cp_frames, cols=3, size=64, matte=False, colors=8)
+check("compose 锁色后无调色板外颜色",
+      _cmeta["metrics"]["off_palette_colors_max"] == 0,
+      str(_cmeta["metrics"].get("off_palette_colors_max")))
+check("compose 报告色板与指标",
+      _cmeta.get("palette", {}).get("colors", 0) >= 2 and "metrics" in _cmeta
+      and "metricsVerdict" in _cmeta, str(_cmeta.get("palette")))
+
+# ---- 光流插帧：符号错了会静默变差，用平移真值钉住 ----
+# 用仓库内的人像示例图（200²，随 char_pixel_samples 一起分发）做平移：
+# 纯合成图没有亮度结构，Farneback 算不出位移（那是光流的正常前提，不是 bug）。
+_src_path = Path(__file__).resolve().parents[1] / "data" / "char_pixel_samples" / "_source.png"
+if _src_path.is_file():
+    _base = np.asarray(Image.open(_src_path).convert("RGB").resize((200, 200)))
+    _shift = 24
+    _a = Image.fromarray(_base, "RGB")
+    _b = Image.fromarray(
+        np.concatenate([np.zeros_like(_base[:, :_shift]), _base[:, :-_shift]], axis=1), "RGB")
+    _ref = np.concatenate([np.zeros_like(_base[:, :_shift // 2]), _base[:, :-_shift // 2]], axis=1)
+    _mid, _fmeta = ib_pipe.flow_mid(_a, _b, 0.5)
+    _mae_flow = float(np.abs(np.asarray(_mid).astype(float) - _ref.astype(float)).mean())
+    _mae_blend = float(np.abs(np.asarray(Image.blend(_a, _b, 0.5)).astype(float)
+                            - _ref.astype(float)).mean())
+    check("光流算出位移量", abs(_fmeta["meanMotionPx"] - _shift) < 6, str(_fmeta["meanMotionPx"]))
+    check("光流中间帧明显优于交叉淡化", _mae_flow < _mae_blend * 0.6,
+          f"flow {_mae_flow:.1f} vs blend {_mae_blend:.1f}")
+    check("remap 用最近邻（像素素材不产生插值色）", _fmeta["nearest"] is True)
+else:
+    check("光流中间帧优于交叉淡化（示例图缺失，跳过）", True, "no sample")
+
+# ---- 色相去污：暗部溢出（RGB 距离抓不到的那类）----
+_gr = Image.new("RGB", (64, 64), (0, 255, 0))
+_d = ImageDraw.Draw(_gr)
+_d.rectangle([16, 16, 47, 47], fill=(200, 160, 140))
+_d.rectangle([45, 18, 46, 45], fill=(20, 80, 30))     # 贴边的深绿溢出
+_cut2, _spill_meta = matte_pipe.connected_matte(
+    _gr, tolerance=60, feather=0, sample="topleft", method="key", hard=True)
+check("暗绿溢出被洗成角色色", _cut2.getpixel((45, 30))[:3] == (200, 160, 140),
+      str(_cut2.getpixel((45, 30))))
+check("洗后无残留键色像素", _spill_meta["residualKeyPixels"] == 0,
+      str(_spill_meta["residualKeyPixels"]))
+check("残留键色进了 meta（量化前先量污染）", "residualKeyRatio" in _spill_meta)
+_wht = Image.new("RGB", (32, 32), (250, 250, 250))
+_d = ImageDraw.Draw(_wht)
+_d.rectangle([6, 6, 25, 25], fill=(200, 160, 140))
+_cut3, _wmeta = matte_pipe.connected_matte(
+    _wht, tolerance=60, feather=0, sample="topleft", method="key", hard=True)
+check("白底不走色相判定（不当成溢色乱洗）",
+      _cut3.getpixel((16, 16))[:3] == (200, 160, 140), str(_cut3.getpixel((16, 16))))
+
 print("== 清理测试资产 ==")
 removed = 0
 for aid in created:

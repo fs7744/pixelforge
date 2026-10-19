@@ -82,8 +82,10 @@ WORKFLOWS: List[Dict[str, Any]] = [
                 "id": "inbetween",
                 "name": "插帧补帧",
                 "type": "blend",
-                "desc": "相邻帧之间补一帧（可选）。纯像素素材建议保持 0，靠真实抽帧/视频模型补帧",
+                "desc": "相邻帧之间补帧（可选）。默认光流插帧：按运动方向 warp 再融合，"
+                        "比交叉淡化少一半重影；mode=blend 可退回淡化",
                 "perGap": 0,
+                "mode": "flow",
             },
             {
                 "id": "normalize",
@@ -358,6 +360,24 @@ def _ref_from_sheet(img: Image.Image, view: str = "left",
     return canvas
 
 
+def _inbetween(a: Image.Image, b: Image.Image, alpha: float, mode: str):
+    """补一帧：默认光流（按运动方向 warp 再融合），失败/关闭时退回交叉淡化。
+
+    交叉淡化的中间帧是「重影」——手臂同时出现在两个位置；光流先把两帧
+    warp 到同一时刻再融合，肢体只有一条。移植自 FrameRonin 的
+    opticalFlowInterpolate（双向 Farneback + 位移限幅 + 最近邻 remap）。
+    """
+    if mode == "flow":
+        try:
+            from .pipelines import inbetween as inbetween_pipe
+
+            return inbetween_pipe.flow_mid(a, b, alpha, nearest=True)
+        except Exception as e:  # 没装 cv2 或光流失败：退回淡化，不让整步崩
+            meta = {"method": "blend", "reason": f"{type(e).__name__}: {e}"}
+            return Image.blend(a, b, alpha), meta
+    return Image.blend(a, b, alpha), {"method": "blend", "mode": mode}
+
+
 def _fill(template: str, run: Dict[str, Any], step: Dict[str, Any], idx: int) -> str:
     """把工作流模板里的占位符替换成中文实参（两个底座都是中文原生）。"""
     layers = step.get("layerNames") or step.get("elementNames") or ["图层一", "图层二", "图层三", "图层四"]
@@ -594,8 +614,10 @@ async def run_step(run_id: str, step_id: str, overrides: Optional[Dict[str, Any]
         elif stype == "blend":
             src = overrides.get("artifacts") or _prev_artifacts(run, index)
             per_gap = int(step_def.get("perGap", 1))
+            mode = str(step_def.get("mode", "flow"))
             frames = [_load(a) for a in src]
             artifacts = []
+            used_flow = 0
             for i, f in enumerate(frames):
                 artifacts.append(_save_asset(f, kind="workflow", name=f"{run['id']}-f{i:02d}",
                                                     meta={"runId": run["id"], "step": step_id, "index": i})["id"])
@@ -605,15 +627,21 @@ async def run_step(run_id: str, step_id: str, overrides: Optional[Dict[str, Any]
                         nxt = nxt.resize(f.size, Image.NEAREST)
                     for g in range(per_gap):
                         alpha = (g + 1) / (per_gap + 1)
-                        mid = Image.blend(f, nxt, alpha)
+                        mid, imeta = _inbetween(f, nxt, alpha, mode)
+                        used_flow += 1 if imeta.get("method") == "optical-flow-farneback" else 0
                         artifacts.append(_save_asset(
                             mid, kind="workflow", name=f"{run['id']}-f{i:02d}m{g}",
-                            meta={"runId": run["id"], "step": step_id, "index": i, "inbetween": True},
+                            meta={"runId": run["id"], "step": step_id, "index": i, "inbetween": True,
+                                  "inbetweenMeta": imeta},
                         )["id"])
+            if per_gap == 0:
+                note = "未补帧：像素素材建议保持原生帧数（2-4 帧），补帧请用视频模型抽帧"
+            elif used_flow:
+                note = f"光流插帧（双向 Farneback，最近邻 remap）：{used_flow} 帧按运动方向 warp 后融合"
+            else:
+                note = "已用相邻帧混合模拟中间帧（cv2 不可用或该档关闭了光流）"
             meta = {"generated": len(artifacts) - len(frames), "perGap": per_gap,
-                    "note": ("未补帧：像素素材建议保持原生帧数（2-4 帧），补帧请用视频模型抽帧"
-                             if per_gap == 0 else
-                             "已用相邻帧混合模拟中间帧；接入视频/插帧模型后替换为真实生成")}
+                    "mode": mode, "note": note}
 
         elif stype == "compose":
             src = overrides.get("artifacts") or _prev_artifacts(run, index)

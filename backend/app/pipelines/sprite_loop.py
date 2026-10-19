@@ -150,12 +150,24 @@ def compose(
     feather: int = 0,
     hard: bool = True,
     matte_method: str = "auto",
+    colors: int = 0,
 ) -> Tuple[Image.Image, List[Image.Image], Dict[str, Any], Dict[str, Any]]:
     """把逐帧结果规整（共享缩放）后拼成精灵表。
 
     shared_scale：下蹲/抬腿的帧包围盒更小，逐帧各自撑满画布会让角色在
     整段循环里忽大忽小——一播就露馅。统一按最大包围盒算缩放，角色尺寸恒定。
+
+    colors > 0：先取一块**全局色板**再让每帧映射回它（移植自
+    game-asset-video-sprites）。逐帧各自量化时每帧色板都不同，同一个肤色
+    第 1 帧偏橙、第 3 帧偏红，动画一播就闪；帧数越多越明显。
+
+    最后算一遍一致性指标（首尾衔接 / 帧间差 / 色板外颜色 / 半透明占比），
+    把「稳不稳」变成数字——AI 逐帧生成最常见的就是某一帧姿势跑飞，肉眼看
+    不出来，指标能直接指到第几帧。
     """
+    from . import metrics as metrics_pipe
+    from . import palette as palette_pipe
+
     if not images:
         raise ValueError("没有可合成的帧")
     frames, fmeta = sprite_pipe.normalize_frames(
@@ -163,12 +175,26 @@ def compose(
         matte=matte, tolerance=tolerance, feather=feather,
         hard=hard, matte_method=matte_method,
     )
+
+    pal: List[Sequence[int]] = []
+    if colors and int(colors) >= 2:
+        # 没抠图时绿色背景还在，取色要把键色排除掉，否则色板半版是绿
+        exclude = (0, 255, 0) if not matte else None
+        pal = palette_pipe.extract_palette(frames, k=int(colors), exclude=exclude)
+        if pal:
+            frames = [palette_pipe.apply_palette(f, pal) for f in frames]
+
     sheet, index = sheet_pipe.compose_sheet(frames, max(1, int(cols)))
+    m = metrics_pipe.sheet_metrics(frames, pal or None)
     meta = {
         "cols": max(1, int(cols)),
         "frames": len(frames),
         "normalize": fmeta,
         "frameSize": index["frame_size"],
         "sheetSize": index["sheet_size"],
+        "metrics": m,
+        "metricsVerdict": metrics_pipe.metrics_verdict(m),
     }
+    if pal:
+        meta["palette"] = {"colors": len(pal), "swatches": [list(c) for c in pal[:32]]}
     return sheet, frames, index, meta

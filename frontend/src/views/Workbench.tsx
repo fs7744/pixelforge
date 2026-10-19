@@ -235,6 +235,9 @@ export default function Workbench({ onSendToPost }: Props) {
   const [spriteCell, setSpriteCell] = useState(256)
   // 逐帧走编辑底座，步数越多越听话也越慢；20 步是「能改姿势」的实测下限
   const [spriteSteps, setSpriteSteps] = useState(20)
+  // 全局锁色：0 = 每帧各自量化（同一个肤色会逐帧偏色，动画一播就闪）；
+  // >0 = 先取一块共享色板再让每帧映射回它。默认 24。
+  const [spriteColors, setSpriteColors] = useState(24)
   const [spriteBusy, setSpriteBusy] = useState(false)
   const [spriteWriting, setSpriteWriting] = useState(false)
   const [spriteProg, setSpriteProg] = useState<{ i: number; total: number; pose: string } | null>(null)
@@ -508,14 +511,19 @@ export default function Workbench({ onSendToPost }: Props) {
         cols: Math.max(1, spriteCols),
         size: Math.max(64, spriteCell),
         matte: true,
+        colors: spriteColors,
       })
       if (!d.asset) throw new Error(d.detail || '合成失败')
       setResults((prev) => [d.asset, ...prev])
       setSelected(d.asset.id)
       const g = d.index?.grid
+      const verdict = (d.meta?.metricsVerdict || []) as string[]
+      const pal = d.meta?.palette?.colors
       setMeta({
         ...d.meta,
-        note: `精灵表 ${g?.cols}×${g?.rows} · 单帧 ${d.index?.frame_size?.w}×${d.index?.frame_size?.h} · 已共享缩放并对齐基线`,
+        note: `精灵表 ${g?.cols}×${g?.rows} · 单帧 ${d.index?.frame_size?.w}×${d.index?.frame_size?.h} · 已共享缩放并对齐基线`
+          + (pal ? ` · 全局锁色 ${pal} 色` : '')
+          + (verdict.length ? ` · ${verdict.join('；')}` : ''),
       })
     } catch (e: any) {
       setError(e.message || String(e))
@@ -907,6 +915,29 @@ export default function Workbench({ onSendToPost }: Props) {
               </div>
             </div>
 
+            <div className="label" style={{ marginTop: 10 }}>全局锁色（帧间不偏色）</div>
+            <div className="chips mt8">
+              {[
+                [0, '关闭'],
+                [16, '16 色'],
+                [24, '24 色'],
+                [32, '32 色'],
+              ].map(([v, l]) => (
+                <button
+                  key={String(v)}
+                  className={`chip ${spriteColors === v ? 'on' : ''}`}
+                  onClick={() => setSpriteColors(v as number)}
+                >
+                  {l as string}
+                </button>
+              ))}
+            </div>
+            <div className="hint" style={{ marginTop: 6 }}>
+              每帧各自量化时，同一个肤色第 1 帧偏橙、第 3 帧偏红，动画一播就闪。
+              开启后先取一块共享色板，再让每一帧映射回它；合成完会在结果说明里给出
+              首尾衔接、帧间差、色板外颜色等一致性指标。
+            </div>
+
             <div className="row" style={{ marginTop: 8 }}>
               <button
                 className="btn btn-primary grow"
@@ -944,7 +975,7 @@ export default function Workbench({ onSendToPost }: Props) {
             )}
             <div className="hint" style={{ marginTop: 6 }}>
               「动作序列」在上面「模板字段」里改，这里和提示词共用同一份。合成时按顺序铺格子，
-              尺寸统一、底部对齐、绿底自动抠掉。
+              尺寸统一、底部对齐、绿底自动抠掉，并按上面的锁色设置统一帧间配色。
             </div>
           </div>
         )}

@@ -310,12 +310,14 @@ export const api = {
     if (file) fd.append('file', file)
     return fetch('/api/pipeline/sprite/frame', { method: 'POST', body: fd }).then(json)
   },
-  /** 逐帧结果 → 共享缩放/基线对齐/抠图 → 精灵表 + 引擎索引 */
+  /** 逐帧结果 → 共享缩放/基线对齐/抠图 → 精灵表 + 引擎索引。
+   *  colors > 0：取全局色板再让每帧映射回它（帧间不偏色）；0 = 每帧各自量化 */
   spriteCompose: (payload: {
     frameAssetIds: string[]
     cols: number
     size?: number
     matte?: boolean
+    colors?: number
   }) =>
     fetch('/api/pipeline/sprite/compose', {
       method: 'POST',

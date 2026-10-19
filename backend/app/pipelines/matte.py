@@ -121,6 +121,48 @@ def _saturation(rgb: np.ndarray) -> np.ndarray:
 # --------------------------------------------------------------------------- #
 # 边缘去污
 # --------------------------------------------------------------------------- #
+def _chroma_channel(palette: List[np.ndarray]) -> Optional[int]:
+    """底色里有没有「可色键的纯色」——某通道领先另两个 40+ 的才算。
+
+    绿幕 (0,255,0)、蓝幕 (0,0,255) 都满足；灰底、白底、花色背景不满足，
+    此时不走色相判定，退回原来的 RGB 距离判定（避免把任何带颜色的角色
+    像素都当成溢色）。
+    """
+    for c in palette:
+        arr = np.asarray(c, dtype=np.int32)
+        ch = int(arr.argmax())
+        if arr[ch] - max(int(np.delete(arr, ch)[0]), int(np.delete(arr, ch)[1])) >= 40:
+            return ch
+    return None
+
+
+def _hue_spill(rgb: np.ndarray, channel: int, hue_tol: int = 26,
+               sat_min: float = 0.25, val_min: float = 0.05) -> np.ndarray:
+    """按**色相**认出「被底色染过」的像素（不只是 RGB 距离近的）。
+
+     RGB 距离判定的盲区在暗部：头发里一颗深绿溢出 (20,80,30) 到纯绿
+     (0,255,0) 的 RGB 距离约 178，任何合理容差都抓不到，于是留着一条
+    绿丝。色相 + 饱和度 + 明度下限三条件能抓到它（那颗像素色相 130°、
+     饱和 0.75），同时排除「深色但不同相」的描边像素。
+
+    色相目标取该通道取最大值时的色相：绿 120°、蓝 240°、红 0°（OpenCV 的 H
+    是 0-180，所以用 60 / 120 / 0）。val_min 挡掉纯黑——黑描边到任何底色都近，
+    但色相判定不该碰它。
+
+    注意 OpenCV 的 HSV 色相量纲随输入 dtype 变：float 图 H 是 0-360，uint8 图
+    才是 0-180。这里显式转 uint8，否则目标色相会整体差一倍（绿 120 被当成 60
+    = 红），判定 silently 失效。
+    """
+    import cv2
+
+    u8 = (np.clip(rgb, 0, 255)).astype(np.uint8)
+    hsv = cv2.cvtColor(u8, cv2.COLOR_RGB2HSV)
+    target = {0: 0, 1: 60, 2: 120}.get(channel, 60)
+    dist = np.abs(hsv[..., 0].astype(np.int16) - target)
+    dist = np.minimum(dist, 180 - dist)
+    return (dist <= hue_tol) & (hsv[..., 1] >= int(sat_min * 255)) & (hsv[..., 2] >= int(val_min * 255))
+
+
 def _despill(arr: np.ndarray, kept: np.ndarray, palette: List[np.ndarray], tol: float) -> int:
     """把「紧贴透明区、颜色仍接近背景」的轮廓像素改成内侧角色像素的颜色。
 
@@ -145,8 +187,25 @@ def _despill(arr: np.ndarray, kept: np.ndarray, palette: List[np.ndarray], tol: 
 
     d_bg_all = _palette_dist(rgb, palette)
     out = rgb.copy()
-    known = core.copy()          # 已确认是角色本身的像素
     changed = 0
+
+    # 色相判定（移植自 h3-character-studio 的 key_pixels）：底色是可色键纯色时，
+    # 轮廓环里「色相属于底色」的像素也算污染——专抓 RGB 距离抓不到的暗部
+    # 溢出（深绿丝、深蓝边）。只作用于轮廓环（band），不动画面内部，
+    # 所以角色本身是绿色时最多损失外圈一两颗像素。
+    channel = _chroma_channel(palette)
+    hue_bad = _hue_spill(rgb, channel) if channel is not None else None
+    if hue_bad is not None:
+        # 色相判定比 RGB 距离精确（暗部也认得出来），所以轮廓环再放宽 1px：
+        # 实测绿幕溢色在发丝里能深达 3px，2px 环会留着一条绿丝。
+        deep = _erode(core)
+        if deep.any():
+            core = deep
+            band = kept & ~core
+
+    # known 必须在 core 定稿之后再取：提前拷贝会把轮廓环里那些「已被认定为
+    # 角色色」的像素（恰恰是溢色）设成参考起点，循环第一步就把它们跳过。
+    known = core.copy()          # 已确认是角色本身的像素
 
     # 由内向外一圈圈推进：内圈的判定结果会成为外圈的参考色。
     for _ in range(3):
@@ -168,6 +227,8 @@ def _despill(arr: np.ndarray, kept: np.ndarray, palette: List[np.ndarray], tol: 
         # 用 0.9 的相对余量：d_bg 与 d_core 相等时（浅色角色压在浅色底上）
         # 两边都是合法颜色，不能因为浮点精度差就被判成污染。
         dirty = (d_bg <= tol * 1.25) & (d_bg < d_core * 0.9)
+        if hue_bad is not None:
+            dirty = dirty | hue_bad[ys, xs]
         if dirty.any():
             out[ys[dirty], xs[dirty]] = np.round(mean[dirty]).astype(np.int32)
             changed += int(dirty.sum())
@@ -584,12 +645,18 @@ def connected_matte(
     removed = int((~kept).sum())
 
     despilled = 0
+    residual = 0
     alpha = np.where(kept, 255, 0).astype(np.uint8)
 
     if hard:
         if despill:
             despilled = _despill(arr, kept, palette, float(tolerance))
         arr[:, :, 3] = alpha
+        # 去污之后还剩多少「底色色相」的像素（移植自 h3 的 validate_foreground：
+        # 在量化/合成前先量一次污染，别等用户拿去用时才发现绿边）。
+        channel = _chroma_channel(palette)
+        if channel is not None:
+            residual = int((_hue_spill(arr[:, :, :3], channel) & kept).sum())
     else:
         if feather > 0:
             softened = np.array(
@@ -610,6 +677,8 @@ def connected_matte(
         "holesFilled": holes_filled,
         "edgeGrowPixels": grown,
         "removedRatio": round(removed / float(h * w), 4),
+        "residualKeyPixels": residual,
+        "residualKeyRatio": round(residual / max(1, int(kept.sum())), 4),
     }
     if last_err:
         meta["fallbackReason"] = last_err
