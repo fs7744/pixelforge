@@ -53,6 +53,9 @@ echo   ----------
 echo.
 
 rem ---------- 1. Python ----------
+rem Upper bound matters more than the lower one: on 3.14/3.15 some deps
+rem (PyYAML, pulled in by uvicorn[standard]) have no prebuilt wheels yet,
+rem so pip tries to compile from source and dies on "requires MSVC".
 if defined PF_PYTHON (
   if exist "%PF_PYTHON%" set "PY=%PF_PYTHON%"
 )
@@ -60,20 +63,51 @@ if not defined PY if exist "%VENV%\Scripts\python.exe" set "PY=%VENV%\Scripts\py
 if not defined PY if exist "%VENV%\bin\python.exe" set "PY=%VENV%\bin\python.exe"
 
 if defined PY (
-  "%PY%" -c "import sys;sys.exit(0 if sys.version_info>=(3,10) else 1)" >nul 2>nul
+  "%PY%" -c "import sys;sys.exit(0 if (3,10)<=sys.version_info[:2]<=(3,13) else 1)" >nul 2>nul
   if errorlevel 1 (
-    echo [ERROR] "%PY%" is not Python 3.10+. Delete the .venv folder and retry.
-    goto failed
+    rem Out-of-range environment left by an earlier run: move it aside and rebuild.
+    echo        Existing .venv is outside the supported Python 3.10-3.13 range.
+    echo        Rebuilding it now - the old folder is kept as .venv.bak.
+    if exist "%VENV%.bak" rd /s /q "%VENV%.bak"
+    move "%VENV%" "%VENV%.bak" >nul 2>nul
+    set "PY="
   )
+)
+
+if defined PY (
   echo [1/4] Python ......... OK
   goto deps
 )
 
+rem Prefer a version with published wheels before falling back to whatever py defaults to.
 set "BASE="
 where py >nul 2>nul
 if not errorlevel 1 (
-  py -3 -c "import sys;sys.exit(0 if sys.version_info>=(3,10) else 1)" >nul 2>nul
-  if not errorlevel 1 set "BASE=py -3"
+  for %%v in (3.13 3.12 3.11 3.10) do (
+    if not defined BASE (
+      py -%%v -c "import sys;sys.exit(0 if (3,10)<=sys.version_info[:2]<=(3,13) else 1)" >nul 2>nul
+      if not errorlevel 1 set "BASE=py -%%v"
+    )
+  )
+  if not defined BASE (
+    py -3 -c "import sys;sys.exit(0 if (3,10)<=sys.version_info[:2]<=(3,13) else 1)" >nul 2>nul
+    if not errorlevel 1 set "BASE=py -3"
+  )
+)
+if not defined BASE (
+  where python >nul 2>nul
+  if not errorlevel 1 (
+    python -c "import sys;sys.exit(0 if (3,10)<=sys.version_info[:2]<=(3,13) else 1)" >nul 2>nul
+    if not errorlevel 1 set "BASE=python"
+  )
+)
+if not defined BASE (
+  rem Nothing in range. Take any 3.10+ and warn, instead of hard-failing.
+  where py >nul 2>nul
+  if not errorlevel 1 (
+    py -3 -c "import sys;sys.exit(0 if sys.version_info>=(3,10) else 1)" >nul 2>nul
+    if not errorlevel 1 set "BASE=py -3"
+  )
 )
 if not defined BASE (
   where python >nul 2>nul
@@ -84,7 +118,7 @@ if not defined BASE (
 )
 if not defined BASE (
   echo [ERROR] Python 3.10+ not found.
-  echo         Install it from https://www.python.org/downloads/
+  echo         Install Python 3.12 or 3.13 from https://www.python.org/downloads/
   echo         and tick "Add python.exe to PATH" during setup.
   goto failed
 )
@@ -113,10 +147,18 @@ if errorlevel 1 (
   if errorlevel 1 (
     echo        Retrying with the Aliyun mirror ...
     "%PY%" -m pip install --disable-pip-version-check -r "%ROOT%\backend\requirements.txt" -i https://mirrors.aliyun.com/pypi/simple
+    if errorlevel 1 (
+      rem Plain uvicorn instead of uvicorn[standard]: skips PyYAML/uvloop,
+      rem which are the packages that need a C compiler on brand-new Python.
+      echo        Retrying without optional extras ^(core packages only^) ...
+      "%PY%" -m pip install --disable-pip-version-check fastapi uvicorn pillow numpy python-multipart aiofiles httpx opencv-python-headless -i https://mirrors.aliyun.com/pypi/simple
+    )
   )
-  "%PY%" -c "import fastapi, uvicorn, PIL, numpy" >nul 2>nul
+  "%PY%" -c "import fastapi, uvicorn, PIL, numpy, cv2" >nul 2>nul
   if errorlevel 1 (
-    echo [ERROR] Dependency installation failed. Check your network and retry.
+    echo [ERROR] Dependency installation failed.
+    echo         If your Python is newer than 3.13, install Python 3.12 or 3.13,
+    echo         delete the .venv folder, and run start.bat again.
     goto failed
   )
 )

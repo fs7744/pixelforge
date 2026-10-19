@@ -7,7 +7,11 @@
 
 ## 快速开始
 
-只需要 **Python 3.10+**。构建界面还需要 **Node.js 18+**（没有也能跑 API）。
+只需要 **Python 3.10 – 3.13**（推荐 3.12 或 3.13）。构建界面还需要 **Node.js 18+**（没有也能跑 API）。
+
+> 不要用 Python 3.14/3.15：PyYAML 等依赖还没有预编译 wheel，pip 会退回源码编译，
+> 而 Windows 上默认没有 MSVC 编译器，安装会以 `Microsoft Visual C++ 14.0 or greater is required` 失败。
+> 脚本会优先挑 3.10–3.13；万一只装得过新的版本，会自动去掉 `uvicorn[standard]` 的 extras 兜底。
 
 ```bash
 # Windows：双击 start.bat
@@ -17,6 +21,8 @@
 
 首次运行会自动完成：建 `.venv` → 装 Python 依赖 → 构建前端 → 启动服务 → 打开浏览器。
 之后再运行会跳过已完成步骤，通常 1-2 秒起来。
+
+如果之前用 3.14/3.15 建过 `.venv`，脚本会识别出版本越界，自动把旧目录改名成 `.venv.bak-<时间戳>` 并重建，不用手删。
 
 打开 <http://127.0.0.1:8787>。端口被占用时会自动顺延到下一个空闲端口，启动信息里会打印实际地址。
 
@@ -121,6 +127,7 @@ GET  /api/runs/{id}                    查询步骤状态与产物
 | 现象 | 处理 |
 |---|---|
 | `未找到 Python 3.10+` | 装 Python 并勾选「Add python.exe to PATH」；或 `PF_PYTHON=/path/to/python ./start.sh` |
+| `Microsoft Visual C++ 14.0 or greater is required` | 解释器版本过新（3.14/3.15），部分依赖没有 wheel。装 Python 3.12/3.13 后重跑即可，脚本会自动重建 `.venv` |
 | 创建虚拟环境失败（Linux） | `sudo apt install python3-venv` |
 | 依赖装不上 / 很慢 | `PF_PIP_INDEX=https://pypi.tuna.tsinghua.edu.cn/simple ./start.sh` |
 | 界面空白 / 打不开 | 装 Node.js 18+ 后重跑 `./start.sh`；也可 `cd frontend && npm install && npm run build` |

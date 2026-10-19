@@ -6,6 +6,8 @@ __pycache__/
 .ruff_cache/
 .mypy_cache/
 .venv/
+# 版本越界时脚本会把旧环境重命名成 .venv.bak-<时间戳>，同样不入库
+.venv.bak*/
 venv/
 env/
 

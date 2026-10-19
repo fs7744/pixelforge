@@ -13,7 +13,7 @@
 #   ./start.sh --check        只做自检，打印还缺什么
 #
 # 环境变量：
-#   PF_PYTHON     指定 Python 解释器（默认自动探测，优先用项目 .venv）
+#   PF_PYTHON     指定 Python 解释器（默认自动探测 3.10–3.13，优先用项目 .venv）
 #   PF_VENV       虚拟环境目录（默认 <项目>/.venv）
 #   PF_PIP_INDEX  自定义 pip 源（默认先用本机 pip 配置，失败后自动切阿里云）
 #   HOST / PORT   监听地址（默认 127.0.0.1:8787）
@@ -68,13 +68,42 @@ done
 
 # ---------- 1. 找 Python ----------
 MIN_VER="3.10"
-py_ok() { "$1" -c "import sys; sys.exit(0 if sys.version_info >= tuple(int(x) for x in '$MIN_VER'.split('.')) else 1)" >/dev/null 2>&1; }
+MAX_VER="3.13"
+# 上限比下限更要紧：3.14/3.15 上 PyYAML（经 uvicorn[standard] 引入）等依赖
+# 还没有预编译 wheel，pip 会退回源码编译，然后卡在「需要 MSVC」而整包失败。
+IN_RANGE=(3.13 3.12 3.11 3.10)
+
+py_ver() { "$1" -c "import sys; print('%d.%d' % sys.version_info[:2])" 2>/dev/null; }
+py_ge_min() {
+  "$1" -c "import sys; sys.exit(0 if sys.version_info[:2] >= (3, 10) else 1)" >/dev/null 2>&1
+}
+py_supported() {
+  "$1" -c "import sys; sys.exit(0 if (3, 10) <= sys.version_info[:2] <= (3, 13) else 1)" >/dev/null 2>&1
+}
+
+# 把 "py -3.13" 这类带参数的命令解析成真实路径，后续统一按路径引用
+resolve_exe() { $1 -c "import sys; print(sys.executable)" 2>/dev/null; }
 
 find_base_python() {
-  # py 是 Windows 的启动器，能绕开 Microsoft Store 的假 python
-  for cand in python3 python py; do
-    command -v "$cand" >/dev/null 2>&1 || continue
-    if py_ok "$cand"; then printf '%s\n' "$cand"; return 0; fi
+  # 两轮：优先落在 3.10–3.13；实在没有才退回「过新的版本」并给出警告。
+  local want="$1" cmd exe
+  for v in "${IN_RANGE[@]}"; do
+    for cmd in "python$v" "py -$v"; do
+      exe="$(resolve_exe "$cmd")" || continue
+      [ -x "$exe" ] || continue
+      if [ "$want" = "supported" ]; then
+        py_supported "$exe" || continue
+      else
+        py_ge_min "$exe" || continue
+      fi
+      printf '%s\n' "$exe"; return 0
+    done
+  done
+  for cmd in python3 python "py -3"; do
+    exe="$(resolve_exe "$cmd")" || continue
+    [ -x "$exe" ] || continue
+    if [ "$want" = "supported" ]; then py_supported "$exe" || continue; else py_ge_min "$exe" || continue; fi
+    printf '%s\n' "$exe"; return 0
   done
   return 1
 }
@@ -86,20 +115,44 @@ venv_python() {
   return 1
 }
 
+create_venv() {
+  step "创建虚拟环境 $VENV"
+  "$1" -m venv "$VENV" || die "创建虚拟环境失败。Debian/Ubuntu 需先执行：sudo apt install python3-venv"
+  PY="$(venv_python)" || die "虚拟环境创建后仍找不到 Python，请检查 $VENV 是否完整"
+  ok "$("$PY" -V 2>&1)"
+}
+
 step "检查 Python 环境"
 if [ -n "${PF_PYTHON:-}" ]; then
   [ -x "$PF_PYTHON" ] || die "PF_PYTHON 指向的解释器不存在：$PF_PYTHON"
   PY="$PF_PYTHON"
-  ok "使用指定解释器：$PY"
+  ok "使用指定解释器：$PY（$(py_ver "$PY")）"
+  py_ge_min "$PY" || die "指定解释器版本过低，需要 Python ${MIN_VER}+"
+  py_supported "$PY" || warn "该版本高于 ${MAX_VER}，部分依赖可能没有预编译包，安装或将失败"
 elif PY="$(venv_python)"; then
-  ok "复用虚拟环境：${VENV#$ROOT/}"
+  if py_supported "$PY"; then
+    ok "复用虚拟环境：${VENV#$ROOT/}（$(py_ver "$PY")）"
+  else
+    # 之前用 3.14/3.15 建过环境：依赖装不上，且会一直复用这个坏环境
+    warn "现有虚拟环境是 Python $(py_ver "$PY")，超出支持范围 ${MIN_VER}–${MAX_VER}"
+    dim "  该版本多数依赖还没有预编译 wheel，编译需要 MSVC，安装会失败"
+    OLD="${VENV%/}.bak-$(date +%Y%m%d%H%M%S)"
+    mv "$VENV" "$OLD" || die "无法移动旧虚拟环境：$VENV"
+    dim "  旧环境已保留在 ${OLD#$ROOT/}"
+    BASE="$(find_base_python supported)" || die "未找到 Python ${MIN_VER}–${MAX_VER}。请安装 https://www.python.org/downloads/"
+    ok "使用系统 Python：$BASE（$(py_ver "$BASE")）"
+    create_venv "$BASE"
+  fi
 else
-  BASE="$(find_base_python)" || die "未找到 Python ${MIN_VER}+。请先安装 Python（https://www.python.org/downloads/），安装时勾选「Add to PATH」。"
-  ok "使用系统 Python：$BASE（$("$BASE" -V 2>&1)）"
-  step "创建虚拟环境 .venv"
-  "$BASE" -m venv "$VENV" || die "创建虚拟环境失败。Debian/Ubuntu 需先执行：sudo apt install python3-venv"
-  PY="$(venv_python)" || die "虚拟环境创建后仍找不到 Python，请检查 $VENV 是否完整"
-  ok "$("$PY" -V 2>&1)"
+  if BASE="$(find_base_python supported)"; then
+    ok "使用系统 Python：$BASE（$(py_ver "$BASE")）"
+  elif BASE="$(find_base_python any)"; then
+    warn "只找到 Python $(py_ver "$BASE")（高于 ${MAX_VER}），依赖可能没有预编译包"
+    dim "  建议安装 Python 3.12 或 3.13：https://www.python.org/downloads/"
+  else
+    die "未找到 Python ${MIN_VER}+。请先安装 Python（https://www.python.org/downloads/），安装时勾选「Add to PATH」。"
+  fi
+  create_venv "$BASE"
 fi
 
 # ---------- 2. 装依赖 ----------
@@ -121,15 +174,27 @@ pip_install() {
 if [ -n "$MISSING" ]; then
   step "安装 Python 依赖（首次约 1-3 分钟）"
   "$PY" -m pip install --disable-pip-version-check -U pip >/dev/null 2>&1 || warn "pip 升级失败，继续用当前版本"
+
+  # 兜底依赖集：不含 uvicorn[standard]，因此不会拉 PyYAML/uvloop 这些需要编译的包。
+  # 少了 extras 只影响 --reload 的 watchfiles 热重载与 httptools 提速，功能不受影响。
+  CORE_FALLBACK=(fastapi uvicorn pillow numpy python-multipart aiofiles httpx opencv-python-headless)
+  MIRROR="https://mirrors.aliyun.com/pypi/simple"
+
   if ! pip_install -r "$REQ"; then
     if [ -z "${PF_PIP_INDEX:-}" ]; then
       warn "默认源安装失败，改用阿里云镜像重试"
-      "$PY" -m pip install --disable-pip-version-check -r "$REQ" -i https://mirrors.aliyun.com/pypi/simple || \
-        die "依赖安装失败。可指定镜像重试：PF_PIP_INDEX=https://pypi.tuna.tsinghua.edu.cn/simple ./start.sh"
+      if ! "$PY" -m pip install --disable-pip-version-check -r "$REQ" -i "$MIRROR"; then
+        warn "镜像仍失败，去掉 uvicorn 的 extras 兜底安装核心依赖"
+        dim "  （只影响热重载与 HTTP 解析加速，功能完整）"
+        "$PY" -m pip install --disable-pip-version-check "${CORE_FALLBACK[@]}" -i "$MIRROR" || \
+          die "依赖安装失败。可指定镜像重试：PF_PIP_INDEX=https://pypi.tuna.tsinghua.edu.cn/simple ./start.sh"
+      fi
     else
       die "依赖安装失败，请检查网络或 PF_PIP_INDEX：$PF_PIP_INDEX"
     fi
   fi
+  "$PY" -c "import fastapi, uvicorn, PIL, numpy, cv2" >/dev/null 2>&1 || \
+    die "核心依赖仍不完整。若使用 Python ${MAX_VER} 以上，请改用 3.12/3.13 后删除 .venv 重试"
   ok "核心依赖就绪"
 else
   ok "Python 依赖已就绪"
