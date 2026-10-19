@@ -38,6 +38,9 @@
 | `./start.sh --check` | 自检：打印 Python / 依赖 / torch / 前端 / 模型 / 端口状态 |
 | `./start.sh --gpu` | 额外安装 AI 推理依赖（torch + diffusers，约 2.9GB） |
 
+服务跑起来后，设置页还有「环境体检」按钮（`GET /api/doctor`）：逐项检查
+依赖 / GPU / 模型底座，缺什么直接给修复命令，不用回文档翻排错表。
+
 Windows 下把 `./start.sh` 换成 `start.bat`，参数相同。
 
 ### 环境变量

@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react'
-import { api, Settings } from '../api'
+import { api, DoctorReport, Settings } from '../api'
 import { Splitter } from '../split'
 
 /** 只有本地双底座，配置页也从「多 Provider 卡片网格」收敛成一张卡。 */
@@ -8,6 +8,8 @@ export default function SettingsView() {
   const [saving, setSaving] = useState(false)
   const [msg, setMsg] = useState('')
   const [testMsg, setTestMsg] = useState('')
+  const [doctor, setDoctor] = useState<DoctorReport | null>(null)
+  const [doctoring, setDoctoring] = useState(false)
 
   useEffect(() => {
     api.settings().then(setSettings)
@@ -46,6 +48,25 @@ export default function SettingsView() {
       setTestMsg(`${r.ok ? 'OK' : 'FAIL'} · ${r.message}`)
     } catch (e: any) {
       setTestMsg(`FAIL · ${e.message}`)
+    }
+  }
+
+  // 运行环境体检（移植自 FrameBaker 的 doctor 页）：逐项列出，detail 直接
+  // 告诉用户跑哪条命令，不用回 README 翻排错表
+  const runDoctor = async () => {
+    setDoctoring(true)
+    try {
+      setDoctor(await api.doctor())
+    } catch (e: any) {
+      setDoctor({
+        ok: false,
+        summary: '体检失败',
+        checks: [{ id: 'doctor', ok: false, label: '体检接口', detail: e.message }],
+        activeProvider: '',
+        torch: false,
+      })
+    } finally {
+      setDoctoring(false)
     }
   }
 
@@ -212,6 +233,39 @@ export default function SettingsView() {
             </div>
             <div className="hint">LOCAL</div>
           </div>
+        </div>
+
+        <div className="section-title" style={{ marginTop: 8 }}>
+          环境体检
+        </div>
+        <div className="card">
+          <div className="row between">
+            <div className="label" style={{ margin: 0 }}>
+              一键检查依赖 / GPU / 模型底座，缺什么直接给修复命令
+            </div>
+            <button className="btn" onClick={runDoctor} disabled={doctoring}>
+              {doctoring ? '检查中…' : '开始体检'}
+            </button>
+          </div>
+          {doctor && (
+            <div style={{ marginTop: 10 }}>
+              <div className={doctor.ok ? 'ok' : 'err'} style={{ fontSize: 13, marginBottom: 8 }}>
+                {doctor.summary}
+                {doctor.ok ? ' · 全部就绪' : ' · 有未就绪项，按下面提示处理'}
+              </div>
+              {doctor.checks.map((c) => (
+                <div key={c.id} className="row" style={{ alignItems: 'flex-start', padding: '5px 0' }}>
+                  <span style={{ color: c.ok ? '#00ff88' : '#ff5577', fontWeight: 700, width: 18 }}>
+                    {c.ok ? '✓' : '✗'}
+                  </span>
+                  <div className="grow">
+                    <div style={{ fontSize: 13, fontWeight: 600 }}>{c.label}</div>
+                    <div className="hint">{c.detail}</div>
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
         </div>
       </main>
     </div>

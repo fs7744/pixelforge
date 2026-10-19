@@ -1,4 +1,4 @@
-"""逐路由覆盖测试：31 个路由里所有「不需要加载模型」的端点 + 错误路径。
+"""逐路由覆盖测试：32 个路由里所有「不需要加载模型」的端点 + 错误路径。
 
 分工：
 - 本脚本：抠图 / 像素化 / 缩放 / 镜像延展 / 无缝平铺 / 分表 / 合表 /
@@ -1229,6 +1229,52 @@ except Exception as e:  # 事件循环关闭等：忽略，只看能否走到族
     _vmsg = ""
 check("非视频底座调 generate_video → 明确报错并给出下载指引",
       "fetch_wan22" in _vmsg or "视频底座" in _vmsg, _vmsg[:80])
+
+print("== 体检 / 有界 JSON / 启动恢复（移植自 FrameBaker 与 h3）==")
+_d = client.get("/api/doctor")
+_dbody = _d.json() if _d.status_code == 200 else {}
+check("GET /api/doctor 200", _d.status_code == 200, _d.status_code)
+check("doctor 返回结构化检查项",
+      isinstance(_dbody.get("checks"), list) and len(_dbody["checks"]) >= 5
+      and all({"id", "ok", "label", "detail"} <= set(c) for c in _dbody["checks"]),
+      _dbody.get("summary", ""))
+
+# 有界 JSON（FrameBaker shared/json.ts）：NaN / 无限 / 超深嵌套必须被拒，
+# 不能流进 run JSON——json.dumps 会写出严格解析器拒绝的 NaN 字面量。
+# 注意 httpx 的 json= 自己也用 allow_nan=False，发不出 NaN，所以这里用
+# 原始 body 直抵服务端解析（模拟 curl 手写 body 的调用方）
+from backend.app.jsonlimits import validate_bounded as _vb  # noqa: E402
+
+for _name, _bad in (("NaN", float("nan")), ("Infinity", float("inf"))):
+    try:
+        _vb({"cfg": _bad})
+        _unit_ok = False
+    except ValueError:
+        _unit_ok = True
+    check(f"validate_bounded 拒绝 {_name}", _unit_ok)
+
+_raw = b'{"input": "\xe6\x9c\x89\xe7\x95\x8c\xe6\xb5\x8b\xe8\xaf\x95", "params": {"cfg": NaN}}'
+_r = client.post("/api/workflows/scene/runs", content=_raw,
+                 headers={"Content-Type": "application/json"})
+check("params 含 NaN → 400/422", _r.status_code in (400, 422), f"{_r.status_code}")
+_deep = {"a": 1}
+for _ in range(40):
+    _deep = {"n": _deep}
+_r = client.post("/api/workflows/scene/runs", json={"input": "有界测试", "params": _deep})
+check("params 超深嵌套 → 400/422", _r.status_code in (400, 422), f"{_r.status_code}")
+
+# 启动恢复（FrameBaker queue.ts）：running 步骤在「新进程」里应被标回 failed。
+# 这里直接调 recover_interrupted_runs() 模拟启动那一刻
+_r3 = wf_mod.create_run("animation_video", "恢复测试")
+_p = Path("data/runs") / f"{_r3['id']}.json"
+_st = json.loads(_p.read_text(encoding="utf-8"))
+_st["steps"][1]["status"] = "running"
+_p.write_text(json.dumps(_st), encoding="utf-8")
+_n = wf_mod.recover_interrupted_runs()
+_st2 = json.loads(_p.read_text(encoding="utf-8"))
+check("启动恢复：running → failed", _n >= 1 and _st2["steps"][1]["status"] == "failed",
+      f"recovered={_n}")
+_p.unlink(missing_ok=True)
 
 print("== 清理测试资产 ==")
 removed = 0

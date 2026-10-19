@@ -138,6 +138,16 @@ export type Settings = {
   aiLabel: boolean
 }
 
+/** 体检项（移植自 FrameBaker doctor.ts）：detail 里带可执行的修复命令 */
+export type DoctorCheck = { id: string; ok: boolean; label: string; detail: string }
+export type DoctorReport = {
+  ok: boolean
+  summary: string
+  checks: DoctorCheck[]
+  activeProvider: string
+  torch: boolean
+}
+
 const json = async (res: Response) => {
   if (!res.ok) {
     let msg = `HTTP ${res.status}`
@@ -154,6 +164,8 @@ const json = async (res: Response) => {
 
 export const api = {
   health: () => fetch('/api/health').then(json),
+  /** 运行环境体检：依赖 / GPU / 模型底座逐项检查，detail 带修复命令 */
+  doctor: (): Promise<DoctorReport> => fetch('/api/doctor').then(json),
   templates: () => fetch('/api/templates').then(json),
   styles: () => fetch('/api/styles').then(json),
   providers: () => fetch('/api/providers').then(json),

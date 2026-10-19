@@ -8,6 +8,7 @@ from __future__ import annotations
 import io
 import json
 import zipfile
+from contextlib import asynccontextmanager
 from typing import Any, Dict, List, Optional
 
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
@@ -16,18 +17,33 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from PIL import Image
-from pydantic import BaseModel
+from pydantic import BaseModel, field_validator
 
+from . import doctor as doctor_mod
 from . import storage, styles, templates
 from .config import (ASSETS_DIR, CHAR_PIXEL_SAMPLES_DIR, DATA_DIR, ROOT,
                      STYLE_SAMPLES_DIR, load_settings, save_settings)
+from .jsonlimits import validate_bounded
 from .pipelines import matte as matte_pipe
 from .pipelines import resize as resize_pipe
 from .pipelines import sheet as sheet_pipe
 from .pipelines import watermark as wm_pipe
 from .providers import REGISTRY, get_provider
 
-app = FastAPI(title="PixelForge MVP", version="0.1.0")
+
+@asynccontextmanager
+async def lifespan(_app: FastAPI):
+    # 启动恢复（移植自 FrameBaker queue.ts）：上次进程崩溃时状态停在
+    # running 的步骤标回 failed，否则重启后永远显示「执行中」且重跑被挡
+    from .workflows import recover_interrupted_runs
+
+    recovered = recover_interrupted_runs()
+    if recovered:
+        print(f"[startup] 重置了 {recovered} 个中断工作流的 running 步骤")
+    yield
+
+
+app = FastAPI(title="PixelForge MVP", version="0.1.0", lifespan=lifespan)
 # 本地工作站：只可能来自本机浏览器（生产同源；开发态 vite 也代理 /api，
 # 见 frontend/vite.config.ts）。原写法 allow_origins=["*"] 与
 # allow_credentials=True 并存是 CORS 规范禁止的组合，浏览器会整组拒绝；
@@ -61,6 +77,16 @@ async def health():
     return {"ok": True, "app": "pixelforge", "version": "0.1.0", "activeProvider": s.get("activeProvider")}
 
 
+@app.get("/api/doctor")
+async def doctor():
+    """运行环境体检（移植自 FrameBaker 的 doctor.ts）。
+
+    逐项检查设置 / 资产目录 / 依赖 / GPU / 模型底座，detail 里带可执行的
+    修复命令。设置页一键体检用这个；启动前的文本自检走 ./start.sh --check。
+    """
+    return await run_in_threadpool(doctor_mod.run_doctor)
+
+
 @app.get("/api/templates")
 async def get_templates():
     # 占位符在返回前就填成默认值：前端拿到的是「点了就能跑」的提示词，
@@ -85,6 +111,15 @@ class SettingsPayload(BaseModel):
     providers: Optional[Dict[str, Dict[str, Any]]] = None
     defaults: Optional[Dict[str, Any]] = None
     aiLabel: Optional[bool] = None
+
+    @field_validator("providers", "defaults")
+    @classmethod
+    def _bounded(cls, v):
+        # 有界校验（移植自 FrameBaker shared/json.ts）：pydantic 只验类型，
+        # 不拦 NaN / 无限 / 深层嵌套——那些会写坏 settings.json
+        if v is not None:
+            validate_bounded(v)
+        return v
 
 
 @app.put("/api/settings")
@@ -1011,6 +1046,15 @@ async def export_zip(payload: Dict[str, List[str]]):
 class RunPayload(BaseModel):
     input: str
     params: Optional[Dict[str, Any]] = None
+
+    @field_validator("params")
+    @classmethod
+    def _bounded(cls, v):
+        # 有界校验（移植自 FrameBaker shared/json.ts）：params 原样流进
+        # run JSON 落盘，NaN / 无限 / 形状炸弹必须挡在入口
+        if v is not None:
+            validate_bounded(v)
+        return v
 
 
 class StepPayload(BaseModel):

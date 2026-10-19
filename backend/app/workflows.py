@@ -354,6 +354,31 @@ def list_runs(limit: int = 20) -> List[Dict[str, Any]]:
     return out
 
 
+def recover_interrupted_runs() -> int:
+    """启动时把上次进程遗留的 running 步骤标记为失败（移植自 FrameBaker
+    queue.ts 的启动恢复：任务负载随进程消亡，queued/running 不可能再继续）。
+
+    锁和线程池都随进程消失，唯一残留是 run JSON 里的 ``status=running``——
+    不清理的话，重启后这些步骤在新进程里永远显示「执行中」，用户点重跑
+    还会被并发检查挡住。这里一次性扫掉，detail 写明可重新执行。
+    _run_step_locked 里的 10 分钟超时重置保留为兜底：那种是进程还活着、
+    但某一步真卡死的情况。
+    """
+    recovered = 0
+    for run in list_runs(limit=10_000):
+        changed = False
+        for s in run.get("steps", []):
+            if s.get("status") == "running":
+                s["status"] = "failed"
+                s["error"] = "服务重启，步骤中断（可重新执行）"
+                s["finishedAt"] = int(time.time())
+                changed = True
+        if changed:
+            _save_run(run)
+            recovered += 1
+    return recovered
+
+
 # ---------------- 工具函数 ----------------
 def _content_hash(img: Image.Image, size: int = 16) -> np.ndarray:
     """内容感知哈希：先按背景裁出主体包围盒，再 16×16 差值哈希。

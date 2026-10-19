@@ -4,6 +4,7 @@
 """
 from __future__ import annotations
 
+import hashlib
 import io
 import json
 import time
@@ -16,6 +17,19 @@ from . import storage
 from .config import DATA_DIR, load_settings
 
 EXPORTS_DIR = DATA_DIR / "exports"
+
+
+def _write_zip(zf: zipfile.ZipFile, entries: List[Tuple[str, bytes]]) -> None:
+    """写文件 + SHA256SUMS.json 清单（移植自 h3-character-studio 的
+    delivery.assemble：交付包里每个文件都带摘要，接收方可以校验拿到的东西
+    有没有被改坏；manifest 自身不进清单）。"""
+    for arcname, data in entries:
+        zf.writestr(arcname, data)
+    zf.writestr("SHA256SUMS.json", json.dumps({
+        "version": "1.0",
+        "files": [{"path": a, "sha256": hashlib.sha256(d).hexdigest(), "bytes": len(d)}
+                  for a, d in entries],
+    }, ensure_ascii=False, indent=2))
 
 
 def _ai_label_enabled() -> bool:
@@ -122,21 +136,24 @@ def build_godot_package(artifacts: List[str], run: Dict[str, Any]) -> Dict[str, 
     with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
         png_buf = io.BytesIO()
         sheet.save(png_buf, "PNG")
-        zf.writestr(f"sprites/{name}.png", png_buf.getvalue())
-        zf.writestr(f"sprites/{name}_frames.tres", tres)
-        zf.writestr(f"scenes/{name}_player.tscn", tscn)
-        zf.writestr("pixelforge_index.json", json.dumps(index_json, ensure_ascii=False, indent=2))
-        zf.writestr("README.md", readme)
+        entries: List[Tuple[str, bytes]] = [
+            (f"sprites/{name}.png", png_buf.getvalue()),
+            (f"sprites/{name}_frames.tres", tres.encode("utf-8")),
+            (f"scenes/{name}_player.tscn", tscn.encode("utf-8")),
+            ("pixelforge_index.json", json.dumps(index_json, ensure_ascii=False, indent=2).encode("utf-8")),
+            ("README.md", readme.encode("utf-8")),
+        ]
         # 中间产物不带角标（会污染像素）；显式标记文件跟随设置开关
         if _ai_label_enabled():
-            zf.writestr(
+            entries.append((
                 "AI_GENERATED.txt",
-                "本素材由 PixelForge 使用生成式人工智能模型产出。\n"
-                "依据《人工智能生成合成内容标识办法》，对外发布时请保留显式"
-                "「AI 生成」标识，并勿删除 pixelforge_index.json 中的 generator 字段（隐式标识）。\n"
-                f"生成时间：{time.strftime('%Y-%m-%d %H:%M')}\n"
-                f"帧规格：{fw}x{fh} × {total} 帧 @ {fps}fps\n",
-            )
+                ("本素材由 PixelForge 使用生成式人工智能模型产出。\n"
+                 "依据《人工智能生成合成内容标识办法》，对外发布时请保留显式"
+                 "「AI 生成」标识，并勿删除 pixelforge_index.json 中的 generator 字段（隐式标识）。\n"
+                 f"生成时间：{time.strftime('%Y-%m-%d %H:%M')}\n"
+                 f"帧规格：{fw}x{fh} × {total} 帧 @ {fps}fps\n").encode("utf-8"),
+            ))
+        _write_zip(zf, entries)
 
     out = EXPORTS_DIR / f"{name}_godot.zip"
     out.write_bytes(buf.getvalue())
@@ -147,9 +164,7 @@ def build_godot_package(artifacts: List[str], run: Dict[str, Any]) -> Dict[str, 
         "frames": total,
         "frameSize": [fw, fh],
         "fps": fps,
-        "files": [f"sprites/{name}.png", f"sprites/{name}_frames.tres",
-                  f"scenes/{name}_player.tscn", "pixelforge_index.json", "README.md"]
-                 + (["AI_GENERATED.txt"] if _ai_label_enabled() else []),
+        "files": [a for a, _ in entries] + ["SHA256SUMS.json"],
         "note": f"ZIP 大小 {round(len(buf.getvalue()) / 1024, 1)} KB · 解压即可进 Godot",
     }
 
@@ -210,23 +225,26 @@ def build_parallax_package(artifacts: List[str], run: Dict[str, Any]) -> Dict[st
 
     buf = io.BytesIO()
     with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+        entries: List[Tuple[str, bytes]] = []
         for fname, img in layers:
             b = io.BytesIO()
             img.save(b, "PNG")
-            zf.writestr(f"layers/{fname}", b.getvalue())
-        zf.writestr(f"scenes/{name}.tscn", tscn)
-        zf.writestr("scroll_scale.json", json.dumps({"canvas": {"w": w, "h": h}, "layers": scroll},
-                                                    ensure_ascii=False, indent=2))
-        zf.writestr("README.md", readme)
+            entries.append((f"layers/{fname}", b.getvalue()))
+        entries.append((f"scenes/{name}.tscn", tscn.encode("utf-8")))
+        entries.append(("scroll_scale.json", json.dumps(
+            {"canvas": {"w": w, "h": h}, "layers": scroll},
+            ensure_ascii=False, indent=2).encode("utf-8")))
+        entries.append(("README.md", readme.encode("utf-8")))
         if _ai_label_enabled():
-            zf.writestr(
+            entries.append((
                 "AI_GENERATED.txt",
-                "本素材由 PixelForge 使用生成式人工智能模型产出。\n"
-                "依据《人工智能生成合成内容标识办法》，对外发布时请保留显式"
-                "「AI 生成」标识，并勿删除 scroll_scale.json 中的 generator 字段（隐式标识）。\n"
-                f"生成时间：{time.strftime('%Y-%m-%d %H:%M')}\n"
-                f"画布：{w}x{h} · {len(layers)} 层\n",
-            )
+                ("本素材由 PixelForge 使用生成式人工智能模型产出。\n"
+                 "依据《人工智能生成合成内容标识办法》，对外发布时请保留显式"
+                 "「AI 生成」标识，并勿删除 scroll_scale.json 中的 generator 字段（隐式标识）。\n"
+                 f"生成时间：{time.strftime('%Y-%m-%d %H:%M')}\n"
+                 f"画布：{w}x{h} · {len(layers)} 层\n").encode("utf-8"),
+            ))
+        _write_zip(zf, entries)
 
     out = EXPORTS_DIR / f"{name}.zip"
     out.write_bytes(buf.getvalue())
@@ -237,6 +255,6 @@ def build_parallax_package(artifacts: List[str], run: Dict[str, Any]) -> Dict[st
         "layers": len(layers),
         "canvas": [w, h],
         "scrollScale": [s["scrollScaleX"] for s in scroll],
-        "files": [f"layers/{f}" for f, _ in layers] + [f"scenes/{name}.tscn", "scroll_scale.json", "README.md"],
+        "files": [a for a, _ in entries] + ["SHA256SUMS.json"],
         "note": f"ZIP 大小 {round(len(buf.getvalue()) / 1024, 1)} KB",
     }

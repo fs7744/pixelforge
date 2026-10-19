@@ -9,7 +9,9 @@ from __future__ import annotations
 
 import asyncio
 import io
+import json
 import sys
+import zipfile
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -100,6 +102,22 @@ async def main() -> None:
         pass
     storage.delete_asset(item["id"])
     print("[7] digest   → sha256 记录一致 / NaN 写入被拒绝 OK")
+
+    # Godot 导出包带 SHA256SUMS 清单（移植自 h3 的 delivery.assemble）
+    from backend.app import godot_export
+    sheet_item = storage.save_asset(merged, kind="sheet", name="smoke-godot-sheet")
+    fake_run = {"id": "smoke00000000", "steps": [
+        {"id": "sprite_sheet", "meta": {"frameSize": {"w": 32, "h": 32}, "frames": 16, "cols": 4}}]}
+    info = godot_export.build_godot_package([sheet_item["id"]], fake_run)
+    assert "SHA256SUMS.json" in info["files"], info["files"]
+    with zipfile.ZipFile(godot_export.EXPORTS_DIR / info["zip"].rsplit("/", 1)[-1]) as zf:
+        sums = json.loads(zf.read("SHA256SUMS.json"))
+        for row in sums["files"]:
+            assert hashlib.sha256(zf.read(row["path"])).hexdigest() == row["sha256"], row["path"]
+        assert "SHA256SUMS.json" not in {r["path"] for r in sums["files"]}, "manifest 不该含自身"
+    storage.delete_asset(sheet_item["id"])
+    (godot_export.EXPORTS_DIR / info["zip"].rsplit("/", 1)[-1]).unlink(missing_ok=True)
+    print(f"[7b] godot   → {len(sums['files'])} 个文件摘要全部校验通过 OK")
 
     png = io.BytesIO()
     rpg.save(png, "PNG")
