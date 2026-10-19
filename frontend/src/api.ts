@@ -16,6 +16,10 @@ export type Template = {
   name: string
   hint: string
   prompt: string
+  /** 页面单独展示的提示，非提示词内容（不进模型） */
+  notes?: string[]
+  /** image = 出图；text = 文本任务，本页不生成 */
+  kind?: 'image' | 'text'
   params: Record<string, number>
 }
 

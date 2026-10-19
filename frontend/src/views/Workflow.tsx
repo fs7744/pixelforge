@@ -393,10 +393,11 @@ function promptOf(step: StepDef, input: string, action: string, run: any) {
   const tpl = step.prompt || ''
   const layers = step.layerNames || []
   const label = run?.steps?.[0]?.meta?.labels?.[0] as string | undefined
-  const layer = layers[0] || label || '目标图层'
+  // 兜底也要给真实内容：占位符换成「目标元素」这类说明词会被当成提示词送进模型
+  const target = layers[0] || label || '建筑主体'
   return tpl
     .replace(/\{input\}/g, input)
     .replace(/\{action\}/g, action)
-    .replace(/\{layer\}/g, layer)
-    .replace(/\{element\}/g, '目标元素')
+    .replace(/\{layer\}/g, target)
+    .replace(/\{element\}/g, target)
 }

@@ -194,6 +194,17 @@ button, input, textarea, select { font-family: inherit; }
 .tpl-name { font-size: 14px; }
 .tpl-hint { font-size: 12px; color: var(--muted); }
 
+/* 模板说明：单独展示在人看的区域，绝不写进提示词 */
+.tpl-notes {
+  margin: 8px 0 0; padding: 8px 10px 8px 26px;
+  border-left: 2px solid var(--green);
+  background: rgba(0, 255, 136, 0.05);
+  font-size: 12px; line-height: 1.7; color: var(--muted);
+}
+.tpl-notes li { margin: 0; }
+.tpl-notes li + li { margin-top: 4px; }
+.tpl-notes li::marker { color: var(--green); }
+
 /* ---------- 结果网格 ---------- */
 .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(190px, 1fr)); gap: 12px; }
 .thumb {

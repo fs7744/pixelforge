@@ -279,6 +279,42 @@ r = client.post("/api/pipeline/restyle",
 check("未知画风 → 4xx", 400 <= r.status_code < 500, str(r.status_code))
 
 
+print("== 模板库：提示词纯净度 ==")
+from backend.app import templates as tpl_mod
+
+r = client.get("/api/templates")
+check("模板接口可用", r.status_code == 200)
+api_tpls = {t["id"]: t for t in r.json()["templates"]}
+
+# 混进 prompt 的「给人看的写作说明」——出现即污染（这些词只会误导模型）
+DIRTY = ("替换", "示例", "无需", "管线", "勾选", "填写", "注意：", "如：",
+         "花括号", "提示词里", "占位符")
+bad_placeholder, dirty_hits, missing_notes, bad_kind = [], [], [], []
+for t in tpl_mod.TEMPLATES:
+    p = t["prompt"]
+    if "{" in p or "}" in p:
+        bad_placeholder.append(t["id"])
+    hit = [w for w in DIRTY if w in p]
+    if hit:
+        dirty_hits.append((t["id"], hit))
+    if not t.get("notes"):
+        missing_notes.append(t["id"])
+    if t.get("kind") not in ("image", "text"):
+        bad_kind.append(t["id"])
+
+check("占位符已填成可直接跑的示例值", not bad_placeholder, str(bad_placeholder))
+check("prompt 不含写作说明", not dirty_hits, str(dirty_hits))
+check("每条都带页面提示 notes", not missing_notes, str(missing_notes))
+check("kind 合法（image/text）", not bad_kind, str(bad_kind))
+check("notes 不进 prompt", all(
+    note not in t["prompt"] for t in tpl_mod.TEMPLATES for note in t.get("notes", [])))
+check("文本任务已标记 kind=text",
+      {t["id"] for t in tpl_mod.TEMPLATES if t.get("kind") == "text"}
+      == {"char_style_extract", "eng_spec_doc"})
+check("接口透传 notes/kind", all(
+    "notes" in api_tpls[t["id"]] and "kind" in api_tpls[t["id"]]
+    for t in tpl_mod.TEMPLATES))
+
 print("== 清理测试资产 ==")
 removed = 0
 for aid in created:

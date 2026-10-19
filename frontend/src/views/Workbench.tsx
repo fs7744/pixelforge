@@ -318,6 +318,7 @@ export default function Workbench({ onSendToPost }: Props) {
   }
 
   const current = results.find((r) => r.id === selected)
+  const currentTpl = templates.find((t) => t.id === tplId)
 
   return (
     <div className="body">
@@ -393,8 +394,15 @@ export default function Workbench({ onSendToPost }: Props) {
         </div>
 
         <div>
-          <div className="label">提示词（可编辑，花括号为占位符）</div>
+          <div className="label">提示词（可编辑）</div>
           <textarea className="textarea" value={prompt} onChange={(e) => setPrompt(e.target.value)} />
+          {currentTpl?.notes?.length ? (
+            <ul className="tpl-notes">
+              {currentTpl.notes.map((n, i) => (
+                <li key={i}>{n}</li>
+              ))}
+            </ul>
+          ) : null}
           <div className="hint" style={{ marginTop: 6 }}>
             中文直喂本地底座（Z-Image / Qwen-Edit），全程不做英文翻译。
           </div>
@@ -516,9 +524,16 @@ export default function Workbench({ onSendToPost }: Props) {
           </div>
         </div>
 
-        <button className="btn btn-primary btn-block" disabled={busy || !prompt.trim()} onClick={run}>
-          {busy ? '生成中' : '生成'}
+        <button
+          className="btn btn-primary btn-block"
+          disabled={busy || !prompt.trim() || currentTpl?.kind === 'text'}
+          onClick={run}
+        >
+          {busy ? '生成中' : currentTpl?.kind === 'text' ? '文本任务 · 不出图' : '生成'}
         </button>
+        {currentTpl?.kind === 'text' && (
+          <div className="hint">这条是文本提示词，复制到对话式 AI 使用；本页只出图。</div>
+        )}
         {meta?.note && <div className="hint">{meta.note}</div>}
         {meta?.mode === 'ref2img' && (
           <div className="hint">
