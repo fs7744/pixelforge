@@ -140,6 +140,7 @@ def build_anim_data(proj: Dict[str, Any], textures: Dict[str, Image.Image]) -> D
         item: Dict[str, Any] = {
             "name": t.get("name") or t["id"],
             "texture": f"textures/{t['assetId']}.png",
+            "textureSize": [int(src.width), int(src.height)],
             "bone": t.get("bone") or "root",
             "pivot": t.get("pivot") or [src.width / 2, src.height / 2],
             "blend": t.get("blend") or "normal",
@@ -154,16 +155,17 @@ def build_anim_data(proj: Dict[str, Any], textures: Dict[str, Image.Image]) -> D
     return data
 
 
-GDSCRIPT = '''# PixelForge 动画运行时（参考实现，Godot 4.x）
+GDSCRIPT = '''# PixelForge 动画运行时（Godot 4.x）
 #
 # 用法：
 #   var anim = PixelForgeAnim.new()
-#   anim.load_package("res://anim/")     # anim.json + textures/ 所在目录
 #   add_child(anim)
-#   anim.play("walk", true)              # 循环播放
+#   anim.load_package("res://anim/")
+#   anim.play("", true)
 #
-# 说明：本文件是**参考实现**，数据格式以 anim.json 为准；
-# 蒙皮轨道用 ArrayMesh 逐帧重建（顶点已烘焙好，不需要在引擎里算权重）。
+# 数据格式以 anim.json 为准。本文件把「数学」拆成纯函数（track_transform /
+# frame_vertices / frame_uvs），是为了能在 --headless 下被测试脚本直接调用验证，
+# 不依赖渲染。verify.gd 就是这么用的。
 extends Node2D
 class_name PixelForgeAnim
 
@@ -171,9 +173,8 @@ var data: Dictionary = {}
 var _time := 0.0
 var _playing := false
 var _loop := true
-var _sprite_nodes: Array = []
-var _mesh_nodes: Array = []
 var _base := ""
+var _nodes: Array = []
 
 func load_package(path: String) -> void:
 	_base = path
@@ -181,37 +182,83 @@ func load_package(path: String) -> void:
 	if f == null:
 		push_error("找不到 anim.json：%s" % path)
 		return
-	data = JSON.parse_string(f.get_as_text())
+	var parsed = JSON.parse_string(f.get_as_text())
+	if typeof(parsed) != TYPE_DICTIONARY:
+		push_error("anim.json 不是合法对象：%s" % path)
+		return
+	data = parsed
 	_build()
-
-func _build() -> void:
-	for t in data.get("tracks", []):
-		if not t.get("visible", true):
-			continue
-		var tex_path: String = _base.path_join(t["texture"])
-		if t.get("skinned", false):
-			var mi := MeshInstance2D.new()
-			mi.material = CanvasItemMaterial.new()
-			add_child(mi)
-			_mesh_nodes.append({"node": mi, "track": t})
-		else:
-			var sp := Sprite2D.new()
-			sp.texture = load(tex_path)
-			sp.centered = false
-			sp.z_index = _sprite_nodes.size()
-			add_child(sp)
-			_sprite_nodes.append({"node": sp, "track": t})
 
 func play(_name := "", loop := true) -> void:
 	_playing = true
 	_loop = loop
 	_time = 0.0
 
+func frame_count() -> int:
+	return int(data.get("frames", 0))
+
+## ---- 纯函数区（可被无头测试直接调用） ----
+
+## 逐帧矩阵 → Transform2D。约定 x' = a·x + c·y + e，y' = b·x + d·y + f
+## 对应 Transform2D(x_axis=(a,b), y_axis=(c,d), origin=(e,f))，
+## 顺序写反会让图形镜像/翻转，这类 bug 在预览里很难一眼看出来，所以单测盯着它。
+func track_transform(fr: Dictionary) -> Transform2D:
+	var a: Array = fr["m"]
+	return Transform2D(Vector2(a[0], a[1]), Vector2(a[2], a[3]), Vector2(a[4], a[5]))
+
+## 烘焙顶点（画布坐标）
+func frame_vertices(fr: Dictionary) -> PackedVector2Array:
+	var flat: Array = fr["verts"]
+	var pts := PackedVector2Array()
+	for i in range(0, flat.size(), 2):
+		pts.append(Vector2(flat[i], flat[i + 1]))
+	return pts
+
+## UV：anim.json 里是贴图像素坐标，这里归一化到 0..1（除的是贴图尺寸，
+## 不是 pivot —— 用 pivot 当分母会让 UV 全错，但画面看起来「还是有东西」）
+func frame_uvs(track: Dictionary) -> PackedVector2Array:
+	var uv: Array = track["mesh"]["uv"]
+	var ts: Array = track.get("textureSize", [1, 1])
+	var w := maxf(1.0, float(ts[0]))
+	var h := maxf(1.0, float(ts[1]))
+	var out := PackedVector2Array()
+	for q in uv:
+		out.append(Vector2(float(q[0]) / w, float(q[1]) / h))
+	return out
+
+func track_triangles(track: Dictionary) -> PackedInt32Array:
+	var tris: Array = track["mesh"]["triangles"]
+	var out := PackedInt32Array()
+	for t in tris:
+		for vi in t:
+			out.append(int(vi))
+	return out
+
+## ---- 运行时 ----
+
+func _build() -> void:
+	_nodes.clear()
+	for t in data.get("tracks", []):
+		var node: Node2D
+		if t.get("skinned", false):
+			var mi := MeshInstance2D.new()
+			mi.material = CanvasItemMaterial.new()
+			node = mi
+		else:
+			var sp := Sprite2D.new()
+			sp.texture = load(_base.path_join(t["texture"]))
+			sp.centered = false
+			node = sp
+		add_child(node)
+		_nodes.append(node)
+
 func _process(delta: float) -> void:
 	if not _playing or data.is_empty():
 		return
-	var frames: int = int(data["frames"])
+	var frames: int = frame_count()
 	var fps: float = float(data.get("fps", 12))
+	if frames <= 0:
+		return
 	_time += delta
 	var idx := int(floor(_time * fps))
 	if idx >= frames:
@@ -223,35 +270,33 @@ func _process(delta: float) -> void:
 	_apply(idx)
 
 func _apply(idx: int) -> void:
-	for entry in _sprite_nodes:
-		var t: Dictionary = entry["track"]
+	var tracks: Array = data.get("tracks", [])
+	for i in range(mini(tracks.size(), _nodes.size())):
+		var t: Dictionary = tracks[i]
 		var fr: Dictionary = t["frames"][idx]
-		var a: Array = fr["m"]
-		# [a,b,c,d,e,f] → Godot Transform2D(x_axis, y_axis, origin)
-		entry["node"].transform = Transform2D(
-			Vector2(a[0], a[1]), Vector2(a[2], a[3]), Vector2(a[4], a[5]))
-		entry["node"].modulate.a = float(fr.get("opacity", 1.0))
-	for entry in _mesh_nodes:
-		var t: Dictionary = entry["track"]
-		var fr: Dictionary = t["frames"][idx]
-		var verts: Array = fr["verts"]
-		var uv: Array = t["mesh"]["uv"]
-		var tris: Array = t["mesh"]["triangles"]
-		var st := SurfaceTool.new()
-		st.begin(Mesh.PRIMITIVE_TRIANGLES)
-		var pts := PackedVector2Array()
-		for i in range(0, verts.size(), 2):
-			pts.append(Vector2(verts[i], verts[i + 1]))
-		for tri in tris:
-			for vi in tri:
-				st.set_uv(Vector2(uv[vi][0], uv[vi][1]) / Vector2(
-					t["pivot"][0] * 2.0, t["pivot"][1] * 2.0))
-				st.add_vertex(Vector3(pts[vi].x, pts[vi].y, 0.0))
-		var mi: MeshInstance2D = entry["node"]
-		mi.mesh = st.commit()
-		mi.material = CanvasItemMaterial.new()
-		mi.texture = load(_base.path_join(t["texture"]))
-		mi.modulate.a = float(fr.get("opacity", 1.0))
+		if t.get("skinned", false):
+			_apply_mesh(_nodes[i] as MeshInstance2D, t, fr)
+		else:
+			var sp := _nodes[i] as Sprite2D
+			if sp == null:
+				continue
+			sp.transform = track_transform(fr)
+			sp.modulate.a = float(fr.get("opacity", 1.0))
+
+func _apply_mesh(mi: MeshInstance2D, t: Dictionary, fr: Dictionary) -> void:
+	if mi == null:
+		return
+	var pts := frame_vertices(fr)
+	var uvs := frame_uvs(t)
+	var tris := track_triangles(t)
+	var st := SurfaceTool.new()
+	st.begin(Mesh.PRIMITIVE_TRIANGLES)
+	for vi in tris:
+		st.set_uv(uvs[vi])
+		st.add_vertex(Vector3(pts[vi].x, pts[vi].y, 0.0))
+	mi.mesh = st.commit()
+	mi.texture = load(_base.path_join(t["texture"]))
+	mi.modulate.a = float(fr.get("opacity", 1.0))
 '''
 
 README = """PixelForge 动画包
@@ -269,6 +314,7 @@ boneFrames  : 每帧每根骨骼的世界变换
 tracks      : 每条轨道
   texture   : textures/ 下的贴图路径
   pivot     : 贴图内像素坐标，pivot 落在骨骼原点上
+  textureSize: [宽, 高]，运行时把 uv 归一化成 0..1 时用
   frames[j] : 第 j 帧
       opacity   0..1
       m         [a..f]  —— 非蒙皮轨道的 2D 仿射（直接设到 Sprite2D.transform）

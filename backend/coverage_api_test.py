@@ -1790,6 +1790,17 @@ _r = client.post("/api/pipeline/normals/batch",
                  json={"frameAssetIds": [_tex["id"], _tex["id"]]})
 check("normals 批量 ZIP", _r.status_code == 200 and _r.content[:2] == b"PK", str(_r.status_code))
 
+# Godot 引擎内验证：真的用 Godot 跑一遍导出的 anim_player.gd。
+# 没装 Godot 时脚本自己跳过并返回 0，不阻塞其它用例（这里也当跳过处理）。
+import subprocess as _sp  # noqa: E402
+
+_gv = _sp.run([sys.executable, str(Path("backend") / "godot_verify.py")],
+              capture_output=True, text=True, timeout=600)
+_gv_out = (_gv.stdout or "")[-300:]
+check("Godot 运行时验证（引擎内实跑 anim_player.gd）",
+      _gv.returncode == 0, _gv_out.replace("\n", " "))
+print(f"    {_gv_out.strip().splitlines()[-1] if _gv_out.strip() else '(无输出)'}")
+
 print("== 清理测试资产 ==")
 cleanup_assets(verbose=True)
 
