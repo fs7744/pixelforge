@@ -16,6 +16,7 @@ import numpy as np
 from PIL import Image
 
 from . import fx as fx_mod
+from . import sequence as seq_mod
 
 try:
     import cv2
@@ -458,6 +459,31 @@ def _warp_grid(src: Image.Image, verts: List[List[Tuple[float, float]]],
     return Image.fromarray(out, "RGBA")
 
 
+def _track_source(t: Dict[str, Any], loader, frame: int,
+                  total_frames: int = 0) -> Optional[Image.Image]:
+    """取轨道这一帧该用的贴图。
+
+    普通轨道：整张贴图。
+    序列帧轨道（带 seq）：按帧号从精灵表裁出对应格子。
+
+    序列帧的 pivot 是**格子内坐标**（不是整表坐标）——裁出来的格子在
+    后续流程里就是一张普通贴图，pivot / 变形 / 蒙皮全部按格子尺寸算。
+    """
+    src = loader(t["assetId"])
+    if src is None:
+        return None
+    src = src.convert("RGBA")
+    seq = t.get("seq")
+    if not seq:
+        return src
+    boxes = seq_mod.cell_boxes(src, seq)
+    if not boxes:
+        return None
+    idx = seq_mod.frame_index(seq, frame, len(boxes), int(total_frames or 0))
+    x0, y0, x1, y1 = boxes[idx]
+    return src.crop((x0, y0, x1, y1))
+
+
 def render_frame(proj: Dict[str, Any], frame: int,
                  loader) -> Image.Image:
     """渲染单帧。loader(asset_id) -> PIL.Image（由调用方决定怎么取图）。"""
@@ -469,10 +495,9 @@ def render_frame(proj: Dict[str, Any], frame: int,
     for t in proj.get("tracks") or []:
         if not t.get("visible", True):
             continue
-        src = loader(t["assetId"])
+        src = _track_source(t, loader, frame, int(proj.get("frames") or 0))
         if src is None:
             continue
-        src = src.convert("RGBA")
         src = warp_image(src, _sample_warp(t, frame))
         # 关键帧采样在两条路径（蒙皮 / 普通）都要用，提前算，别在分支里各算一次
         k = _sample(t.get("keyframes") or [], frame)

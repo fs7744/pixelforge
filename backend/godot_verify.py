@@ -33,6 +33,7 @@ sys.path.insert(0, str(ROOT))
 from backend.app.anim import export as anim_export  # noqa: E402
 from backend.app.anim import model as anim_model  # noqa: E402
 from backend.app.anim import render as anim_render  # noqa: E402
+from backend.app.anim import sequence as seq_mod  # noqa: E402
 
 PROJECT_GODOT = """config_version=5
 
@@ -106,13 +107,17 @@ func _init():
 		var t: Dictionary = data["tracks"][i]
 		var skinned: bool = t.get("skinned", false)
 		var entry: Dictionary = {"index": i, "name": t.get("name", ""), "skinned": skinned,
-			"verts": [], "ms": [], "uv0": [], "uvCount": 0, "triCount": 0}
+			"verts": [], "ms": [], "uv0": [], "uvCount": 0, "triCount": 0,
+			"cells": [], "engineFrames": []}
 		if skinned:
 			var uvs = node.frame_uvs(t)
 			entry["uvCount"] = uvs.size()
 			entry["triCount"] = node.track_triangles(t).size()
 			entry["uv0"] = [uvs[0].x, uvs[0].y]
 			entry["uvLast"] = [uvs[uvs.size() - 1].x, uvs[uvs.size() - 1].y]
+		# 序列帧轨道：记下后端给的 cell，以及引擎实际用到的 frame，
+		# 两者必须一致（不一致 = 引擎切出的格和后端渲染的不是同一格）
+		var seq_track: bool = not t.get("seq", {}).is_empty()
 		for f in range(int(data["frames"])):
 			var fr: Dictionary = t["frames"][f]
 			if skinned:
@@ -122,7 +127,24 @@ func _init():
 			else:
 				var tr = node.track_transform(fr)
 				entry["ms"].append([tr.x.x, tr.x.y, tr.y.x, tr.y.y, tr.origin.x, tr.origin.y])
+			if seq_track:
+				entry["cells"].append(int(fr.get("cell", -1)))
 		out["tracks"].append(entry)
+	# 序列帧：跑一遍 _apply，量引擎节点上实际的 hframes/vframes/frame
+	var seq_report := []
+	for i in range(data["tracks"].size()):
+		var t: Dictionary = data["tracks"][i]
+		if t.get("seq", {}).is_empty():
+			continue
+		var idx := 0
+		var sp = node._nodes[i] as Sprite2D
+		if sp == null:
+			continue
+		for f in range(int(data["frames"])):
+			node._apply(f)
+			seq_report.append({"frame": f, "engineFrame": int(sp.frame),
+				"hframes": int(sp.hframes), "vframes": int(sp.vframes)})
+	out["seq"] = seq_report
 	print("PFVERIFY " + JSON.stringify(out))
 	quit(0)
 """
@@ -160,10 +182,26 @@ def _make_assets() -> Tuple[Image.Image, Image.Image]:
     return band, cube, glow, shade
 
 
+def _make_sheet() -> Image.Image:
+    """序列帧用的精灵表：2 行 × 2 列，每格一个不同颜色的方块。
+
+    序列帧轨道在 Godot 里靠 Sprite2D 的 hframes/vframes/frame 取格，
+    所以格子必须真的排成网格，否则引擎切出来的和后端裁的不是同一格。
+    """
+    sheet = Image.new("RGBA", (48, 48), (0, 0, 0, 0))
+    for i in range(4):
+        r, c = divmod(i, 2)
+        ImageDraw.Draw(sheet).rectangle(
+            (c * 24 + 2, r * 24 + 2, c * 24 + 21, r * 24 + 21),
+            fill=(60 + i * 50, 200 - i * 40, 120 + i * 30, 255))
+    return sheet
+
+
 def build_project(dirpath: Path, with_blend: bool = False
                   ) -> Tuple[Dict[str, Any], Dict[str, Image.Image], Dict[str, Any]]:
     band, cube, glow, shade = _make_assets()
-    textures = {"band": band, "cube": cube, "glow": glow, "shade": shade}
+    sheet = _make_sheet()
+    textures = {"band": band, "cube": cube, "glow": glow, "shade": shade, "sheet": sheet}
     proj = anim_model.normalize({
         "id": "abcdef012345", "name": "verify", "canvas": [240, 120], "fps": 10, "frames": 4,
         "bones": [
@@ -177,6 +215,12 @@ def build_project(dirpath: Path, with_blend: bool = False
              "keyframes": [{"frame": 0, "scale": 1}]},
             {"id": "t2", "name": "方块", "assetId": "cube", "bone": "b2", "pivot": [4, 4],
              "keyframes": [{"frame": 0, "x": 0}, {"frame": 3, "x": 20, "rot": 15}]},
+            # 序列帧轨道：贴图是 2×2 精灵表，每帧取一格
+            {"id": "t5", "name": "序列", "assetId": "sheet", "bone": "b1",
+             "pivot": [12, 12],
+             "seq": {"cols": 2, "rows": 2, "count": 4, "cellW": 24, "cellH": 24,
+                     "loop": True},
+             "keyframes": [{"frame": 0, "x": 0}, {"frame": 3, "x": 10}]},
         ] + ([
             {"id": "t3", "name": "光斑", "assetId": "glow", "bone": "root",
              "pivot": [24, 24], "blend": "add", "opacity": 0.8,
@@ -243,6 +287,64 @@ def compare(data: Dict[str, Any], got: Dict[str, Any]) -> List[str]:
                     problems.append(
                         f"{gd['name']} 第 {f} 帧 Transform2D 与 anim.json 不一致：{m} vs {want}")
                     break
+
+    # 序列帧取格：引擎实际用的 frame 必须等于后端给的 cell，
+    # 且 hframes/vframes 必须是精灵表的真实行列数。
+    # 取错格的话画面看着「有东西」，但显示的是另一个动作帧 —— 极难发现。
+    for rep in got.get("seq") or []:
+        f = int(rep.get("frame", -1))
+        eng = int(rep.get("engineFrame", -1))
+        want = None
+        for gd, gd_track in zip(data["tracks"], got["tracks"]):
+            if gd.get("seq"):
+                cells = gd_track.get("cells") or []
+                if f < len(cells):
+                    want = int(cells[f])
+                sq = gd["seq"]
+                if rep.get("hframes") != sq.get("cols") or rep.get("vframes") != sq.get("rows"):
+                    problems.append(
+                        f"序列帧 {gd['name']}: hframes/vframes "
+                        f"{rep.get('hframes')}×{rep.get('vframes')} 应为 "
+                        f"{sq.get('cols')}×{sq.get('rows')}")
+                break
+        if want is not None and eng != want:
+            problems.append(f"序列帧第 {f} 帧：引擎取第 {eng} 格，后端给的是第 {want} 格")
+    return problems
+
+
+def check_seq_cells(data: Dict[str, Any], proj: Dict[str, Any],
+                    textures: Dict[str, Image.Image]) -> List[str]:
+    """序列帧轨道：anim.json 里的 cell 必须等于后端渲染第 f 帧真正用的格子。
+
+    这条检查不依赖 Godot —— 它比的是「导出数据」和「后端渲染」两件事。
+    上一条检查（引擎 vs anim.json）只能证明引擎忠实照做了 anim.json；
+    要是 anim.json 本身就写错了格子（两边一起错），那条检查照样通过。
+    所以必须再钉一层：cell == 后端实际渲染用的格子。
+    """
+    problems: List[str] = []
+    for gd in data["tracks"]:
+        if not gd.get("seq"):
+            continue
+        track = next((t for t in proj["tracks"] if gd["name"] == t.get("name")), None)
+        if not track:
+            continue
+        seq = track.get("seq") or {}
+        count = int(seq.get("count") or 1)
+        loader = lambda aid, _t=textures: _t.get(aid)  # noqa: E731
+        for f, fr in enumerate(gd["frames"]):
+            want = seq_mod.frame_index(seq, f, count, int(proj["frames"]))
+            got_cell = int(fr.get("cell", -1))
+            if got_cell != want:
+                problems.append(
+                    f"序列帧 {gd['name']} 第 {f} 帧：导出 cell={got_cell}，"
+                    f"后端渲染用的是第 {want} 格")
+                break
+            # 再验一次：后端真的渲染出的是那一格（不是空图）
+            img = anim_render.render_frame(
+                anim_model.normalize({**proj, "tracks": [track]}), f, loader)
+            if img.getchannel("A").getbbox() is None:
+                problems.append(f"序列帧 {gd['name']} 第 {f} 帧后端渲染为空")
+                break
     return problems
 
 
@@ -354,6 +456,8 @@ def main() -> int:
         data, textures, proj = build_project(workdir)
         got = run_godot(godot, workdir)
         problems = compare(data, got)
+        # 序列帧：导出数据里的 cell 必须等于后端渲染真正用的格子
+        problems.extend(check_seq_cells(data, proj, textures))
         print(f"[godot] {godot.name}：{len(got['tracks'])} 条轨道 / {got['frameCount']} 帧已跑通")
         for line in problems:
             print("  x " + line)

@@ -903,6 +903,46 @@ async def main() -> None:
     assert gb.convert("RGBA").getpixel((0, 0))[3] == 0, "透明像素应真透明"
     print(f"[9w] gif     → {len(gdata)} 字节 {gb.n_frames} 帧，"
           f"帧间颜色一致 {skin[0]}，透明区真透明 OK")
+
+    # 序列帧轨道：工作流产出的精灵表要能进编辑器，按帧号取格
+    # 这是「生成 → 编辑」的接缝：以前精灵表只能当整张图用，进不了时间轴
+    from backend.app.anim import model as _model
+    from backend.app.anim import render as _render
+    from backend.app.anim import sequence as _seq
+
+    _sh = Image.new("RGBA", (128, 64), (0, 0, 0, 0))
+    for _i in range(8):
+        _r0, _c0 = divmod(_i, 4)
+        _sh.alpha_composite(
+            Image.new("RGBA", (32, 32), (40 + _i * 25, 200 - _i * 15, 90 + _i * 20, 255)),
+            (_c0 * 32, _r0 * 32))
+    _lay = {"cols": 4, "rows": 2, "count": 8, "cellW": 32, "cellH": 32, "loop": True}
+    _proj = _model.normalize({
+        "id": "smoke-seq", "name": "序列", "canvas": [256, 256], "fps": 12, "frames": 8,
+        "bones": [{"id": "root", "name": "根", "parent": None, "x": 128, "y": 200,
+                   "len": 60, "keys": []}],
+        "tracks": [{"id": "sq", "name": "动作", "assetId": "x", "bone": "root",
+                    "pivot": [16, 16], "seq": _lay,
+                    "keyframes": [{"frame": 0, "x": 0, "y": 0, "rot": 0, "scale": 1,
+                                   "opacity": 1, "ease": "linear"}]}],
+    })
+    assert _proj["tracks"][0].get("seq"), "normalize 把 seq 丢了"
+
+    def _seq_loader(_aid):
+        return _sh
+
+    _seen = []
+    for _f in range(8):
+        _im = _render.render_frame(_proj, _f, _seq_loader)
+        _bb = _im.getchannel("A").getbbox()
+        assert _bb, f"第 {_f} 帧渲染为空"
+        _seen.append(_im.getpixel(((_bb[0] + _bb[2]) // 2, (_bb[1] + _bb[3]) // 2)))
+    assert len(set(_seen)) == 8, f"8 帧应取到 8 个不同格子，实得 {len(set(_seen))}"
+    # 插帧：格子之间补中间格
+    _sh2, _meta2 = _seq.build_interpolated(_sh, _lay, per_gap=1)
+    assert _meta2["count"] == 15, _meta2["count"]
+    print(f"[9x] 序列帧  → 8 帧取到 8 个不同格子 / 插帧后 {_meta2['count']} 格 OK")
+
     print(f"[9u] 置信度  → 清晰 {clear['h']['conf']:.2f}/"
           f"{clear['al']['conf']:.2f} vs 帽子歧义 {vague['h']['conf']:.2f}"
           f"/头悬空 {far['h']['conf']:.2f}；"

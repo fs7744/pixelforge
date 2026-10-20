@@ -1800,6 +1800,201 @@ async def anim_restore_snapshot(pid: str, snap_id: str):
     return proj
 
 
+class AnimSeqImportPayload(BaseModel):
+    """把一张精灵表导入成序列帧轨道。"""
+    assetId: str
+    cols: int = 0
+    rows: int = 0
+    count: int = 0
+    bone: str = "root"
+    name: str = ""
+    loop: bool = True
+
+
+@app.post("/api/anim/projects/{pid}/import-sequence")
+async def anim_import_sequence(pid: str, payload: AnimSeqImportPayload):
+    """把工作流产出的精灵表接进编辑器（打通「生成 → 编辑」）。
+
+    工作流的 sprite-compose / sprite-select 产出的是**一张精灵表**，
+    而编辑器轨道原来只挂单张贴图——产物进不去。这里新建一条带 seq 的
+    轨道：按帧号取对应格子，骨骼 / IK / 蒙皮照常叠加在上面。
+
+    格子布局优先读资产 meta（cols / frameSize 是工作流自己写的），
+    读不到再用请求里传的参数；都没有就当「1 格单帧图」处理。
+    """
+    from .anim import model as anim_model
+    from .anim import sequence as seq_mod
+
+    proj = anim_model.get(pid)
+    if not proj:
+        raise HTTPException(404, "工程不存在")
+    item = storage.get_asset(payload.assetId)
+    if not item:
+        raise HTTPException(404, "素材不存在")
+    meta = item.get("meta") or {}
+    lay = seq_mod.layout_from_meta(meta)
+    detected = False
+    if lay is None:
+        # meta 里没有布局：先按请求参数，都没有就从**内容**里检测。
+        # 内容检测比按宽高比猜靠谱：4×2 的表是 2:1，2 列的表也是 2:1，
+        # 光看比例分不出来；按内容段周期能数出真实格数。
+        cols = int(payload.cols or 0)
+        rows = int(payload.rows or 0)
+        count = int(payload.count or 0)
+        if not cols:
+            with Image.open(storage.asset_path(item)) as im:
+                found = seq_mod.detect_grid(im)
+            if found:
+                cols = int(found["cols"])
+                rows = int(found["rows"])
+                count = int(found["count"])
+                detected = True
+            else:
+                # 检测不出来（单格图 / 内容连成一片）→ 当普通轨道
+                cols = 1
+                rows = 1
+                count = 1
+        if not count:
+            count = cols * rows
+        lay = {"cols": cols, "rows": rows, "count": count, "cellW": 0, "cellH": 0}
+    else:
+        detected = True
+        if payload.cols:
+            lay["cols"] = int(payload.cols)
+            lay["rows"] = (lay["count"] + lay["cols"] - 1) // lay["cols"]
+        if payload.count:
+            lay["count"] = int(payload.count)
+            lay["rows"] = (lay["count"] + lay["cols"] - 1) // lay["cols"]
+
+    with Image.open(storage.asset_path(item)) as im:
+        size = im.size
+    if not lay.get("cellW") or not lay.get("cellH"):
+        lay["cellW"] = size[0] // max(1, lay["cols"])
+        lay["cellH"] = size[1] // max(1, lay["rows"])
+    # 格子尺寸按实际图裁，别信 meta 里的旧值（资产可能被重新生成过）
+    lay["cellW"] = min(int(lay["cellW"]), size[0] // max(1, lay["cols"]))
+    lay["cellH"] = min(int(lay["cellH"]), size[1] // max(1, lay["rows"]))
+
+    track_id = f"seq{anim_model.new_id()[:6]}"
+    track: Dict[str, Any] = {
+        "id": track_id,
+        "name": payload.name or f"序列 {len(proj.get('tracks') or []) + 1}",
+        "assetId": payload.assetId,
+        "bone": payload.bone if any(b["id"] == payload.bone for b in proj.get("bones") or []) else "root",
+        # pivot 是**格子内坐标**：序列帧裁出来后就是一张普通贴图
+        "pivot": [round(lay["cellW"] / 2, 2), round(lay["cellH"] / 2, 2)],
+        "keyframes": [{"frame": 0, "x": 0, "y": 0, "rot": 0, "scale": 1,
+                       "opacity": 1, "ease": "linear"}],
+    }
+    # 检测不出多格 → 就是一张普通图，别挂 seq（否则会当成 1 格序列，
+    # pivot 语义从「整图」变成「格子」，虽然 1 格时等价，但没必要）
+    if detected and int(lay["count"]) > 1:
+        track["seq"] = {"cols": lay["cols"], "rows": lay["rows"],
+                        "count": lay["count"], "cellW": lay["cellW"],
+                        "cellH": lay["cellH"], "loop": bool(payload.loop)}
+    else:
+        track["pivot"] = [round(lay["cellW"] / 2, 2), round(lay["cellH"])]
+    proj.setdefault("tracks", []).append(track)
+    proj["tracks"] = anim_model.normalize(proj)["tracks"]
+    return {"project": anim_model.save(proj), "trackId": track_id, "layout": lay,
+            "isSequence": bool(track.get("seq"))}
+
+
+class AnimTweenPayload(BaseModel):
+    """编辑器内插帧。"""
+    trackId: str = ""
+    kind: str = "track"       # track / bone / ik / warp
+    boneId: str = ""
+    ikId: str = ""
+    count: int = 1            # 每两个相邻关键帧之间补几个点
+    perGap: int = 0           # 位图插帧：每两个格子之间补几帧（>0 时走这条）
+    frame: int = -1           # 只处理到这个帧号（-1 = 全部）
+
+
+@app.post("/api/anim/projects/{pid}/tween")
+async def anim_tween(pid: str, payload: AnimTweenPayload):
+    """插帧：关键帧补间 或 序列帧位图插帧。
+
+    两种都是**轨道内**操作，不新建素材、不改时间轴长度：
+    - 关键帧插帧：在相邻关键帧之间补中间点，值按当前缓动曲线求值
+      （后端算，保证和渲染一致）。
+    - 位图插帧：序列帧轨道在相邻格子之间补光流中间帧。
+    """
+    from .anim import model as anim_model
+    from .anim import tween as tween_mod
+
+    proj = anim_model.get(pid)
+    if not proj:
+        raise HTTPException(404, "工程不存在")
+    kind = payload.kind if payload.kind in ("track", "bone", "ik", "warp") else "track"
+
+    # ---- 位图插帧：先做，因为它要换贴图 ----
+    if kind == "track" and payload.perGap > 0:
+        t = next((x for x in proj.get("tracks") or [] if x["id"] == payload.trackId), None)
+        if not t:
+            raise HTTPException(404, "轨道不存在")
+        if not t.get("seq"):
+            raise HTTPException(400, "该轨道不是序列帧轨道，没有格子可插")
+        item = storage.get_asset(t["assetId"])
+        if not item:
+            raise HTTPException(404, "轨道贴图不存在")
+        with Image.open(storage.asset_path(item)) as im:
+            sheet = im.convert("RGBA")
+        res = await run_in_threadpool(tween_mod.tween_raster, sheet, t["seq"],
+                                      int(payload.perGap))
+        new_sheet = res.get("sheet")
+        if new_sheet is not None:
+            # meta 要带布局：插帧产物本身也是一张精灵表，
+            # 缺了 cols/frames 的话「对插帧后的轨道再插帧」会推断不出布局，
+            # 而这张图正是用户最可能再插一次的。
+            _ns = res["seq"]
+            new_item = storage.save_asset(
+                new_sheet, kind="sheet",
+                name=f"{t.get('name') or t['id']}-inbetween",
+                meta={"pipeline": "anim-inbetween", "sourceAsset": t["assetId"],
+                      "perGap": int(payload.perGap), "method": res.get("method"),
+                      "cols": int(_ns.get("cols") or 1),
+                      "frames": int(_ns.get("count") or 1),
+                      "frameSize": {"w": int(_ns.get("cellW") or 0),
+                                    "h": int(_ns.get("cellH") or 0)}},
+            )
+            t["assetId"] = new_item["id"]
+        t["seq"] = res["seq"]
+        proj = anim_model.normalize(proj)
+        anim_model.save(proj)
+        return {"project": proj, "added": res.get("added", 0),
+                "method": res.get("method"), "kind": "raster"}
+
+    # ---- 关键帧插帧 ----
+    if kind == "track":
+        target = next((x for x in proj.get("tracks") or [] if x["id"] == payload.trackId), None)
+    elif kind == "bone":
+        target = next((x for x in proj.get("bones") or [] if x["id"] == payload.boneId), None)
+    elif kind == "ik":
+        target = next((x for x in proj.get("ik") or [] if x["id"] == payload.ikId), None)
+    else:
+        target = next((x for x in proj.get("tracks") or [] if x["id"] == payload.trackId), None)
+    if not target:
+        raise HTTPException(404, "目标不存在")
+    if int(payload.frame) >= 0:
+        target = dict(target)
+
+    res = tween_mod.tween_keys(target, kind, int(payload.count),
+                                int(payload.frame) if int(payload.frame) >= 0 else None)
+    if kind == "track":
+        proj["tracks"] = [target if x["id"] == target.get("id") else x
+                          for x in proj.get("tracks") or []]
+    elif kind == "bone":
+        proj["bones"] = [target if x["id"] == target.get("id") else x
+                         for x in proj.get("bones") or []]
+    elif kind == "ik":
+        proj["ik"] = [target if x["id"] == target.get("id") else x
+                      for x in proj.get("ik") or []]
+    proj = anim_model.normalize(proj)
+    anim_model.save(proj)
+    return {"project": proj, "kind": kind, **res}
+
+
 @app.get("/api/anim/projects/{pid}/frame/{index}.png")
 async def anim_frame_png(pid: str, index: int, scale: float = 1.0):
     from .anim import model as anim_model

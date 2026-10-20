@@ -669,6 +669,26 @@ export const api = {
     return fetch(`/api/anim/projects/${id}/weights?${q.toString()}`).then(json)
   },
 
+  /** 把工作流产出的精灵表接进编辑器（序列帧轨道） */
+  animImportSequence: (id: string, payload: {
+    assetId: string; cols?: number; rows?: number; count?: number
+    bone?: string; name?: string; loop?: boolean
+  }) => fetch(`/api/anim/projects/${id}/import-sequence`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+  }).then(json),
+
+  /** 编辑器内插帧：kind=track/bone/ik/warp，perGap>0 时走位图插帧 */
+  animTween: (id: string, payload: {
+    trackId?: string; kind?: string; boneId?: string; ikId?: string
+    count?: number; perGap?: number; frame?: number
+  }) => fetch(`/api/anim/projects/${id}/tween`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+  }).then(json),
+
   /** 导出 Godot 包：anim.json + 纹理 + 参考运行时（骨骼与蒙皮已烘焙） */
   animGodot: async (id: string, name = 'anim') => {
     const res = await fetch(`/api/anim/projects/${id}/export/godot`, { method: 'POST' })

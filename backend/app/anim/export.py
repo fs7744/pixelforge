@@ -64,15 +64,26 @@ def _track_frames(proj: Dict[str, Any], t: Dict[str, Any],
 
     非蒙皮：给 2D 仿射矩阵（运行时直接 set_transform）。
     蒙皮：给烘焙后的顶点坐标（uv/三角形只写一份）。两条路径都带 opacity。
+
+    序列帧轨道（带 seq）：贴图是整张精灵表，但每帧只显示其中一格。
+    所以矩阵按**格子尺寸**算（pivot 是格子内坐标），另外给运行时
+    一个「这一帧用第几格」的索引 —— Godot 侧用 Sprite2D 的
+    hframes/vframes/frame 切图，和后端渲染取的是同一格。
     """
     skin = t.get("skin")
     frames: List[Dict[str, Any]] = []
     mesh: Optional[Dict[str, Any]] = None
     worlds = None
+    seq = t.get("seq")
+    # 序列帧：每帧的源贴图是裁出来的那一格，尺寸 = 格子尺寸
+    src_w, src_h = src.size
+    if seq:
+        src_w = int(seq.get("cellW") or src_w)
+        src_h = int(seq.get("cellH") or src_h)
 
     if skin:
         grid = int(skin.get("grid") or 8)
-        w, h = src.size
+        w, h = src_w, src_h
         uv = []
         for j in range(grid + 1):
             for i in range(grid + 1):
@@ -98,12 +109,24 @@ def _track_frames(proj: Dict[str, Any], t: Dict[str, Any],
             world = (render_mod.bone_world(proj, f).get(b["id"]) if b else None)
             if world is None:
                 world = np.eye(3)
-            px, py = t.get("pivot") or [src.width / 2, src.height / 2]
+            px, py = t.get("pivot") or [src_w / 2, src_h / 2]
             m = (world @ render_mod._T(k["x"], k["y"]) @ render_mod._R(k["rot"])
                  @ render_mod._S(k["scale"]) @ render_mod._T(-px, -py))
-            frames.append({"opacity": round(_opacity(t, f), 3), "m": _mat6(m)})
+            item = {"opacity": round(_opacity(t, f), 3), "m": _mat6(m)}
+            if seq:
+                # 这一帧取第几格（Godot 侧用 frame 索引切图）
+                item["cell"] = _seq_cell(seq, f, int(proj["frames"]))
+            frames.append(item)
 
     return frames, mesh
+
+
+def _seq_cell(seq: Dict[str, Any], frame: int, total: int = 0) -> int:
+    """序列帧轨道：帧号 → 格子序号（与后端渲染取的是同一格）。"""
+    from . import sequence as seq_mod
+
+    count = max(1, int(seq.get("count") or 1))
+    return seq_mod.frame_index(seq, frame, count, total)
 
 
 def _opacity(t: Dict[str, Any], frame: int) -> float:
@@ -151,6 +174,14 @@ def build_anim_data(proj: Dict[str, Any], textures: Dict[str, Image.Image]) -> D
         if mesh:
             item["mesh"] = mesh
             item["skin"] = t.get("skin")
+        if t.get("seq"):
+            # 序列帧：告诉运行时这张贴图是几列几行的精灵表，每帧取第几格
+            sq = t["seq"]
+            item["seq"] = {"cols": int(sq.get("cols") or 1),
+                           "rows": int(sq.get("rows") or 1),
+                           "count": int(sq.get("count") or 1),
+                           "cellSize": [int(sq.get("cellW") or src.width),
+                                        int(sq.get("cellH") or src.height)]}
         data["tracks"].append(item)
     return data
 
@@ -294,6 +325,13 @@ func _build() -> void:
 			sp.material = mat
 			if tex != null:
 				sp.texture = tex
+			# 序列帧轨道：贴图是一张精灵表，用 hframes/vframes 切成格子，
+			# 每帧设 frame 索引取对应那格（与后端渲染取的是同一格）。
+			# 不设的话会显示整张表 —— 8 个动作帧挤在一张图上。
+			var sq: Dictionary = t.get("seq", {})
+			if not sq.is_empty():
+				sp.hframes = int(sq.get("cols", 1))
+				sp.vframes = int(sq.get("rows", 1))
 			node = sp
 		add_child(node)
 		_nodes.append(node)
@@ -326,6 +364,9 @@ func _apply(idx: int) -> void:
 			var sp := _nodes[i] as Sprite2D
 			if sp == null:
 				continue
+			# 序列帧：切到这一帧对应的那格（cell 由后端算好，和渲染一致）
+			if fr.has("cell"):
+				sp.frame = int(fr["cell"])
 			sp.transform = track_transform(fr)
 			sp.modulate.a = float(fr.get("opacity", 1.0))
 

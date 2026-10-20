@@ -22,6 +22,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from ..config import DATA_DIR
+from . import sequence as seq_mod
 
 ANIM_DIR = DATA_DIR / "anim"
 _ID_RE = re.compile(r"^[0-9a-f]{12}$")
@@ -443,6 +444,10 @@ def normalize(proj: Dict[str, Any]) -> Dict[str, Any]:
         for k in sorted(warp_keys, key=lambda x: x["frame"]):
             wdedup[k["frame"]] = k
         pivot = t.get("pivot") or [0, 0]
+        # 序列帧轨道：一张精灵表按帧号取格。布局写错（列数 0、格数 0）就整体
+        # 丢掉这个字段——宁可退化成普通轨道（显示整张表，用户能看出来），
+        # 也不要半坏的 seq 让渲染裁出错误格子还不报错。
+        seq = seq_mod.normalize_seq(t.get("seq"), (out["canvas"][0], out["canvas"][1]))
         fx = []
         for s in (t.get("fx") or [])[:64]:
             pts = []
@@ -470,6 +475,7 @@ def normalize(proj: Dict[str, Any]) -> Dict[str, Any]:
             "assetId": str(t["assetId"]),
             "bone": str(t.get("bone") or "root"),
             "pivot": [round(_num(pivot[0]), 2), round(_num(pivot[1]), 2)],
+            "seq": seq,
             "warp": warp,
             "warpKeys": [wdedup[i] for i in sorted(wdedup)],
             "skin": _skin(t.get("skin"), ids),

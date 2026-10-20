@@ -758,6 +758,15 @@ button, input, textarea, select { font-family: inherit; }
   display: flex; align-items: center; gap: 4px; padding: 4px 6px;
   border: 1px solid transparent; cursor: pointer; font-size: 12px;
 }
+/* 轨道名 + 序列信息不能被折行拆开：「序列 15 格 / 4 列」断成两行后
+   数字会跑到上一行末尾，看起来像「序列 15」和「格 / 4 列」两段话 */
+.editor-track .grow { display: flex; align-items: center; gap: 5px; min-width: 0; }
+.editor-track .ellip { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* 序列帧徽标：窄侧栏里放得下，也一眼看得出这条是序列 */
+.seq-badge {
+  flex: none; font-size: 10px; color: #ff9c4a; border: 1px solid rgba(255, 156, 74, 0.45);
+  padding: 0 3px; border-radius: 2px; white-space: nowrap;
+}
 .editor-track.on { border-color: var(--green); background: rgba(0, 255, 136, 0.06); }
 .mini {
   background: transparent; border: 1px solid var(--line); color: var(--muted);
@@ -781,6 +790,11 @@ button, input, textarea, select { font-family: inherit; }
 .editor-canvas-wrap { align-items: start; justify-items: center; }
 .curve { display: block; background: #14141a; border: 1px solid var(--line); }
 .mk.warp { background: #00d0ff; }
+/* 序列帧标记：显示格子序号（数字），不是色块——一眼看出这帧取的是第几格 */
+.mk.seq {
+  width: auto; height: auto; font-size: 9px; line-height: 1;
+  color: #ff9c4a; font-family: Silkscreen, monospace;
+}
 .panel-inset { border: 1px dashed var(--line); padding: 8px; margin-top: 8px; }
 .editor-picker-groups { display: flex; flex-direction: column; gap: 4px; margin: 6px 0; max-height: 210px; overflow-y: auto; }
 .group-row { display: flex; gap: 8px; align-items: center; padding: 4px; border: 1px solid var(--line);

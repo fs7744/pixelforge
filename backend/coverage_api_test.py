@@ -1984,6 +1984,120 @@ client.delete(f"/api/anim/projects/{_pid2}")
 check("恢复不存在的快照 → 404",
       client.post(f"/api/anim/projects/{_pid}/snapshots/nope-nope/restore").status_code == 404)
 
+# ---------- 序列帧轨道 + 编辑器内插帧 ----------
+print("== 序列帧轨道与插帧 ==")
+from backend.app.anim import sequence as _seq  # noqa: E402
+from backend.app.anim import tween as _tween  # noqa: E402
+
+# 造一张 4×2 精灵表：8 格，每格颜色不同 —— 一眼能看出取到的是哪格
+_sheet = Image.new("RGBA", (128, 64), (0, 0, 0, 0))
+for _i in range(8):
+    _r0, _c0 = divmod(_i, 4)
+    _tile = Image.new("RGBA", (32, 32), (40 + _i * 25, 200 - _i * 15, 90 + _i * 20, 255))
+    _sheet.alpha_composite(_tile, (_c0 * 32, _r0 * 32))
+_sheet_item = storage.save_asset(
+    _sheet, kind="sheet", name="seq-test-sheet",
+    meta={"pipeline": "sprite-compose", "cols": 4, "frames": 8,
+          "frameSize": {"w": 32, "h": 32}})
+remember(_sheet_item)
+
+check("从 meta 推断精灵表布局",
+      (_seq.layout_from_meta(_sheet_item.get("meta")) or {}).get("count") == 8)
+_boxes = _seq.cell_boxes(_sheet, {"cols": 4, "rows": 2, "count": 8, "cellW": 32, "cellH": 32})
+check("切出 8 个格子", len(_boxes) == 8, str(len(_boxes)))
+# 序列均匀铺满时间轴：cell = frame × count ÷ total
+check("count==total 时 1:1 对应", _seq.frame_index({"loop": True}, 3, 8, 8) == 3)
+check("8 格铺 24 帧 → 每格 3 帧",
+      _seq.frame_index({"loop": True}, 3, 8, 24) == 1
+      and _seq.frame_index({"loop": True}, 23, 8, 24) == 7)
+check("loop=False 停在末格", _seq.frame_index({"loop": False}, 99, 8, 8) == 7)
+
+
+def _mk_sheet(cols, rows, cw=64, ch=64):
+    sh = Image.new("RGBA", (cols * cw, rows * ch), (0, 0, 0, 0))
+    for _i in range(cols * rows):
+        _r0, _c0 = divmod(_i, cols)
+        cell = Image.new("RGBA", (cw, ch), (0, 0, 0, 0))
+        dr = ImageDraw.Draw(cell)
+        _x, _y = cw // 2 - 6 + (_i % 3), ch // 2 - 18
+        dr.ellipse((_x + 4, _y, _x + 16, _y + 12), fill=(240, 200, 160, 255))
+        dr.rectangle((_x, _y + 12, _x + 20, _y + 30), fill=(200, 60, 60, 255))
+        sh.alpha_composite(cell, (_c0 * cw, _r0 * ch))
+    return sh
+
+
+_bad = []
+for _cn, _rn in [(4, 2), (4, 1), (8, 1), (3, 1), (2, 2), (6, 1), (2, 3)]:
+    _g = _seq.detect_grid(_mk_sheet(_cn, _rn))
+    if not _g or _g["cols"] != _cn or _g["rows"] != _rn:
+        _bad.append((_cn, _rn, _g))
+check("无 meta 时从内容检测网格", not _bad, str(_bad))
+check("单格图检测不出（当普通轨道）", _seq.detect_grid(_mk_sheet(1, 1)) is None)
+
+# 导入成序列帧轨道
+_pid3 = client.post("/api/anim/projects", json={"name": "序列测试", "canvas": [256, 256],
+                                                 "frames": 8}).json()["id"]
+_r = client.post(f"/api/anim/projects/{_pid3}/import-sequence",
+                 json={"assetId": _sheet_item["id"]})
+_j = _r.json() if _r.status_code == 200 else {}
+_seq_track = (_j.get("project", {}).get("tracks") or [{}])[0]
+check("导入序列帧轨道", _r.status_code == 200 and bool(_seq_track.get("seq")),
+      _r.text[:100])
+check("序列帧布局正确（4 列 8 格）",
+      _seq_track.get("seq", {}).get("cols") == 4 and _seq_track.get("seq", {}).get("count") == 8,
+      str(_seq_track.get("seq"))[:120])
+check("序列帧 pivot 是格子内坐标", _seq_track.get("pivot") == [16, 16],
+      str(_seq_track.get("pivot")))
+
+# 逐帧渲染：每帧必须取到**不同的格子**（这是「生成→编辑」打通的核心）
+_px = []
+for _f in range(8):
+    _img = client.get(f"/api/anim/projects/{_pid3}/frame/{_f}.png")
+    if _img.status_code != 200:
+        break
+    _im = Image.open(io.BytesIO(_img.content)).convert("RGBA")
+    _bb = _im.getchannel("A").getbbox()
+    _px.append(_im.getpixel(((_bb[0] + _bb[2]) // 2, (_bb[1] + _bb[3]) // 2)) if _bb else None)
+check("序列帧逐帧取到不同格子", len(set(_px)) == 8 and all(p is not None for p in _px),
+      f"唯一色 {len(set(_px))}")
+
+# 关键帧插帧：值必须落在原曲线上
+_tk = {"keyframes": [
+    {"frame": 0, "x": 0, "y": 0, "rot": 0, "scale": 1, "opacity": 1, "ease": "linear"},
+    {"frame": 7, "x": 70, "y": 0, "rot": 0, "scale": 1, "opacity": 1, "ease": "linear"}]}
+_res = _tween.tween_keys(_tk, "track", 2)
+_mid = [k for k in _tk["keyframes"] if k["frame"] == 2]
+check("关键帧插帧补出中间点", _res["added"] == 2, str(_res))
+check("插出的值落在原曲线上", bool(_mid) and abs(_mid[0]["x"] - 70 * 2 / 7) < 0.5,
+      str(_mid[:1]))
+# 相邻帧之间没有空位
+_tk2 = {"keyframes": [
+    {"frame": 0, "x": 0, "y": 0, "rot": 0, "scale": 1, "opacity": 1, "ease": "linear"},
+    {"frame": 1, "x": 10, "y": 0, "rot": 0, "scale": 1, "opacity": 1, "ease": "linear"}]}
+check("相邻关键帧插不进（无空位）", _tween.tween_keys(_tk2, "track", 3)["added"] == 0)
+
+# 位图插帧：格子数翻倍
+_r = client.post(f"/api/anim/projects/{_pid3}/tween",
+                 json={"trackId": _seq_track.get("id"), "kind": "track", "perGap": 1})
+_j = _r.json() if _r.status_code == 200 else {}
+_st = (_j.get("project", {}).get("tracks") or [{}])[0]
+check("位图插帧：格子数 8 → 15", _st.get("seq", {}).get("count") == 15,
+      str(_st.get("seq", {}).get("count")))
+check("位图插帧：记录了方法", bool(_j.get("method")), str(_j.get("method")))
+# 插帧后仍要能渲染
+_r = client.get(f"/api/anim/projects/{_pid3}/frame/1.png")
+check("插帧后仍能渲染", _r.status_code == 200 and _r.content[:4] == b"\x89PNG",
+      str(_r.status_code))
+
+# 非序列帧轨道做位图插帧 → 400
+_r = client.post(f"/api/anim/projects/{_pid3}/tween",
+                 json={"trackId": "nope", "kind": "track", "perGap": 1})
+check("对不存在的轨道插帧 → 404", _r.status_code == 404, str(_r.status_code))
+_r = client.post(f"/api/anim/projects/{_pid3}/tween",
+                 json={"trackId": _seq_track.get("id"), "kind": "track", "perGap": 0, "count": 1})
+check("关键帧插帧端点可用", _r.status_code == 200, str(_r.status_code))
+client.delete(f"/api/anim/projects/{_pid3}")
+
 check("删除工程", client.delete(f"/api/anim/projects/{_pid}").status_code == 200)
 check("删除后再取 → 404", client.get(f"/api/anim/projects/{_pid}").status_code == 404)
 

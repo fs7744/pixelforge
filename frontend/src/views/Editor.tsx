@@ -359,6 +359,11 @@ export default function Editor() {
   const [error, setError] = useState('')
   const [newName, setNewName] = useState('')
   const [size, setSize] = useState<[number, number]>([512, 512])
+  // 插帧面板：每两个关键帧之间补几个点 / 每两个格子之间补几帧
+  const [tweenOpen, setTweenOpen] = useState(false)
+  const [tweenCount, setTweenCount] = useState(1)
+  const [tweenGap, setTweenGap] = useState(1)
+  const [tweenBusy, setTweenBusy] = useState(false)
 
   const stageRef = useRef<HTMLDivElement>(null)
   const dragRef = useRef<any>(null)
@@ -1109,6 +1114,69 @@ export default function Editor() {
     }
   }
 
+  // ---------- 插帧 ----------
+  //
+  // 两种插帧都走后端：数学（缓动曲线求值、光流）只在后端有一份实现，
+  // 前端自己算会和渲染漂移——插出来的点看着对，导出后曲线变形。
+  const doTween = async (kind: 'track' | 'bone' | 'ik' | 'warp', perGap = 0) => {
+    if (!pid || !proj) return
+    setTweenBusy(true)
+    setError('')
+    try {
+      const r = await api.animTween(pid, {
+        trackId: selTrack,
+        kind,
+        boneId: selBone,
+        ikId: selIk,
+        count: tweenCount,
+        perGap,
+        frame: -1,
+      })
+      if (r.project) {
+        pushHistory(JSON.parse(JSON.stringify(proj)), '插帧')
+        setProj(r.project)
+        dirtyRef.current = true
+        setBump((b) => b + 1)
+      }
+      if (perGap > 0) {
+        const how = r.method === 'flow' ? '双向光流' : '交叉淡化（cv2 不可用）'
+        setNote(`位图插帧完成：新增 ${r.added} 帧，方法 ${how}。序列帧轨道现在 ${r.project?.tracks?.find((t: any) => t.id === selTrack)?.seq?.count || 0} 格。`)
+      } else if (r.added > 0) {
+        setNote(`插帧完成：新增 ${r.added} 个关键帧（值按当前缓动曲线求出，曲线形状不变）`)
+      } else {
+        // 静默失败最让人困惑：按了按钮什么都没发生，却不知道原因
+        setNote(r.reason || '插帧没有补到任何关键帧：相邻关键帧之间需要留出空位')
+      }
+    } catch (e: any) {
+      setError(e.message || String(e))
+    } finally {
+      setTweenBusy(false)
+    }
+  }
+
+  // 把工作流产出的精灵表接进编辑器（序列帧轨道）
+  const importSequence = async (a: Asset) => {
+    if (!pid || !proj) return
+    setError('')
+    try {
+      const r = await api.animImportSequence(pid, { assetId: a.id, bone: selBone || 'root' })
+      if (r.project) {
+        pushHistory(JSON.parse(JSON.stringify(proj)), '导入序列帧')
+        setProj(r.project)
+        dirtyRef.current = true
+        setBump((b) => b + 1)
+        setSelTrack(r.trackId)
+      }
+      if (r.isSequence) {
+        setNote(`已导入序列帧轨道：${r.layout.count} 格（${r.layout.cols} 列 × ${r.layout.rows} 行），按帧号取格`)
+      } else {
+        setNote(`「${a.name}」看不出是多格精灵表，已按普通轨道导入`)
+      }
+    } catch (e: any) {
+      setError(e.message || String(e))
+    }
+  }
+
   const doGodot = async () => {
     if (!pid || !proj) return
     setGodotBusy(true)
@@ -1142,8 +1210,12 @@ export default function Editor() {
 
   // eslint-disable-next-line react-hooks/exhaustive-deps
   const warpPoints = (t: any, a?: Asset): Pt[] => {
-    const w = a?.width || 64
-    const h = a?.height || 64
+    // 序列帧轨道：变形网格是作用在**裁出来的那一格**上的（后端
+    // warp_image 拿到的是格子，不是整张精灵表）。这里必须用格子尺寸，
+    // 否则网格会大到整张表那么宽，拖动完全对不上。
+    const seq = t?.seq
+    const w = seq?.cellW || a?.width || 64
+    const h = seq?.cellH || a?.height || 64
     const pts: Pt[] = []
     for (let r = 0; r < 3; r++) {
       for (let c = 0; c < 3; c++) {
@@ -1349,10 +1421,20 @@ export default function Editor() {
         )}
         {picker && (
           <div className="editor-picker">
-            {assets.slice(0, 60).map((a) => (
-              <img key={a.id} src={a.url} alt={a.name} title={a.name}
-                   onClick={() => addTrack(a)} />
-            ))}
+            {assets.slice(0, 60).map((a) => {
+              // 精灵表（kind=sheet）走「序列帧导入」：一条轨道按帧号取格，
+              // 而不是把整张表当一张贴图。判据交给后端（它读 meta，
+              // 读不到就从内容检测），这里只做粗筛避免误伤普通图。
+              // 后端判定「不是多格表」时会退化成普通轨道，所以点错也不致命。
+              const m = a.meta || {}
+              const wide = a.width >= a.height * 2 && a.width >= 64
+              const isSheet = a.kind === 'sheet' && (m.cols || m.frames || wide)
+              return (
+                <img key={a.id} src={a.url} alt={a.name}
+                     title={isSheet ? `${a.name}：导入为序列帧轨道` : a.name}
+                     onClick={() => (isSheet ? importSequence(a) : addTrack(a))} />
+              )
+            })}
           </div>
         )}
         <div className="editor-tracks">
@@ -1365,7 +1447,14 @@ export default function Editor() {
                       }) }}>
                 {t.visible === false ? '○' : '●'}
               </button>
-              <span className="grow">{t.name}</span>
+              <span className="grow">
+                <span className="ellip">{t.name}</span>
+                {t.seq && (
+                  <span className="seq-badge" title={`序列帧：${t.seq.count} 格 / ${t.seq.cols} 列`}>
+                    {t.seq.count}格
+                  </span>
+                )}
+              </span>
               <select className="mini" value={t.bone} onClick={(e) => e.stopPropagation()}
                       onChange={(e) => update((p) => {
                         const x = p.tracks.find((v: any) => v.id === t.id); x.bone = e.target.value
@@ -1381,6 +1470,50 @@ export default function Editor() {
           ))}
           {!proj?.tracks?.length && <div className="hint">从素材库添加一张图开始</div>}
         </div>
+
+        {/* ---------- 插帧 ---------- */}
+        <div className="section-title" style={{ marginTop: 14 }}>
+          <button className="btn btn-ghost grow" onClick={() => setTweenOpen((v) => !v)}>
+            {tweenOpen ? '收起「插帧」' : '插帧（在关键帧/格子之间补中间帧）'}
+          </button>
+        </div>
+        {tweenOpen && (
+          <div style={{ marginTop: 6 }}>
+            <div className="label">每两个关键帧之间补 {tweenCount} 个点</div>
+            <input type="range" min={1} max={4} value={tweenCount} style={{ width: '100%' }}
+                   onChange={(e) => setTweenCount(+e.target.value)} />
+            <div className="hint" style={{ marginBottom: 6 }}>
+              补出来的值按当前缓动曲线求出，曲线形状不变，只是变得可以逐点调整。
+            </div>
+            <div className="row" style={{ gap: 6, flexWrap: 'wrap' }}>
+              <button className="btn btn-ghost" disabled={tweenBusy || !track}
+                      onClick={() => doTween('track')}>轨道关键帧</button>
+              <button className="btn btn-ghost" disabled={tweenBusy || !selBone}
+                      onClick={() => doTween('bone')}>骨骼关键帧</button>
+              <button className="btn btn-ghost" disabled={tweenBusy || !selIk}
+                      onClick={() => doTween('ik')}>IK 目标</button>
+              <button className="btn btn-ghost" disabled={tweenBusy || !track}
+                      onClick={() => doTween('warp')}>变形关键帧</button>
+            </div>
+            {track?.seq && (
+              <>
+                <div className="label" style={{ marginTop: 10 }}>
+                  位图插帧：每两个格子之间补 {tweenGap} 帧
+                </div>
+                <input type="range" min={1} max={3} value={tweenGap} style={{ width: '100%' }}
+                       onChange={(e) => setTweenGap(+e.target.value)} />
+                <button className="btn btn-ghost btn-block" style={{ marginTop: 4 }}
+                        disabled={tweenBusy}
+                        onClick={() => doTween('track', tweenGap)}>
+                  对这个序列轨道插帧（光流）
+                </button>
+                <div className="hint" style={{ marginTop: 4 }}>
+                  序列帧轨道专有：在相邻动作帧之间补光流中间帧（不是重影，是真运动）。
+                </div>
+              </>
+            )}
+          </div>
+        )}
       </aside>
 
       <main className="editor-stage">
@@ -1594,14 +1727,22 @@ export default function Editor() {
                 const bk = (bones.find((b: any) => b.id === selBone)?.keys || [])
                   .some((k: any) => k.frame === i)
                 const wk = (track?.warpKeys || []).some((k: any) => k.frame === i)
+                // 序列帧轨道：标出这一帧取的是第几格，方便对照动作帧。
+                // 映射规则和后端一致：序列均匀铺满时间轴。
+                const seqCell = track?.seq
+                  ? Math.min(track.seq.count - 1,
+                      Math.floor(i * track.seq.count / (proj.frames || 1)))
+                  : -1
                 return (
                   <button key={i} className={`frame-cell ${i === frame ? 'on' : ''}`}
-                          onClick={() => setFrame(i)}>
+                          onClick={() => setFrame(i)}
+                          title={seqCell >= 0 ? `序列第 ${seqCell + 1} 格` : undefined}>
                     <span className="n">{i + 1}</span>
                     <span className="marks">
                       {tk && <i className="mk track" />}
                       {bk && <i className="mk bone" />}
                       {wk && <i className="mk warp" />}
+                      {seqCell >= 0 && <i className="mk seq">{seqCell + 1}</i>}
                     </span>
                   </button>
                 )
@@ -1642,9 +1783,11 @@ export default function Editor() {
               <div className="label">轨道位移</div>
               <div className="row" style={{ gap: 6 }}>
                 <input className="input" type="number" value={Math.round(k.x)}
-                       onChange={(e) => upsertKey('track', { x: +e.target.value })} />
+                       onChange={(e) => upsertKey('track', { x: +e.target.value })}
+                       onBlur={(e) => { e.target.value = String(Math.round(k.x)) }} />
                 <input className="input" type="number" value={Math.round(k.y)}
-                       onChange={(e) => upsertKey('track', { y: +e.target.value })} />
+                       onChange={(e) => upsertKey('track', { y: +e.target.value })}
+                       onBlur={(e) => { e.target.value = String(Math.round(k.y)) }} />
               </div>
               <div className="label" style={{ marginTop: 8 }}>旋转 {Math.round(k.rot)}°</div>
               <input type="range" min={-180} max={180} value={k.rot}
