@@ -764,6 +764,54 @@ async def main() -> None:
           f"自动命名 pivot 按几何（头 {am['头']['pivot']}）、"
           f"显式命名按名字（{mm['上臂']['pivot']}）OK")
 
+    # 置信度：清晰案例要高、模糊案例要低。
+    # 这是给「人工复核」用的信号——全都 0.5 上下的话用户会直接忽略它。
+    clear = {r["id"]: r for r in parts_pipe.classify_regions([
+        {"id": "h", "name": "", "size": [30, 30], "bbox": [85, 10, 30, 30]},
+        {"id": "b", "name": "", "size": [34, 50], "bbox": [83, 44, 34, 50]},
+        {"id": "al", "name": "", "size": [14, 38], "bbox": [64, 46, 14, 38]},
+        {"id": "ll", "name": "", "size": [15, 42], "bbox": [84, 96, 15, 42]},
+    ])}
+    # 头 + 帽子：躯干上方有多个块 → 取最贴近脖子的那个当头，
+    # 其余算附属（帽子/耳朵），且「哪个是头」有歧义 → 头给低置信
+    vague = {r["id"]: r for r in parts_pipe.classify_regions([
+        {"id": "h", "name": "", "size": [30, 30], "bbox": [85, 10, 30, 30]},
+        {"id": "hat", "name": "", "size": [26, 14], "bbox": [87, 8, 26, 14]},
+        {"id": "b", "name": "", "size": [34, 50], "bbox": [83, 44, 34, 50]},
+    ])}
+    assert clear["h"]["conf"] >= 0.7, clear["h"]
+    assert clear["al"]["conf"] >= 0.55, clear["al"]
+    assert clear["b"]["conf"] >= 0.9, clear["b"]
+    assert vague["hat"]["conf"] < 0.55, vague["hat"]
+    assert vague["hat"]["role"] == "extra", vague["hat"]
+    assert vague["h"]["role"] == "head", vague["h"]
+    # 头贴脖子时确信；离得远就不确定
+    assert clear["h"]["conf"] >= 0.7, clear["h"]
+    far = {r["id"]: r for r in parts_pipe.classify_regions([
+        {"id": "h", "name": "", "size": [30, 30], "bbox": [85, 4, 30, 30]},
+        {"id": "b", "name": "", "size": [34, 50], "bbox": [83, 60, 34, 50]},
+    ])}
+    assert far["h"]["conf"] < clear["h"]["conf"], (far["h"], clear["h"])
+    # 理由要说人话，方便界面上提示
+    assert all(r["reason"] for r in list(clear.values()) + list(vague.values()))
+
+    # 披风把整个躯干包住时，躯干选错（披风当身体）——这是几何上无法区分的，
+    # 只能靠**低置信度 + 明确理由**告诉用户去核对。
+    # 这条是实测发现的：披风 50×70 盖住躯干 34×50 时，面积规则让披风当躯干，
+    # 而且原本还会给它 1.0 的高置信度（那比识别错还糟）。
+    cape = {r["id"]: r for r in parts_pipe.classify_regions([
+        {"id": "h", "name": "", "size": [30, 30], "bbox": [85, 10, 30, 30]},
+        {"id": "b", "name": "", "size": [34, 50], "bbox": [83, 44, 34, 50]},
+        {"id": "cape", "name": "", "size": [50, 70], "bbox": [75, 40, 50, 70]},
+    ])}
+    body_c = next((r for r in cape.values() if r["role"] == "body"), None)
+    assert body_c is not None and body_c["conf"] < 0.55, cape
+    assert "核对" in body_c["reason"], body_c
+    print(f"[9t] 置信度  → 清晰 {clear['h']['conf']:.2f}/"
+          f"{clear['al']['conf']:.2f} vs 帽子歧义 {vague['h']['conf']:.2f}"
+          f"/头悬空 {far['h']['conf']:.2f}；"
+          f"披风包住躯干时躯干 conf={body_c['conf']:.2f} 并提示核对 OK")
+
     # 颜色距离不能出 NaN：int16 算平方差会溢出回绕成负数，sqrt 得 NaN，
     # 不报错、只是让对应像素的 mask 静默失效（当时只在控制台看到一行 warning）
     far = parts_pipe._hex_dist(np.array([[[255, 0, 0], [0, 0, 255]]], dtype=np.uint8),

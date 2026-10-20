@@ -304,10 +304,16 @@ def _union_bbox(regions: Sequence[Dict[str, Any]]) -> List[int]:
 
 
 def _find_body(regions: Sequence[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
-    """躯干：包含整个图形竖直中线的、面积最大的部件。
+    """躯干：跨越整个图形竖直中线、面积最大的部件。
 
-    为什么要「包含中线」而不直接取面积最大：用户可能涂了一件很大的披风，
-    它的面积比躯干还大。披风不会跨越身体的竖直中线，躯干会。
+    为什么只要这两条：更复杂的启发式（依附关系、覆盖度）试过，会把
+    标准人形里的躯干也判错——手臂和腿的 bbox 与躯干有轻微重叠，
+    「被覆盖」就误伤了。**简单规则 + 置信度**比聪明规则更可靠：
+    认错了不是灾难，只要置信度低、界面标出来让用户改就行。
+
+    「跨中线」这条能挡掉大部分误判：披风虽然面积大，但它的竖直范围
+    通常与图形中线错开（披风垂到脚下，中线在躯干上）。
+    真的挡住了（披风也跨中线）就靠躯干置信度偏低来提示。
     """
     if not regions:
         return None
@@ -326,6 +332,21 @@ def _find_body(regions: Sequence[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
             best_score = score
             best = r
     return best
+
+
+def _arm_leg_conf(cy: float, b_cy: float, bh: int) -> float:
+    """「这是臂还是腿」的把握。
+
+    分界在躯干的竖直中心：块贴着中心就是模棱两可。
+    分界带的宽度取躯干高度的 1/4——**不能更宽**，否则正常垂下的手臂
+    （中心离躯干中心只有三分之一躯干高）也会被判成「不确定」，
+    那置信度就失去意义了（全都 0.5 上下，用户会直接忽略它）。
+    """
+    band = max(3.0, bh * 0.25)
+    d = abs(cy - b_cy)
+    # 出了分界带就基本确信；带内线性下降
+    conf = 0.45 + 0.55 * min(1.0, d / band)
+    return max(0.3, min(1.0, conf))
 
 
 def classify_regions(regions: Sequence[Dict[str, Any]]
@@ -352,6 +373,41 @@ def classify_regions(regions: Sequence[Dict[str, Any]]
     b_cx = bx + bw / 2
     b_cy = by + bh / 2
 
+    # 躯干的把握：两条线索。
+    # 1) 它比「第二大的部件」大多少倍——两个部件面积接近时说不准；
+    # 2) **它是不是把别的部件吞掉了**——如果某个部件相对图形中线更居中、
+    #    却被判成了「附属」，那说明躯干选错了（典型：披风盖住整个身体）。
+    #    这条是实测发现的：披风 50×70 完全盖住躯干 34×50 时，
+    #    面积规则会让披风当躯干，而且原本还会给它 1.0 的高置信度。
+    body_area = max(1, bw * bh)
+    others = [max(1, int(r["bbox"][2]) * int(r["bbox"][3]))
+              for r in items if r is not body]
+    runner_up = max(others) if others else 0
+    body_conf = min(1.0, body_area / max(1.0, runner_up * 1.8)) if runner_up else 0.9
+    # 被吞掉的嫌疑：有另一个部件**完全在躯干内部**（竖直与水平都包住）。
+    # 只判竖直会误伤手臂——手臂的高度确实落在躯干范围内，但它在躯干**外面**，
+    # 横向不重叠，所以不是被吞掉。披风则两头都包住。
+    for o in items:
+        if o is body:
+            continue
+        ox, oy, ow, oh = (int(v) for v in o["bbox"])
+        inside_v = oy >= by and oy + oh <= by + bh
+        inside_h = ox >= bx and ox + ow <= bx + bw
+        if inside_v and inside_h:
+            body_conf = min(body_conf, 0.45)
+
+    # 躯干上方可能有多个块（头 + 帽子 + 耳朵）。**只有紧贴躯干的那个是头**——
+    # 脖子在躯干顶上，离得远的那些是帽子之类的附属。
+    above_items = [r for r in items
+                   if r is not body and (int(r["bbox"][1]) + int(r["bbox"][3]))
+                   <= by + bh * 0.12]
+    head_item = None
+    if above_items:
+        head_item = min(above_items,
+                        key=lambda r: by - (int(r["bbox"][1]) + int(r["bbox"][3])))
+    # 上方有多个块时，「哪个是头」就有歧义 → 把握下降
+    above_ambiguous = len(above_items) > 1
+
     out: List[Dict[str, Any]] = []
     for r in items:
         x, y, w, h = (int(v) for v in r["bbox"])
@@ -360,10 +416,16 @@ def classify_regions(regions: Sequence[Dict[str, Any]]
         role = "extra"
         side = None
         joint = _JOINT_BOTTOM
+        conf = 0.4
+        reason = ""
 
         if r is body:
             role = "body"
             joint = _JOINT_BOTTOM          # 躯干绕胯
+            conf = body_conf
+            reason = ("跨越身体中线且面积最大" if body_conf >= 0.55
+                      else "跨越身体中线且面积最大，但有别的部件被它整个包住——"
+                           "这个可能不是身体，请核对")
         else:
             above = (y + h) <= by + bh * 0.12
             below = y >= by + bh * 0.88
@@ -371,8 +433,24 @@ def classify_regions(regions: Sequence[Dict[str, Any]]
             right_of = x >= bx + bw * 0.65
             horizontal = w > h * 1.15
             if above:
-                role = "head"
-                joint = _JOINT_BOTTOM      # 头绕脖子（在下端）
+                gap = by - (y + h)
+                if r is head_item:
+                    role = "head"
+                    joint = _JOINT_BOTTOM  # 头绕脖子（在下端）
+                    # 与躯干顶的间隙越小越确信（紧贴脖子）。
+                    # 间隙为 0（完全贴住）最确定；间隙越大越不确定。
+                    conf = max(0.4, min(1.0, 1.0 - gap / max(6.0, bh * 0.4)))
+                    if above_ambiguous:
+                        conf = min(conf, 0.5)
+                        reason = "躯干上方有多个块，取最贴近的那个（可能是头，也可能是帽子）"
+                    else:
+                        reason = "紧贴躯干上方"
+                else:
+                    # 躯干上方但离得远的：帽子、耳朵、发型 → 附属
+                    role = "extra"
+                    joint = _JOINT_BOTTOM
+                    conf = 0.3
+                    reason = "躯干上方但不贴脖子，可能是帽子/耳朵"
             elif left_of or right_of:
                 side = "l" if left_of else "r"
                 if horizontal:
@@ -380,20 +458,32 @@ def classify_regions(regions: Sequence[Dict[str, Any]]
                     side = None            # 尾巴不分左右
                     # 尾巴的关节在靠近身体的那一端
                     joint = _JOINT_RIGHT if (x + w) <= bx + bw * 0.35 else _JOINT_LEFT
+                    # 宽高比越悬殊越确信是尾巴；接近方形就是「横着的臂」
+                    ratio = w / max(1.0, float(h))
+                    conf = max(0.3, min(1.0, (ratio - 1.15) / 1.2 + 0.45))
+                    reason = "横向伸出的细长块"
                 elif cy < b_cy:
                     role = "arm"
                     joint = _JOINT_TOP      # 垂下的臂：肩在上端
+                    conf = _arm_leg_conf(cy, b_cy, bh)
+                    reason = "躯干侧上方"
                 else:
                     role = "leg"
                     joint = _JOINT_TOP      # 腿：髋在上端
+                    conf = _arm_leg_conf(cy, b_cy, bh)
+                    reason = "躯干侧下方"
             elif below:
                 side = "l" if cx < b_cx else "r"
                 role = "leg"
                 joint = _JOINT_TOP
+                conf = 0.75
+                reason = "在躯干正下方"
             else:
                 # 压在躯干上（帽子、披风、护甲）：算附属，关节在下端（贴身）
                 role = "extra"
                 joint = _JOINT_BOTTOM
+                conf = 0.35
+                reason = "盖在躯干上，认不出具体部位"
 
         label = _ROLE_LABELS.get(role, "部件")
         if side and role != "tail":
@@ -404,6 +494,8 @@ def classify_regions(regions: Sequence[Dict[str, Any]]
             "side": side,
             "joint": joint,
             "label": label,
+            "conf": round(conf, 3),
+            "reason": reason,
         })
     return out
 

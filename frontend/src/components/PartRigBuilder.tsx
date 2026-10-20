@@ -4,7 +4,7 @@ import PartPainter, { PartDef } from './PartPainter'
 import { AUTO_PARTS, DEFAULT_PARTS, EXTRA_PARTS } from '../parts'
 
 /** 识别结果：色块 id → 建议的部位名与角色 */
-type Detected = { [k: string]: { name: string; role: string } }
+type Detected = { [k: string]: { name: string; role: string; conf: number; reason: string } }
 
 export type RigPart = {
   id: string
@@ -106,13 +106,21 @@ export default function PartRigBuilder({ assets, canvas, onApply }: Props) {
       ;(res.parts || []).forEach((x: any, i: number) => {
         if (x.empty) return
         const src = parts[i]
-        if (src) det[src.id] = { name: x.name, role: x.role || 'extra' }
+        if (src) {
+          det[src.id] = {
+            name: x.name, role: x.role || 'extra',
+            conf: typeof x.conf === 'number' ? x.conf : 1,
+            reason: x.reason || '',
+          }
+        }
       })
       setDetected(det)
       const missed = (res.parts || []).filter((x: any) => x.empty).map((x: any) => x.name)
       const recognized = Object.values(det).map((d) => d.name).join('、')
+      const lowCount = Object.values(det).filter((d) => d.conf < 0.55).length
       setMsg(`已生成 ${rig.length} 个部件并装好骨架`
         + (nameMode === 'auto' && recognized ? `；识别为：${recognized}` : '')
+        + (lowCount ? `；${lowCount} 处把握不足，已标出待复核` : '')
         + (missed.length ? `；没涂到：${missed.join('、')}` : ''))
     } catch (e: any) {
       setErr(e.message || String(e))
@@ -193,18 +201,38 @@ export default function PartRigBuilder({ assets, canvas, onApply }: Props) {
             <>
               <div className="label" style={{ marginTop: 8 }}>识别结果</div>
               <div className="chips">
-                {Object.entries(detected).map(([pid, d]) => (
-                  <span key={pid} className="chip sm" title={`角色：${d.role}`}>
-                    <i className="dot" style={{
-                      background: parts.find((x) => x.id === pid)?.color,
-                    }} />
-                    {d.name}
-                  </span>
-                ))}
+                {Object.entries(detected).map(([pid, d]) => {
+                  const low = d.conf < 0.55
+                  return (
+                    <span key={pid} className={`chip sm ${low ? 'low' : ''}`}
+                          title={`${d.reason}（把握 ${Math.round(d.conf * 100)}%）`}>
+                      <i className="dot" style={{
+                        background: parts.find((x) => x.id === pid)?.color,
+                      }} />
+                      {d.name}
+                      {low && ' ?'}
+                    </span>
+                  )
+                })}
               </div>
-              <div className="hint">
-                认错了就点左栏的骨骼改名——名字会决定旋转点（头绕脖子、臂绕肩）。
-              </div>
+              {(() => {
+                const low = Object.entries(detected).filter(([, d]) => d.conf < 0.55)
+                if (!low.length) {
+                  return (
+                    <div className="hint">
+                      都比较有把握。认错了就点左栏的骨骼改名——
+                      名字会决定旋转点（头绕脖子、臂绕肩）。
+                    </div>
+                  )
+                }
+                return (
+                  <div className="hint" style={{ color: '#ffc14d' }}>
+                    带 ? 的 {low.length} 处我不确定
+                    （{low.map(([, d]) => d.name).join('、')}）——{low[0][1].reason}。
+                    请人工核对一下，改名或调父骨骼都能修。
+                  </div>
+                )
+              })()}
             </>
           )}
           {err && <div className="hint" style={{ color: '#ff6b6b' }}>{err}</div>}

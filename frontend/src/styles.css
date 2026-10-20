@@ -819,3 +819,6 @@ button, input, textarea, select { font-family: inherit; }
 }
 .rig-assets img.on { border-color: var(--green); }
 .painter-box { position: absolute; border: 2px solid; pointer-events: none; }
+/* 识别把握不足的部位：标黄 + 问号，提醒人工复核 */
+.chip.low { border-color: #ffc14d; color: #ffc14d; }
+.chip.low .dot { outline: 1px solid #ffc14d; }

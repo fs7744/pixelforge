@@ -621,10 +621,13 @@ async def pipeline_parts(
                   "sourceId": refAssetId, "coverage": round(c["cov"], 5),
                   "bbox": c["bbox"], "sourceSize": [c["raw"].width, c["raw"].height],
                   "role": g["role"] if g else "extra",
+                  "conf": g["conf"] if g else 0.3,
                   "autoNamed": not bool(c["given"])})
         items.append({"name": name, "empty": False, "coverage": round(c["cov"], 5),
                       "bbox": c["bbox"], "size": [trimmed.width, trimmed.height],
                       "role": g["role"] if g else "extra",
+                      "conf": g["conf"] if g else 0.3,
+                      "reason": g["reason"] if g else "",
                       "autoNamed": not bool(c["given"]),
                       "asset": item})
         rig_input.append({"id": item["id"], "name": name,
