@@ -28,7 +28,11 @@ body {
 
 button, input, textarea, select { font-family: inherit; }
 
-.app { display: flex; flex-direction: column; min-height: 100vh; }
+/* 固定视口高（不是 min-height）：min-height 会让 .app 被内容撑高，
+   于是 .editor 的 height:calc(100vh - 56px) 之外还有溢出，
+   侧栏的 overflow-y:auto 就成了摆设（内容超出就被裁掉，底部的按钮点不到）。
+   各视图自己用 .stage / .editor-left 的 overflow-y:auto 滚。 */
+.app { display: flex; flex-direction: column; height: 100vh; min-height: 100vh; overflow: hidden; }
 
 /* ---------- 顶部导航 ---------- */
 .nav {
@@ -68,7 +72,9 @@ button, input, textarea, select { font-family: inherit; }
 }
 
 /* ---------- 布局 ---------- */
-.body { display: flex; flex: 1; min-height: 0; }
+/* overflow:hidden：.app 已经固定视口高了，这里不让内容把 body 撑破，
+   否则各视图的内部滚动容器会失效。 */
+.body { display: flex; flex: 1; min-height: 0; overflow: hidden; }
 /* 宽度由 App 注入的 CSS 变量控制，可拖拽；变量缺失时退回默认值 */
 .panel {
   flex: 0 0 auto;
@@ -720,6 +726,11 @@ button, input, textarea, select { font-family: inherit; }
   border-right: 1px solid var(--line);
   padding: 12px;
   overflow-y: auto;
+  /* grid item 的 min-height 默认是 auto —— 会被内容撑高，
+     于是 overflow-y:auto 永远不触发（内容超出容器就被 .editor 的
+     overflow:hidden 裁掉，底部的按钮点不到）。
+     min-height:0 让它受父容器高度约束，滚动才生效。 */
+  min-height: 0;
 }
 .editor-right { border-right: 0; border-left: 1px solid var(--line); }
 .editor-stage {
@@ -767,6 +778,10 @@ button, input, textarea, select { font-family: inherit; }
   flex: none; font-size: 10px; color: #ff9c4a; border: 1px solid rgba(255, 156, 74, 0.45);
   padding: 0 3px; border-radius: 2px; white-space: nowrap;
 }
+/* 循环接缝诊断结果：告警用琥珀色，正常用绿 */
+.seq-diag { margin-top: 6px; font-size: 11px; line-height: 1.5; }
+.seq-diag-warn { color: #ffb545; }
+.seq-diag-ok { color: var(--green); }
 .editor-track.on { border-color: var(--green); background: rgba(0, 255, 136, 0.06); }
 .mini {
   background: transparent; border: 1px solid var(--line); color: var(--muted);

@@ -1995,6 +1995,86 @@ async def anim_tween(pid: str, payload: AnimTweenPayload):
     return {"project": proj, "kind": kind, **res}
 
 
+@app.get("/api/anim/projects/{pid}/sequence-diagnose")
+async def anim_sequence_diagnose(pid: str, track: str = ""):
+    """序列帧轨道的循环诊断：接缝跳不跳、哪一格姿势跑飞。
+
+    对着轨道**当前循环段**的格子算（不是整张表）——用户选了第 3–6 格
+    当循环，接缝就该是「第 6 格 → 第 3 格」，整表算出来的接缝没意义。
+
+    口径与 pipelines/metrics.py 一致（RGB 平均绝对差），所以同一个素材
+    在拼表阶段和编辑器里算出来的数字能对上。
+    """
+    from .anim import diagnose as diag_mod
+    from .anim import model as anim_model
+
+    proj = anim_model.get(pid)
+    if not proj:
+        raise HTTPException(404, "工程不存在")
+    t = next((x for x in proj.get("tracks") or [] if x["id"] == track), None)
+    if not t:
+        raise HTTPException(404, "轨道不存在")
+    if not t.get("seq"):
+        raise HTTPException(400, "该轨道不是序列帧轨道，没有格子可诊断")
+    item = storage.get_asset(t["assetId"])
+    if not item:
+        raise HTTPException(404, "轨道贴图不存在")
+    with Image.open(storage.asset_path(item)) as im:
+        sheet = im.convert("RGBA")
+    cells, start, stop = await run_in_threadpool(diag_mod.cut_range, sheet, t["seq"])
+    report = await run_in_threadpool(diag_mod.seam_report, cells)
+    report["range"] = [start, stop]
+    report["count"] = int(t["seq"].get("count") or len(cells))
+    return report
+
+
+class AnimSeqRangePayload(BaseModel):
+    """设置序列帧轨道的循环段。"""
+    trackId: str = ""
+    start: int = 0
+    stop: int = -1     # -1 = 到最后一格
+    loop: bool = True
+
+
+@app.post("/api/anim/projects/{pid}/sequence-range")
+async def anim_sequence_range(pid: str, payload: AnimSeqRangePayload):
+    """设置序列帧轨道的循环段（只播 [start, stop] 这几格）。
+
+    替代「回工作流重跑一次 sprite-select」：编辑器里导入了 8 格动作表后，
+    想只播第 2–6 格当循环，在这里改一下就行。
+
+    语义与 sprite-select 一致：**不插帧、不跳帧、不改时长** ——
+    只是决定「播哪几格」，画面内容与顺序原样保留。
+    """
+    from .anim import model as anim_model
+    from .anim import sequence as seq_mod
+
+    proj = anim_model.get(pid)
+    if not proj:
+        raise HTTPException(404, "工程不存在")
+    t = next((x for x in proj.get("tracks") or [] if x["id"] == payload.trackId), None)
+    if not t:
+        raise HTTPException(404, "轨道不存在")
+    if not t.get("seq"):
+        raise HTTPException(400, "该轨道不是序列帧轨道")
+    count = int(t["seq"].get("count") or 0)
+    if count < 1:
+        raise HTTPException(400, "轨道没有格子")
+    stop = int(payload.stop)
+    if stop < 0:
+        stop = count - 1
+    start = int(payload.start)
+    start = max(0, min(start, count - 1))
+    stop = max(0, min(stop, count - 1))
+    if stop < start:
+        raise HTTPException(400, f"循环段起止反了：第 {start + 1} 格 → 第 {stop + 1} 格")
+    t["seq"]["range"] = [start, stop]
+    t["seq"]["loop"] = bool(payload.loop)
+    proj = anim_model.normalize(proj)
+    anim_model.save(proj)
+    return {"project": proj, "range": [start, stop], "count": count}
+
+
 @app.get("/api/anim/projects/{pid}/frame/{index}.png")
 async def anim_frame_png(pid: str, index: int, scale: float = 1.0):
     from .anim import model as anim_model

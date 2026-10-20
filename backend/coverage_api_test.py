@@ -2096,6 +2096,59 @@ check("对不存在的轨道插帧 → 404", _r.status_code == 404, str(_r.statu
 _r = client.post(f"/api/anim/projects/{_pid3}/tween",
                  json={"trackId": _seq_track.get("id"), "kind": "track", "perGap": 0, "count": 1})
 check("关键帧插帧端点可用", _r.status_code == 200, str(_r.status_code))
+
+# ---------- 循环段 + 循环接缝诊断 ----------
+check("循环段：未设 → 全播",
+      [_seq.frame_index({"count": 8}, f, 8, 8) for f in range(8)] == list(range(8)))
+_seq_r = {"count": 8, "range": [1, 5]}
+_got = [_seq.frame_index(_seq_r, f, 8, 8) for f in range(8)]
+check("循环段：只播段内格子", set(_got) == {1, 2, 3, 4, 5}, str(_got))
+check("循环段：起止反了自动交换", _seq.range_of({"range": [5, 1]}, 8) == (1, 5))
+check("循环段：越界夹回合法范围", _seq.range_of({"range": [-3, 99]}, 8) == (0, 7))
+check("循环段：垃圾值退化成全播", _seq.range_of({"range": "x"}, 8) == (0, 7))
+
+_r = client.post(f"/api/anim/projects/{_pid3}/sequence-range",
+                 json={"trackId": _seq_track.get("id"), "start": 1, "stop": 5})
+_j = _r.json() if _r.status_code == 200 else {}
+check("循环段端点：设置成功",
+      _r.status_code == 200 and _j.get("range") == [1, 5], _r.text[:100])
+_st = (_j.get("project", {}).get("tracks") or [{}])[0]
+check("循环段落盘到 seq.range", (_st.get("seq") or {}).get("range") == [1, 5],
+      str((_st.get("seq") or {}).get("range")))
+# 设置循环段后，渲染只应取到段内的格子
+_cols = []
+for _f in range(8):
+    _im = Image.open(io.BytesIO(
+        client.get(f"/api/anim/projects/{_pid3}/frame/{_f}.png").content)).convert("RGBA")
+    _bb = _im.getchannel("A").getbbox()
+    _cols.append(_im.getpixel(((_bb[0] + _bb[2]) // 2, (_bb[1] + _bb[3]) // 2)) if _bb else None)
+check("循环段：渲染只出现段内格子的颜色", len(set(_cols)) == 5, f"唯一色 {len(set(_cols))}")
+
+# 起止反了 → 400
+_r = client.post(f"/api/anim/projects/{_pid3}/sequence-range",
+                 json={"trackId": _seq_track.get("id"), "start": 5, "stop": 1})
+check("循环段：起止反了 → 400", _r.status_code == 400, str(_r.status_code))
+# 全播
+_r = client.post(f"/api/anim/projects/{_pid3}/sequence-range",
+                 json={"trackId": _seq_track.get("id"), "start": 0, "stop": -1})
+check("循环段：stop=-1 → 到最后一格",
+      _r.status_code == 200 and _r.json().get("range") == [0, 14],
+      str(_r.json().get("range")) if _r.status_code == 200 else str(_r.status_code))
+
+# 循环接缝诊断
+_r = client.get(f"/api/anim/projects/{_pid3}/sequence-diagnose",
+                params={"track": _seq_track.get("id")})
+_j = _r.json() if _r.status_code == 200 else {}
+check("循环接缝诊断端点",
+      _r.status_code == 200 and "seam_ratio" in _j and "verdict" in _j, _r.text[:120])
+check("诊断返回循环段范围", _j.get("range") is not None, str(_j.get("range")))
+# 对不存在/非序列轨道 → 404 / 400
+check("诊断：轨道不存在 → 404",
+      client.get(f"/api/anim/projects/{_pid3}/sequence-diagnose",
+                 params={"track": "nope"}).status_code == 404)
+_r = client.post(f"/api/anim/projects/{_pid3}/sequence-range",
+                 json={"trackId": "nope", "start": 0, "stop": 1})
+check("循环段：轨道不存在 → 404", _r.status_code == 404, str(_r.status_code))
 client.delete(f"/api/anim/projects/{_pid3}")
 
 check("删除工程", client.delete(f"/api/anim/projects/{_pid}").status_code == 200)

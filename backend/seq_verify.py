@@ -119,6 +119,67 @@ def main():
     check("从内容检测网格（7 种布局全对）", not bad, str(bad))
     check("单格图检测不出（当普通轨道）", seq_mod.detect_grid(_mk(1, 1)) is None)
 
+    # ---------- 3c. 循环段 ----------
+    # 只播 [start, stop] 这几格：替代「回工作流重跑一次 sprite-select」
+    seq_full = {"cols": 4, "rows": 2, "count": 8, "cellW": 32, "cellH": 32, "loop": True}
+    check("未设循环段 → 全播",
+          [seq_mod.frame_index(seq_full, f, 8, 8) for f in range(8)] == list(range(8)))
+    seq_r = dict(seq_full)
+    seq_r["range"] = [1, 5]
+    got = [seq_mod.frame_index(seq_r, f, 8, 8) for f in range(8)]
+    check("选第 2–6 格 → 只在这 5 格里循环", set(got) == {1, 2, 3, 4, 5}, str(got))
+    check("循环段起点正确", got[0] == 1, str(got))
+    check("循环段终点正确", got[-1] == 5, str(got))
+    # 异常值兜底
+    check("起止反了 → 自动交换", seq_mod.range_of({"range": [5, 1]}, 8) == (1, 5))
+    check("越界 → 夹回合法范围", seq_mod.range_of({"range": [-3, 99]}, 8) == (0, 7))
+    check("垃圾值 → 退化成全播", seq_mod.range_of({"range": "x"}, 8) == (0, 7))
+
+    # ---------- 3d. 循环段随位图插帧重映射 ----------
+    # 插帧把格子数从 8 变成 15，旧的循环段格号会指到别的格 —— 必须跟着重算
+    _seq_before = dict(seq_r)
+    _res = tween_mod.tween_raster(sheet, _seq_before, per_gap=1)
+    _ns = _res["seq"]
+    _cmap = _ns.get("map") or []
+    check("插帧后循环段格号已重算",
+          _ns.get("range") != _seq_before.get("range")
+          and _ns.get("range") != [1, 5],
+          f"{_seq_before.get('range')} → {_ns.get('range')}")
+    _ok = (len(_cmap) > _ns["range"][1]
+           and _cmap[_ns["range"][0]].get("src") == 1
+           and _cmap[_ns["range"][1]].get("src") == 5)
+    check("重映射后的段两端仍指向原来的源格", _ok,
+          f"src={[ _cmap[i].get('src') for i in _ns['range'] ] if len(_cmap) > _ns['range'][1] else 'N/A'}")
+
+    # ---------- 3e. 循环接缝诊断 ----------
+    def _cell_at(x):
+        im = Image.new("RGBA", (64, 64), (0, 0, 0, 0))
+        dr = ImageDraw.Draw(im)
+        dr.ellipse((x + 18, 10, x + 30, 22), fill=(240, 200, 160, 255))
+        dr.rectangle((x + 14, 22, x + 34, 48), fill=(200, 60, 60, 255))
+        return im
+
+    from app.anim import diagnose as diag_mod
+    walk = diag_mod.seam_report([_cell_at(0), _cell_at(5), _cell_at(0), _cell_at(5)])
+    check("走路循环：接缝与普通帧间差持平（不顿）",
+          walk["seam_ratio"] < 1.2 and not walk["verdict"],
+          f"ratio={walk['seam_ratio']} {walk['verdict']}")
+    jump = diag_mod.seam_report([_cell_at(0), _cell_at(5), _cell_at(0), _cell_at(30)])
+    check("接缝跳变：报「循环会顿一下」",
+          any("顿一下" in v for v in jump["verdict"]), str(jump["verdict"]))
+    off = diag_mod.seam_report([_cell_at(0), _cell_at(5), _cell_at(60), _cell_at(5)])
+    check("姿势跑飞：指出具体是哪一格",
+          any("第 3 格" in v for v in off["verdict"]), str(off["verdict"]))
+    check("一格时没有接缝可言",
+          "note" in diag_mod.seam_report([_cell_at(0)]))
+    check("空序列不崩", diag_mod.seam_report([]).get("frames") == 0)
+
+    # 诊断只针对循环段：选了 2-6 格，接缝就该是「第 6 格 → 第 2 格」
+    _sheet2 = sheet
+    _cells, _s, _e = diag_mod.cut_range(_sheet2, seq_r)
+    check("诊断只取循环段内的格子", len(_cells) == 5 and _s == 1 and _e == 5,
+          f"{len(_cells)} 格 [{_s},{_e}]")
+
     # ---------- 4. 逐帧取到不同格子 ----------
     # 格子贴在根骨骼原点处（pivot=格子中心 → 格子中心落在骨骼原点），
     # 所以取样点取「根骨骼原点 - 格子半径」附近：格子左上角那一块。

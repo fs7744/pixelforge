@@ -689,6 +689,20 @@ export const api = {
     body: JSON.stringify(payload),
   }).then(json),
 
+  /** 序列帧轨道的循环诊断：接缝跳不跳、哪一格姿势跑飞 */
+  animSequenceDiagnose: (id: string, trackId: string): Promise<any> => {
+    const q = new URLSearchParams({ track: trackId })
+    return fetch(`/api/anim/projects/${id}/sequence-diagnose?${q.toString()}`).then(json)
+  },
+
+  /** 设置序列帧轨道的循环段（只播 [start, stop] 这几格） */
+  animSequenceRange: (id: string, trackId: string, start: number, stop: number,
+                       loop = true) => fetch(`/api/anim/projects/${id}/sequence-range`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ trackId, start, stop, loop }),
+  }).then(json),
+
   /** 导出 Godot 包：anim.json + 纹理 + 参考运行时（骨骼与蒙皮已烘焙） */
   animGodot: async (id: string, name = 'anim') => {
     const res = await fetch(`/api/anim/projects/${id}/export/godot`, { method: 'POST' })

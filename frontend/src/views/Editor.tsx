@@ -364,6 +364,10 @@ export default function Editor() {
   const [tweenCount, setTweenCount] = useState(1)
   const [tweenGap, setTweenGap] = useState(1)
   const [tweenBusy, setTweenBusy] = useState(false)
+  // 序列帧循环段 + 接缝诊断
+  const [seqRange, setSeqRange] = useState<[number, number]>([0, 0])
+  const [seqDiag, setSeqDiag] = useState<any>(null)
+  const [seqBusy, setSeqBusy] = useState(false)
 
   const stageRef = useRef<HTMLDivElement>(null)
   const dragRef = useRef<any>(null)
@@ -573,6 +577,16 @@ export default function Editor() {
     }, ms)
     return () => window.clearInterval(id)
   }, [playing, proj])
+
+  // 切换轨道时同步循环段与诊断结果：
+  // 循环段是**每条轨道各有的**，上一条的值不能带到下一条；
+  // 诊断结果同理（是针对某条轨道的格子算的）。
+  useEffect(() => {
+    const r = track?.seq?.range
+    setSeqRange(r && r.length >= 2 ? [r[0], r[1]] : [0, (track?.seq?.count || 1) - 1])
+    setSeqDiag(null)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selTrack, track?.seq?.count, track?.seq?.range?.[0], track?.seq?.range?.[1]])
 
   // 权重视图：轨道 / 帧 / 轨道改动（bump）变化时重拉
   useEffect(() => {
@@ -1177,6 +1191,47 @@ export default function Editor() {
     }
   }
 
+  // 设置序列帧轨道的循环段：只播 [start, stop] 这几格
+  const applySeqRange = async (start: number, stop: number) => {
+    if (!pid || !track?.seq) return
+    setSeqBusy(true)
+    setError('')
+    try {
+      const r = await api.animSequenceRange(pid, track.id, start, stop,
+                                             track.seq.loop !== false)
+      if (r.project) {
+        pushHistory(JSON.parse(JSON.stringify(proj)), '设循环段')
+        setProj(r.project)
+        dirtyRef.current = true
+        setBump((b) => b + 1)
+      }
+      setSeqRange([r.range?.[0] ?? start, r.range?.[1] ?? stop])
+      setNote(`循环段：第 ${(r.range?.[0] ?? start) + 1} 格 → 第 ${(r.range?.[1] ?? stop) + 1} 格`
+        + `（共 ${(r.range?.[1] ?? stop) - (r.range?.[0] ?? start) + 1} 格当循环）`)
+    } catch (e: any) {
+      setError(e.message || String(e))
+    } finally {
+      setSeqBusy(false)
+    }
+  }
+
+  // 序列帧循环诊断：接缝跳不跳、哪一格姿势跑飞
+  const runSeqDiag = async () => {
+    if (!pid || !track?.seq) return
+    setSeqBusy(true)
+    setError('')
+    try {
+      const d = await api.animSequenceDiagnose(pid, track.id)
+      setSeqDiag(d)
+      if (d.verdict?.length) setNote(d.verdict.join('；'))
+      else setNote(`循环诊断：${d.frames} 格，接缝比 ${d.seam_ratio}（无异常）`)
+    } catch (e: any) {
+      setError(e.message || String(e))
+    } finally {
+      setSeqBusy(false)
+    }
+  }
+
   const doGodot = async () => {
     if (!pid || !proj) return
     setGodotBusy(true)
@@ -1510,6 +1565,60 @@ export default function Editor() {
                 <div className="hint" style={{ marginTop: 4 }}>
                   序列帧轨道专有：在相邻动作帧之间补光流中间帧（不是重影，是真运动）。
                 </div>
+
+                {/* ---------- 循环段 ---------- */}
+                <div className="label" style={{ marginTop: 12 }}>
+                  循环段（第 {seqRange[0] + 1} – {seqRange[1] + 1} 格 / 共 {track.seq.count} 格）
+                </div>
+                <div className="row" style={{ gap: 6, alignItems: 'center' }}>
+                  <input className="input" type="number" min={1} max={track.seq.count}
+                         value={seqRange[0] + 1} style={{ width: 62 }}
+                         onChange={(e) => {
+                           const v = Math.max(1, Math.min(track.seq.count, +e.target.value || 1)) - 1
+                           setSeqRange([v, Math.max(v, seqRange[1])])
+                         }} />
+                  <span className="hint">→</span>
+                  <input className="input" type="number" min={1} max={track.seq.count}
+                         value={seqRange[1] + 1} style={{ width: 62 }}
+                         onChange={(e) => {
+                           const v = Math.max(1, Math.min(track.seq.count, +e.target.value || 1)) - 1
+                           setSeqRange([Math.min(seqRange[0], v), v])
+                         }} />
+                </div>
+                <div className="row" style={{ gap: 6, marginTop: 4 }}>
+                  <button className="btn btn-ghost grow" disabled={seqBusy}
+                          onClick={() => applySeqRange(seqRange[0], seqRange[1])}>
+                    只播这一段
+                  </button>
+                  <button className="btn btn-ghost" disabled={seqBusy}
+                          onClick={() => applySeqRange(0, track.seq.count - 1)}>
+                    全播
+                  </button>
+                </div>
+                <div className="hint" style={{ marginTop: 4 }}>
+                  替代「回工作流重跑一次循环段选择」：不插帧、不跳帧、不改时长，
+                  只是决定播哪几格。
+                </div>
+
+                {/* ---------- 循环接缝诊断 ---------- */}
+                <button className="btn btn-ghost btn-block" style={{ marginTop: 8 }}
+                        disabled={seqBusy}
+                        onClick={runSeqDiag}>
+                  检查循环接缝
+                </button>
+                {seqDiag && (
+                  <div className="seq-diag">
+                    <div className="hint">
+                      段内 {seqDiag.frames} 格 · 接缝差 {seqDiag.seam_first_last}
+                      {' '}· 普通帧间差 {seqDiag.step_median} · 比值 {seqDiag.seam_ratio}
+                    </div>
+                    {(seqDiag.verdict || []).map((v: string, i: number) => (
+                      <div key={i} className={v.includes('差') ? 'seq-diag-warn' : 'seq-diag-ok'}>
+                        {v}
+                      </div>
+                    ))}
+                  </div>
+                )}
               </>
             )}
           </div>
@@ -1728,11 +1837,17 @@ export default function Editor() {
                   .some((k: any) => k.frame === i)
                 const wk = (track?.warpKeys || []).some((k: any) => k.frame === i)
                 // 序列帧轨道：标出这一帧取的是第几格，方便对照动作帧。
-                // 映射规则和后端一致：序列均匀铺满时间轴。
-                const seqCell = track?.seq
-                  ? Math.min(track.seq.count - 1,
-                      Math.floor(i * track.seq.count / (proj.frames || 1)))
-                  : -1
+                // 映射规则和后端 sequence.frame_index 完全一致：
+                // 段内格子均匀铺满时间轴（循环段之外的格子不参与）。
+                const seqCell = track?.seq ? (() => {
+                  const cnt = track.seq.count || 1
+                  const rr = track.seq.range
+                  const s0 = rr && rr.length >= 2 ? Math.max(0, Math.min(rr[0], cnt - 1)) : 0
+                  const s1 = rr && rr.length >= 2 ? Math.max(0, Math.min(rr[1], cnt - 1)) : cnt - 1
+                  const seg = Math.max(1, s1 - s0 + 1)
+                  const total = proj.frames || 1
+                  return s0 + Math.min(seg - 1, Math.floor(i * seg / total))
+                })() : -1
                 return (
                   <button key={i} className={`frame-cell ${i === frame ? 'on' : ''}`}
                           onClick={() => setFrame(i)}

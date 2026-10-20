@@ -102,6 +102,33 @@ def cut(sheet: Image.Image, seq: Dict[str, Any], index: int) -> Image.Image:
     return sheet.convert("RGBA").crop(boxes[index])
 
 
+def range_of(seq: Dict[str, Any], count: int) -> Tuple[int, int]:
+    """序列帧的循环段（闭区间）：[start, stop]。
+
+    为什么需要：工作流的 sprite-select 能在**资产级**取一段当循环
+    （「不插帧、不跳帧、不改时长」），但那要重跑一遍工作流。编辑器里
+    导入了 8 格动作表后，想只播第 2–6 格，不该为此回到工作流重来。
+
+    返回的区间一定落在 [0, count-1] 内，且 start <= stop
+    （给错值就退化成全播，而不是崩掉或播出空段）。
+    """
+    if count < 1:
+        return (0, 0)
+    r = seq.get("range")
+    if not isinstance(r, (list, tuple)) or len(r) < 2:
+        return (0, count - 1)
+    try:
+        start = int(r[0])
+        stop = int(r[1])
+    except (TypeError, ValueError):
+        return (0, count - 1)
+    start = max(0, min(start, count - 1))
+    stop = max(0, min(stop, count - 1))
+    if stop < start:
+        start, stop = stop, start
+    return (start, stop)
+
+
 def frame_index(seq: Dict[str, Any], frame: int, count: int,
                 total: Optional[int] = None) -> int:
     """帧号 → 格子序号。
@@ -116,20 +143,25 @@ def frame_index(seq: Dict[str, Any], frame: int, count: int,
       铺满则从 15 格里均匀取，画面真的变顺了。
 
     count == total 时就是 1:1 对应（最常见的情况，行为和取模一致）。
+
+    选了循环段（seq.range）时，**段内的格子**均匀铺满时间轴，段外不参与
+    —— 这就是「只播这一段当循环」。
     """
     if count < 1:
         return 0
+    start, stop = range_of(seq, count)
+    seg = stop - start + 1                       # 段内格子数
     if total is None or total < 1:
         # 没有总帧数时退回「每格一帧 + 循环」
         if seq.get("loop", True):
-            return int(frame) % count
-        return max(0, min(int(frame), count - 1))
-    idx = int(frame) * count // int(total)
-    idx = max(0, min(idx, count - 1))
+            return start + (int(frame) % seg)
+        return start + max(0, min(int(frame), seg - 1))
+    idx = int(frame) * seg // int(total)
+    idx = max(0, min(idx, seg - 1))
     if not seq.get("loop", True):
         # 不循环：一次性动作（受击 → 倒地），时间轴尾部停在最后一格
-        idx = min(idx, count - 1)
-    return idx
+        idx = min(idx, seg - 1)
+    return start + idx
 
 
 def inbetween(a: Image.Image, b: Image.Image, alpha: float) -> Image.Image:
@@ -295,6 +327,25 @@ def normalize_seq(v: Any, canvas: Tuple[int, int]) -> Optional[Dict[str, Any]]:
         "cellW": max(0, min(cw, 4096)),
         "cellH": max(0, min(ch, 4096)),
         "loop": bool(v.get("loop", True)),
+        # 循环段（闭区间，格子序号）：只播这一段。越界会在 frame_index
+        # 里被夹回合法范围，这里先夹一次免得存下垃圾值。
+        "range": _norm_range(v.get("range"), max(1, min(count, 4096))),
         # 插帧后的格子对应表：有它才能把扩展格子映射回源格
         "map": v.get("map") if isinstance(v.get("map"), list) else None,
     }
+
+
+def _norm_range(v: Any, count: int) -> List[int]:
+    """清洗循环段：必须是两个整数、start <= stop、都在 [0, count-1] 内。"""
+    if not isinstance(v, (list, tuple)) or len(v) < 2:
+        return [0, max(0, count - 1)]
+    try:
+        start = int(v[0])
+        stop = int(v[1])
+    except (TypeError, ValueError):
+        return [0, max(0, count - 1)]
+    start = max(0, min(start, count - 1))
+    stop = max(0, min(stop, count - 1))
+    if stop < start:
+        start, stop = stop, start
+    return [start, stop]

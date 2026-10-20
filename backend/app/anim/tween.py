@@ -136,6 +136,22 @@ def tween_raster(sheet, seq: Dict[str, Any], per_gap: int = 1
     new_seq["cellH"] = meta.get("cellH", seq.get("cellH", 0))
     new_seq["map"] = meta.get("map")
     new_seq["inbetween"] = {"perGap": per_gap, "method": meta.get("method", "flow")}
+    # 循环段要跟着重算：插帧把格子数从 N 变成 ~2N，旧的格号会指到别的格。
+    # 新表每一格都记着「源格序号」（meta.map[i].src），据此把起止格
+    # 映射到新编号。映射不到（源格被裁掉）就退回全播。
+    old_range = seq_mod.range_of(seq, int(seq.get("count") or 1))
+    cmap = meta.get("map") or []
+    new_start = new_stop = None
+    for i, m in enumerate(cmap):
+        src = int(m.get("src", -1)) if isinstance(m, dict) else -1
+        if src == old_range[0]:
+            new_start = i
+        if src == old_range[1]:
+            new_stop = i
+    if new_start is not None and new_stop is not None and new_stop >= new_start:
+        new_seq["range"] = [new_start, new_stop]
+    else:
+        new_seq["range"] = [0, max(0, int(new_seq["count"]) - 1)]
     return {"seq": new_seq, "added": meta.get("count", 0) - int(seq.get("count", 0)),
             "method": meta.get("method"), "sheet": _sheet2}
 
