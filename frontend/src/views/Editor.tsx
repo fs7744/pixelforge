@@ -329,6 +329,7 @@ export default function Editor() {
   const [brush, setBrush] = useState({ brush: 'slash', color: '#ffcc33', size: 14 })
   const [assets, setAssets] = useState<Asset[]>([])
   const [picker, setPicker] = useState(false)
+  const [groups, setGroups] = useState<any[] | null>(null)
   const [busy, setBusy] = useState(false)
   const [godotBusy, setGodotBusy] = useState(false)
   // 权重笔刷：视图数据来自后端（数学只有一处实现），这里只负责显示与写入 paint
@@ -548,6 +549,52 @@ export default function Editor() {
 
   /** 按名称自动绑轨：轨道名包含骨骼名（或反之）就绑上去。
    *  位置不可靠——轨道默认全绑在 root 上，「离 pivot 最近」这种启发式没有信息量。 */
+  /** 一键导入一组拆分件：每件一轨、每件一节骨骼、命名一致 → 自动绑好。
+   *  这是走查清单里那条「拆分件直接进编辑器」，前提是资产带 groupId；
+   *  老数据没有分组，会在界面上如实显示为散图。 */
+  const importGroup = async (g: any) => {
+    if (!proj) return
+    const stamp = Date.now().toString(36).slice(-4)
+    let added = 0
+    update((p) => {
+      const cw = p.canvas[0]
+      const baseY = Math.round(p.canvas[1] * 0.85)
+      const step = Math.max(24, Math.round(p.canvas[1] * 0.12))
+      let parent = p.bones[0]?.id
+      g.frames.forEach((f: any, i: number) => {
+        const bid = `s${stamp}${i}`
+        const bx = Math.round(cw * 0.5)
+        const by = baseY - i * step
+        const name = f.name || `件 ${i + 1}`
+        p.bones.push({ id: bid, name, parent, x: bx, y: by, len: step, keys: [] })
+        parent = bid
+        p.tracks.push({
+          id: `t${stamp}${i}`, name, assetId: f.id, bone: bid,
+          pivot: [Math.round(f.width / 2), f.height],
+          warp: Array(9).fill([0, 0]), warpKeys: [],
+          keyframes: [{ frame: 0, x: 0, y: 0, rot: 0, scale: 1, opacity: 1, ease: 'linear' }],
+          fx: [], opacity: 1, blend: 'normal', visible: true,
+        })
+        added++
+      })
+    })
+    setNote(`已导入 ${added} 件拆分：轨道、骨骼同名并自动绑定（沿画布中心向上排开）`)
+    if (added) setSelTrack(`t${stamp}0`)
+  }
+
+  const loadGroups = async () => {
+    try {
+      const r = await api.spriteGroups()
+      setGroups(r.groups || [])
+      setNote(r.loose
+        ? `找到 ${(r.groups || []).length} 组，另有 ${r.loose} 张旧拆分件没有分组信息（导入前加的），只能当散图用`
+        : `找到 ${(r.groups || []).length} 组拆分件`)
+    } catch (e: any) {
+      setError(e.message || '读取拆分件分组失败')
+      setGroups([])
+    }
+  }
+
   const autoBind = () => {
     if (!proj) return
     let bound = 0
@@ -1035,9 +1082,32 @@ export default function Editor() {
         })()}
 
         <div className="section-title" style={{ marginTop: 14 }}>轨道</div>
-        <button className="btn btn-ghost btn-block" onClick={() => setPicker((v) => !v)}>
-          {picker ? '收起素材' : '+ 从素材库添加'}
-        </button>
+        <div className="row" style={{ gap: 6 }}>
+          <button className="btn btn-ghost grow" onClick={() => setPicker((v) => !v)}>
+            {picker ? '收起素材' : '+ 从素材库添加'}
+          </button>
+          <button className="btn btn-ghost"
+                  onClick={() => { if (groups === null) loadGroups(); setPicker((v) => !v) }}>
+            导入拆分件
+          </button>
+        </div>
+        {picker && groups && (
+          <div className="editor-picker-groups">
+            {groups.length === 0 && <div className="hint">库里还没有拆分件；先去后处理跑一次「拆分表」</div>}
+            {groups.map((g) => (
+              <button key={g.groupId} className="group-row" onClick={() => importGroup(g)}>
+                <img src={api.assetThumb(g.frames[0]?.id || '', 96)} alt="" />
+                <span className="grow">
+                  <span className="grow">{g.name}</span>
+                  <span className="hint">
+                    {g.count} 件 · {g.frames[0]?.width}×{g.frames[0]?.height}
+                    {g.groupId.startsWith('__loose_') ? ' · 无分组信息' : ''}
+                  </span>
+                </span>
+              </button>
+            ))}
+          </div>
+        )}
         {picker && (
           <div className="editor-picker">
             {assets.slice(0, 60).map((a) => (

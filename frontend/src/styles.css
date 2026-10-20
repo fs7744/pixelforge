@@ -782,3 +782,9 @@ button, input, textarea, select { font-family: inherit; }
 .curve { display: block; background: #14141a; border: 1px solid var(--line); }
 .mk.warp { background: #00d0ff; }
 .panel-inset { border: 1px dashed var(--line); padding: 8px; margin-top: 8px; }
+.editor-picker-groups { display: flex; flex-direction: column; gap: 4px; margin: 6px 0; max-height: 210px; overflow-y: auto; }
+.group-row { display: flex; gap: 8px; align-items: center; padding: 4px; border: 1px solid var(--line);
+  background: transparent; color: var(--text); cursor: pointer; text-align: left; }
+.group-row:hover { border-color: var(--green); }
+.group-row img { width: 40px; height: 40px; object-fit: contain; background: #1a1a20; }
+.group-row .grow { display: flex; flex-direction: column; font-size: 12px; }

@@ -614,6 +614,10 @@ export const api = {
     setTimeout(() => URL.revokeObjectURL(url), 1000)
   },
 
+  /** 拆分件分组（按 meta.groupId 归组） */
+  spriteGroups: (pipeline = 'sheet-split'): Promise<any> =>
+    fetch(`/api/sprite/groups?pipeline=${encodeURIComponent(pipeline)}`).then(json),
+
   /** 权重可视化：顶点静止位 + 每骨骼最终权重（数学只在后端算一份） */
   animWeights: (id: string, trackId: string, frame: number): Promise<any> => {
     const q = new URLSearchParams({ track: trackId, frame: String(frame) })

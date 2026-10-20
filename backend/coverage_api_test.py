@@ -302,6 +302,19 @@ if r.status_code == 200:
           f"{frames[0]['width']}x{frames[0]['height']}")
     check("index 记录 16 项", len(r.json()["index"]["frames"]) == 16)
 
+# 拆分件分组：groupId / cell 写进 meta，编辑器才能把「同一套部件」认出来。
+# 之前 meta 只有 {pipeline, index}，172 张拆分件在下游看是 172 张散图。
+_gid = r.json().get("groupId") if r.status_code == 200 else None
+_fm = (frames[0].get("meta") or {}) if frames else {}
+check("拆分件带 groupId/cell（分组的前提）",
+      bool(_gid) and _fm.get("groupId") == _gid and bool(_fm.get("cell")),
+      str(_fm)[:120])
+_gr = client.get("/api/sprite/groups")
+_gj = _gr.json() if _gr.status_code == 200 else {}
+_hit = next((g for g in _gj.get("groups") or [] if g.get("groupId") == _gid), None)
+check("拆分件分组端点", _gr.status_code == 200 and bool(_hit) and _hit["count"] == 16,
+      str([(g.get("groupId"), g.get("count")) for g in _gj.get("groups", [])][:4]))
+
 # 精灵表拆分默认只切不去背；matte=true 时逐帧清掉键色。
 # 绿幕 + 深色主体：拆完四角应透明，主体完整。
 matte_sheet = Image.new("RGB", (64, 64), (0, 255, 0))

@@ -9,6 +9,7 @@ import asyncio
 import io
 import json
 import urllib.parse
+import uuid
 import zipfile
 from contextlib import asynccontextmanager
 from typing import Any, Dict, List, Optional
@@ -501,6 +502,7 @@ async def pipeline_sheet_split(
     # 默认关，避免改变既有调用方的行为。
     matte: bool = Form(False),
     tolerance: int = Form(80),
+    refAssetId: str = Form(""),
 ):
     img = await _read_image(file)
 
@@ -516,11 +518,52 @@ async def pipeline_sheet_split(
         return frames, meta
 
     frames, meta = await run_in_threadpool(_split)
+    # 每次拆分给一个 groupId，并把格子位置写进 meta。
+    # 之前 meta 只有 {pipeline, index}，结果库里 172 张拆分件在下游看是
+    # 「172 张互不相关的图」——动画编辑器没法判断哪些是同一套部件。
+    group_id = uuid.uuid4().hex[:12]
+    grid = meta.get("grid") or {}
+    cells = meta.get("frames") or []
     items = [
-        storage.save_asset(f, kind="frame", name=f"frame-{i:02d}", meta={"pipeline": "sheet-split", "index": i})
+        storage.save_asset(
+            f, kind="frame", name=f"frame-{i:02d}",
+            meta={"pipeline": "sheet-split", "groupId": group_id, "index": i,
+                  "cell": cells[i] if i < len(cells) else None,
+                  "grid": grid, "sourceId": refAssetId or ""})
         for i, f in enumerate(frames)
     ]
-    return {"frames": items, "index": meta}
+    return {"frames": items, "index": meta, "groupId": group_id}
+
+
+@app.get("/api/sprite/groups")
+async def sprite_groups(pipeline: str = "sheet-split", limit: int = 30):
+    """拆分件分组：按 meta.groupId 归组，供编辑器「一键导入拆分件」用。
+
+    没有 groupId 的旧数据（拆分接口加这个字段之前产生的）会各自成组，
+    也就是仍然退化成「一堆散图」——这是事实，不猜。
+    """
+    items = storage.list_assets()
+    groups: Dict[str, Dict[str, Any]] = {}
+    for it in items:
+        if (it.get("meta") or {}).get("pipeline") != pipeline:
+            continue
+        gid = (it.get("meta") or {}).get("groupId") or f"__loose_{it['id']}"
+        g = groups.setdefault(gid, {"groupId": gid, "pipeline": pipeline, "frames": [],
+                                    "grid": (it.get("meta") or {}).get("grid") or {}})
+        g["frames"].append({"id": it["id"], "name": it["name"],
+                            "width": it["width"], "height": it["height"],
+                            "index": (it.get("meta") or {}).get("index", 0)})
+    out = []
+    for g in groups.values():
+        g["frames"].sort(key=lambda f: f["index"])
+        g["count"] = len(g["frames"])
+        g["name"] = (g["frames"][0]["name"] if g["count"] == 1
+                     else f"{g['count']} 件拆分")
+        out.append(g)
+    out.sort(key=lambda g: -g["count"])
+    return {"groups": out[:max(1, min(limit, 100))],
+            "loose": sum(1 for g in groups.values()
+                         if g["groupId"].startswith("__loose_"))}
 
 
 @app.post("/api/pipeline/sheet/compose")
