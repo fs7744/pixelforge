@@ -1945,6 +1945,26 @@ check("蒙皮轨道带烘焙网格",
       and len(_gdata["tracks"][0]["mesh"]["uv"]) == 7 * 7,
       str(_gdata["tracks"][0].get("mesh", {}).get("uv"))[:80])
 
+# 版本快照：保存前给旧内容留档，可列出可恢复
+_s1 = client.put(f"/api/anim/projects/{_pid}", json=_saved).json()
+_saved["tracks"][0]["keyframes"].append({"frame": 1, "x": 33})
+_s2 = client.put(f"/api/anim/projects/{_pid}", json=_saved).json()
+_sn = client.get(f"/api/anim/projects/{_pid}/snapshots")
+_snj = _sn.json() if _sn.status_code == 200 else {}
+_slist = _snj.get("snapshots") or []
+check("版本快照：保存后有历史", _sn.status_code == 200 and len(_slist) >= 1,
+      f"{len(_slist)} 份")
+_sid = _slist[0]["id"] if _slist else ""
+_rr = client.post(f"/api/anim/projects/{_pid}/snapshots/{_sid}/restore")
+_rj = _rr.json() if _rr.status_code == 200 else {}
+# 恢复后应回到「保存前」的样子：多出来的那个关键帧没了
+_kf_before = len(_saved["tracks"][0]["keyframes"]) - 1   # append 之前
+_kf_after = len(((_rj.get("tracks") or [{}])[0] or {}).get("keyframes") or [])
+check("恢复快照：回到旧内容", _rr.status_code == 200 and _kf_after == _kf_before,
+      f"恢复后 {_kf_after} 个，应为 {_kf_before}")
+check("恢复不存在的快照 → 404",
+      client.post(f"/api/anim/projects/{_pid}/snapshots/nope-nope/restore").status_code == 404)
+
 check("删除工程", client.delete(f"/api/anim/projects/{_pid}").status_code == 200)
 check("删除后再取 → 404", client.get(f"/api/anim/projects/{_pid}").status_code == 404)
 

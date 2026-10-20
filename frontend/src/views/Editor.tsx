@@ -317,6 +317,14 @@ export default function Editor() {
   const [projects, setProjects] = useState<any[]>([])
   const [pid, setPid] = useState('')
   const [proj, setProj] = useState<any>(null)
+  // 撤销栈：每次「有意义的改动」前的工程快照。
+  // 撤销/重做跟撤销栈一起放，因为它们是同一件事的两面。
+  const pastRef = useRef<any[]>([])
+  const futureRef = useRef<any[]>([])
+  const [histState, setHistState] = useState({ canUndo: false, canRedo: false })
+  // 版本历史（服务端留的，刷新页面也不丢）
+  const [snaps, setSnaps] = useState<any[]>([])
+  const [snapOpen, setSnapOpen] = useState(false)
   const [frame, setFrame] = useState(0)
   const [playing, setPlaying] = useState(false)
   const [onion, setOnion] = useState(true)
@@ -374,11 +382,50 @@ export default function Editor() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [pid])
 
+  // 切换工程时清空撤销栈：栈里存的是上一个工程的快照，
+  // 不清的话按 Ctrl+Z 会把别的工程的内容撤销进来。
+  const resetHistory = () => {
+    pastRef.current = []
+    futureRef.current = []
+    lastLabelRef.current = { label: '', at: 0 }
+    labelRef.current = ''
+    setHistState({ canUndo: false, canRedo: false })
+  }
+
+  const loadSnaps = async (id: string) => {
+    try {
+      const r = await api.animSnapshots(id)
+      setSnaps(r.snapshots || [])
+    } catch {
+      setSnaps([])
+    }
+  }
+
+  const restoreSnap = async (snapId: string) => {
+    if (!pid) return
+    try {
+      const p = await api.animRestoreSnapshot(pid, snapId)
+      resetHistory()
+      setProj(p)
+      setFrame(0)
+      setSelTrack(p.tracks?.[0]?.id || '')
+      setSelBone(p.bones?.[0]?.id || 'root')
+      dirtyRef.current = false
+      setBump((b) => b + 1)
+      await loadSnaps(pid)
+      setNote('已恢复到这个版本（恢复前的样子也存了一份，可以再退回来）')
+    } catch (e: any) {
+      setError(e.message || '恢复失败')
+    }
+  }
+
   const openProject = async (id: string) => {
     setPid(id)
     setPlaying(false)
     const p = await api.animGet(id)
+    resetHistory()
     setProj(p)
+    loadSnaps(id)
     setSize([p.canvas[0], p.canvas[1]])
     setFrame(0)
     setSelTrack(p.tracks?.[0]?.id || '')
@@ -414,7 +461,29 @@ export default function Editor() {
     }, 400)
   }, [proj, pid])
 
-  const update = (fn: (p: any) => void) => {
+  // 合并窗口：同 label 的连续改动（比如拖一根骨骼）算**一步**，
+  // 而不是每帧鼠标移动都压一次栈（那样 Ctrl+Z 一下只退一像素）。
+  const MERGE_MS = 700
+  const lastLabelRef = useRef<{ label: string; at: number }>({ label: '', at: 0 })
+  const labelRef = useRef<string>('')
+
+  const pushHistory = (snapshot: any, label: string) => {
+    const now = Date.now()
+    const last = lastLabelRef.current
+    const merge = last.label === label && now - last.at < MERGE_MS
+    if (!merge) {
+      pastRef.current = [...pastRef.current, snapshot].slice(-60)
+    }
+    futureRef.current = []
+    lastLabelRef.current = { label, at: now }
+    setHistState({ canUndo: pastRef.current.length > 0, canRedo: false })
+  }
+
+  const update = (fn: (p: any) => void, label?: string) => {
+    // 显式标签优先；没给就用「上一个标签 + 合并窗口」——
+    // 拖动这类连续操作靠这个合并成一步
+    const lab = label || labelRef.current || '编辑'
+    labelRef.current = lab
     setProj((prev: any) => {
       if (!prev) return prev
       const next = JSON.parse(JSON.stringify(prev))
@@ -423,6 +492,71 @@ export default function Editor() {
       return next
     })
   }
+
+  // 撤销栈需要在 setProj 之外维护：React 的状态更新是异步的，
+  // 在 updater 里 push 会因为 StrictMode 双调用而多压一份。
+  // 所以这里用「上一份 proj」做快照源。
+  const commit = (fn: (p: any) => void, label = '编辑') => {
+    if (!proj) return
+    pushHistory(JSON.parse(JSON.stringify(proj)), label)
+    update(fn, label)
+  }
+
+  // 拖动类操作在**开始时**压一次快照（这时才知道用户要拖什么），
+  // 过程里的每次 move 只改状态不压栈——否则一次拖动会塞进几十份快照。
+  const beginDrag = (label: string) => {
+    if (!proj) return
+    pushHistory(JSON.parse(JSON.stringify(proj)), label)
+  }
+
+  const undo = () => {
+    const stack = pastRef.current
+    if (!stack.length || !proj) return
+    const prev = stack[stack.length - 1]
+    pastRef.current = stack.slice(0, -1)
+    futureRef.current = [...futureRef.current, JSON.parse(JSON.stringify(proj))]
+    lastLabelRef.current = { label: '', at: 0 }
+    setProj(prev)
+    dirtyRef.current = true
+    setBump((b) => b + 1)
+    setHistState({ canUndo: pastRef.current.length > 0, canRedo: true })
+    setNote('已撤销')
+  }
+
+  const redo = () => {
+    const stack = futureRef.current
+    if (!stack.length || !proj) return
+    const next = stack[stack.length - 1]
+    futureRef.current = stack.slice(0, -1)
+    pastRef.current = [...pastRef.current, JSON.parse(JSON.stringify(proj))]
+    lastLabelRef.current = { label: '', at: 0 }
+    setProj(next)
+    dirtyRef.current = true
+    setBump((b) => b + 1)
+    setHistState({ canUndo: true, canRedo: futureRef.current.length > 0 })
+    setNote('已重做')
+  }
+
+  // 撤销/重做快捷键：Ctrl+Z / Ctrl+Shift+Z / Ctrl+Y。
+  // 输入框里不拦（那里的 Ctrl+Z 应该是撤销文字，不是撤销整个工程）。
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      const t = e.target as HTMLElement
+      if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA'
+        || t.tagName === 'SELECT' || t.isContentEditable)) return
+      if (!(e.ctrlKey || e.metaKey)) return
+      const k = e.key.toLowerCase()
+      if (k === 'z' && !e.shiftKey) {
+        e.preventDefault()
+        undo()
+      } else if ((k === 'z' && e.shiftKey) || k === 'y') {
+        e.preventDefault()
+        redo()
+      }
+    }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  })
 
   // ---------- 播放 ----------
   useEffect(() => {
@@ -459,7 +593,7 @@ export default function Editor() {
 
   // ---------- 关键帧编辑 ----------
   const upsertKey = (target: 'track' | 'bone', patch: Record<string, number>) => {
-    update((p) => {
+    commit((p) => {
       const obj = target === 'track'
         ? p.tracks.find((t: any) => t.id === selTrack)
         : p.bones.find((b: any) => b.id === selBone)
@@ -474,7 +608,7 @@ export default function Editor() {
       }
       Object.assign(k, patch)
       obj[key].sort((a: any, b: any) => a.frame - b.frame)
-    })
+    }, target === 'track' ? '加/改轨道关键帧' : '加/改骨骼关键帧')
   }
 
   const upsertIk = (ikId: string, x: number, y: number) => {
@@ -673,7 +807,7 @@ export default function Editor() {
 
   const addWarpKey = () => {
     if (!track) return
-    update((p) => {
+    commit((p) => {
       const t = p.tracks.find((v: any) => v.id === track.id)
       if (!t) return
       t.warpKeys = t.warpKeys || []
@@ -682,24 +816,24 @@ export default function Editor() {
       if (exist) exist.warp = warp
       else t.warpKeys.push({ frame, warp, ease: 'linear', bez: null })
       t.warpKeys.sort((a: any, b: any) => a.frame - b.frame)
-    })
+    }, '加变形关键帧')
     setMode('warp')
   }
 
   const deleteWarpKey = () => {
     if (!track) return
-    update((p) => {
+    commit((p) => {
       const t = p.tracks.find((v: any) => v.id === track.id)
       if (!t) return
       t.warpKeys = (t.warpKeys || []).filter((v: any) => v.frame !== frame)
-    })
+    }, '删变形关键帧')
   }
 
   const deleteKey = () => {
-    update((p) => {
+    commit((p) => {
       const obj = p.tracks.find((t: any) => t.id === selTrack)
       if (obj) obj.keyframes = (obj.keyframes || []).filter((k: any) => k.frame !== frame)
-    })
+    }, '删轨道关键帧')
   }
 
   // ---------- 拖拽 ----------
@@ -718,11 +852,13 @@ export default function Editor() {
       })
       if (bestD < 18 / zoom) {
         dragRef.current = { kind: 'weight', idx: best, g }
+        beginDrag('刷权重')
       }
       return
     }
     if (mode === 'brush' && track) {
       dragRef.current = { kind: 'brush', points: [[x, y, 1]] as number[][] }
+      beginDrag('画特效笔迹')
       return
     }
     if (mode === 'warp' && track) {
@@ -738,6 +874,7 @@ export default function Editor() {
       if (bestD < 18 / zoom) {
         dragRef.current = { kind: 'warp', index: best, start: [x, y],
           base: (track.warp || Array(9).fill([0, 0])).map((p: number[]) => [...p]) }
+        beginDrag('调整变形网格')
       }
       return
     }
@@ -746,6 +883,7 @@ export default function Editor() {
         if (ik.id === selIk && ik.pole
             && Math.hypot(ik.pole[0] - x, ik.pole[1] - y) < 16 / zoom) {
           dragRef.current = { kind: 'pole', id: ik.id }
+          beginDrag('移动极向目标')
           return
         }
       }
@@ -753,6 +891,7 @@ export default function Editor() {
         const k = sample(ik.keys || [], frame)
         if (Math.hypot(k.x - x, k.y - y) < 16 / zoom) {
           dragRef.current = { kind: 'ik', id: ik.id }
+          beginDrag('移动 IK 目标')
           return
         }
       }
@@ -761,6 +900,7 @@ export default function Editor() {
         const [bx, by] = apply(w, 0, 0)
         if (Math.hypot(bx - x, by - y) < 26 / zoom) {
           dragRef.current = { kind: 'bone', start: [x, y] }
+          beginDrag('移动骨骼')
         }
       }
       return
@@ -923,7 +1063,7 @@ export default function Editor() {
     setNote(`已添加轨道：${a.name}（pivot 落在底部中心）${hint}`)
     // id 先算好：写在 setState 更新函数里的话，React 严格模式重放会生成两个 id
     const tid = Math.random().toString(16).slice(2, 10)
-    update((p) => {
+    commit((p) => {
       p.tracks = p.tracks || []
       p.tracks.push({
         id: tid,
@@ -1039,6 +1179,39 @@ export default function Editor() {
           ))}
           {!projects.length && <span className="hint">还没有工程</span>}
         </div>
+        {pid && (
+          <>
+            <div className="row" style={{ gap: 6, marginTop: 6 }}>
+              <button className="btn btn-ghost btn-block" onClick={() => {
+                setSnapOpen((v) => !v)
+                if (!snapOpen) loadSnaps(pid)
+              }}>
+                {snapOpen ? '收起版本历史' : `版本历史${snaps.length ? `（${snaps.length}）` : ''}`}
+              </button>
+            </div>
+            {snapOpen && (
+              <div className="editor-picker-groups" style={{ maxHeight: 160 }}>
+                {!snaps.length && (
+                  <div className="hint">还没有历史版本。改动并保存后会自动留一份。</div>
+                )}
+                {snaps.map((s2) => (
+                  <button key={s2.id} className="group-row"
+                          onClick={() => restoreSnap(s2.id)}>
+                    <span className="grow">
+                      <span className="grow">
+                        {s2.tracks} 轨 / {s2.bones} 骨
+                      </span>
+                      <span className="hint">
+                        {s2.at ? new Date(s2.at * 1000).toLocaleString('zh-CN') : '未知时间'}
+                        · 点击恢复
+                      </span>
+                    </span>
+                  </button>
+                ))}
+              </div>
+            )}
+          </>
+        )}
 
         <div className="section-title" style={{ marginTop: 14 }}>骨骼</div>
         <div className="chips">
@@ -1050,7 +1223,7 @@ export default function Editor() {
           ))}
           {proj && (
             <>
-            <button className="chip" onClick={() => update((p) => {
+            <button className="chip" onClick={() => commit((p) => {
               const id = `b${p.bones.length + 1}`
               const parent = p.bones.find((x: any) => x.id === selBone) || p.bones[0]
               p.bones.push({ id, name: `骨骼 ${p.bones.length}`, parent: parent?.id || null,
@@ -1219,6 +1392,10 @@ export default function Editor() {
                   onChange={(e) => setZoom(+e.target.value)}>
             {[0.5, 0.75, 1, 1.5, 2].map((z) => <option key={z} value={z}>{Math.round(z * 100)}%</option>)}
           </select>
+          <div className="seg" title="撤销 / 重做（Ctrl+Z / Ctrl+Shift+Z）">
+            <button disabled={!histState.canUndo} onClick={undo}>撤销</button>
+            <button disabled={!histState.canRedo} onClick={redo}>重做</button>
+          </div>
           <button className="btn" disabled={busy || !pid} onClick={doExport}>
             {busy ? '导出中…' : '导出 ZIP（含法线）'}
           </button>
@@ -1474,15 +1651,15 @@ export default function Editor() {
             <>
               <div className="label" style={{ marginTop: 12 }}>骨骼名称</div>
               <input className="input" value={b.name}
-                     onChange={(e) => update((p) => {
+                     onChange={(e) => commit((p) => {
                        const x = p.bones.find((v: any) => v.id === selBone)
                        if (x) x.name = e.target.value
-                     })} />
+                     }, '改骨骼名')} />
               <div className="label" style={{ marginTop: 8 }}>父骨骼</div>
               <select className="input" value={b.parent || ''}
                       onChange={(e) => {
                         const want = e.target.value || null
-                        update((p) => {
+                        commit((p) => {
                           const x = p.bones.find((v: any) => v.id === selBone)
                           if (!x) return
                           // 不能挂到自己或自己的后代上——那会成环，
@@ -1539,7 +1716,7 @@ export default function Editor() {
           const prev = [...list].filter((k: any) => k.frame < dest.frame).pop()
           if (!prev) return null
           const bez = dest.bez || [0.42, 0, 0.58, 1]
-          const setBez = (b: number[] | null) => update((p) => {
+          const setBez = (b: number[] | null) => commit((p) => {
             let arr: any[] = []
             if (owner.id === 'track') {
               arr = p.tracks.find((x: any) => x.id === selTrack)?.keyframes || []
@@ -1754,7 +1931,7 @@ export default function Editor() {
                       t.warp = Array(9).fill([0, 0])
                     })}>重置变形</button>
             <button className="btn btn-ghost btn-block" style={{ marginTop: 6 }}
-                    onClick={() => update((p) => {
+                    onClick={() => commit((p) => {
                       p.tracks = p.tracks.filter((v: any) => v.id !== track.id)
                       setSelTrack('')
                     })}>删除轨道</button>

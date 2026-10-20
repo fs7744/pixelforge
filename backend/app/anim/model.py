@@ -102,6 +102,109 @@ def get(pid: str) -> Optional[Dict[str, Any]]:
     return json.loads(p.read_text(encoding="utf-8"))
 
 
+# ---------- 版本快照 ----------
+#
+# 前端的撤销栈只在本页有效（刷新就没了），所以服务端也要留历史：
+# 每次保存前把**旧内容**归档一份，保留最近 SNAPSHOT_KEEP 份。
+# 用户手滑删掉轨道、或者改坏了才发现时，可以回到之前的版本。
+SNAPSHOT_KEEP = 20
+# 放在 anim 目录**外面**：list_projects 用 ANIM_DIR.glob("*.json") 遍历工程，
+# 快照混在里面容易让人以为「那些也是工程」。独立目录更干净。
+SNAPSHOT_DIR = DATA_DIR / "anim_snapshots"
+
+
+def _snapshot_dir(pid: str) -> Path:
+    if not _ID_RE.match(pid or ""):
+        raise ValueError(f"非法工程 id：{pid!r}")
+    return SNAPSHOT_DIR / pid
+
+
+def snapshot(proj: Dict[str, Any]) -> Optional[str]:
+    """把当前工程内容归档成一份快照，返回快照 id（无内容则 None）。"""
+    pid = proj.get("id")
+    if not pid or not _ID_RE.match(str(pid)):
+        return None
+    p = _path(str(pid))
+    if not p.is_file():
+        return None
+    try:
+        d = SNAPSHOT_DIR / str(pid)
+        d.mkdir(parents=True, exist_ok=True)
+        snap_id = f"{int(time.time())}-{uuid.uuid4().hex[:6]}"
+        (d / f"{snap_id}.json").write_text(p.read_text(encoding="utf-8"), encoding="utf-8")
+        # 只留最近 N 份，多了删最老的
+        files = sorted(d.glob("*.json"), key=lambda x: x.name, reverse=True)
+        for old in files[SNAPSHOT_KEEP:]:
+            try:
+                old.unlink()
+            except OSError:
+                pass
+        return snap_id
+    except Exception:
+        return None
+
+
+def list_snapshots(pid: str) -> List[Dict[str, Any]]:
+    """列出快照（新的在前）。"""
+    try:
+        d = _snapshot_dir(pid)
+    except ValueError:
+        return []
+    if not d.is_dir():
+        return []
+    out = []
+    for f in sorted(d.glob("*.json"), key=lambda x: x.name, reverse=True):
+        try:
+            data = json.loads(f.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        out.append({"id": f.stem, "at": int(data.get("updatedAt") or 0),
+                    "name": data.get("name") or "",
+                    "tracks": len(data.get("tracks") or []),
+                    "bones": len(data.get("bones") or [])})
+    return out
+
+
+def restore_snapshot(pid: str, snap_id: str) -> Optional[Dict[str, Any]]:
+    """把某个快照恢复成当前工程（恢复前先给现状也存一份快照，可再退回去）。"""
+    if not _ID_RE.match(pid or "") or not re.match(r"^[0-9a-z-]{4,40}$", snap_id or ""):
+        return None
+    f = SNAPSHOT_DIR / pid / f"{snap_id}.json"
+    if not f.is_file():
+        return None
+    try:
+        data = json.loads(f.read_text(encoding="utf-8"))
+    except Exception:
+        return None
+    if not isinstance(data, dict) or data.get("id") != pid:
+        return None
+    cur = get(pid)
+    if cur:
+        snapshot(cur)          # 现状也留一份，恢复了还能退回来
+    return save(data)
+
+
+def delete_snapshots(pid: str) -> int:
+    """删掉某工程的所有快照（工程删除时一并调用）。"""
+    try:
+        d = _snapshot_dir(pid)
+    except ValueError:
+        return 0
+    n = 0
+    if d.is_dir():
+        for f in d.glob("*.json"):
+            try:
+                f.unlink()
+                n += 1
+            except OSError:
+                pass
+        try:
+            d.rmdir()
+        except OSError:
+            pass
+    return n
+
+
 def save(proj: Dict[str, Any]) -> Dict[str, Any]:
     ensure_dir()
     proj["updatedAt"] = int(time.time())

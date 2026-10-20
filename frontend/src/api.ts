@@ -637,6 +637,15 @@ export const api = {
   spriteGroups: (pipeline = 'sheet-split'): Promise<any> =>
     fetch(`/api/sprite/groups?pipeline=${encodeURIComponent(pipeline)}`).then(json),
 
+  /** 版本快照列表（服务端留的历史，刷新页面也不丢） */
+  animSnapshots: (id: string): Promise<{ snapshots: any[] }> =>
+    fetch(`/api/anim/projects/${id}/snapshots`).then(json),
+
+  /** 恢复某个快照 */
+  animRestoreSnapshot: (id: string, snapId: string): Promise<any> =>
+    fetch(`/api/anim/projects/${id}/snapshots/${snapId}/restore`, { method: 'POST' })
+      .then(json),
+
   /** 权重可视化：顶点静止位 + 每骨骼最终权重（数学只在后端算一份） */
   animWeights: (id: string, trackId: string, frame: number): Promise<any> => {
     const q = new URLSearchParams({ track: trackId, frame: String(frame) })

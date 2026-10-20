@@ -1674,6 +1674,10 @@ async def anim_project_save(pid: str, payload: Dict[str, Any]):
         proj = anim_model.normalize(payload)
     except Exception as e:
         raise HTTPException(400, f"工程数据不合法：{e}")
+    # 存快照的是**旧内容**（保存前的版本），这样恢复回去就是「撤销这次保存」
+    old = anim_model.get(pid)
+    if old:
+        anim_model.snapshot(old)
     return anim_model.save(proj)
 
 
@@ -1683,7 +1687,32 @@ async def anim_project_delete(pid: str):
 
     if not anim_model.delete(pid):
         raise HTTPException(404, "工程不存在")
+    anim_model.delete_snapshots(pid)
     return {"ok": True}
+
+
+@app.get("/api/anim/projects/{pid}/snapshots")
+async def anim_snapshots(pid: str):
+    """版本快照列表（新的在前）。前端撤销栈只在本页有效，刷新就没了，
+    这份历史留在服务端。"""
+    from .anim import model as anim_model
+
+    if not anim_model.get(pid):
+        raise HTTPException(404, "工程不存在")
+    return {"snapshots": anim_model.list_snapshots(pid)}
+
+
+@app.post("/api/anim/projects/{pid}/snapshots/{snap_id}/restore")
+async def anim_restore_snapshot(pid: str, snap_id: str):
+    """恢复某个快照（恢复前也会给现状存一份，所以还能再退回来）。"""
+    from .anim import model as anim_model
+
+    if not anim_model.get(pid):
+        raise HTTPException(404, "工程不存在")
+    proj = anim_model.restore_snapshot(pid, snap_id)
+    if proj is None:
+        raise HTTPException(404, "快照不存在")
+    return proj
 
 
 @app.get("/api/anim/projects/{pid}/frame/{index}.png")
