@@ -535,30 +535,87 @@ async def pipeline_sheet_split(
     return {"frames": items, "index": meta, "groupId": group_id}
 
 
+@app.post("/api/pipeline/parts")
+async def pipeline_parts(
+    file: Optional[UploadFile] = File(None),
+    tag: UploadFile = File(...),
+    refAssetId: str = Form(""),
+    parts: str = Form("[]"),
+    tolerance: int = Form(40),
+):
+    """角色部件拆分：角色图 + 色标图 → 若干 RGBA 部件（进素材库，带 groupId）。
+
+    色标图由前端在角色图上直接涂（每种部位一个纯色），服务端只按颜色裁切。
+    产物 meta 带 groupId/partName，动画编辑器「导入拆分件」可直接识别。
+    """
+    from .pipelines import parts as parts_pipe
+
+    if file is not None:
+        art = (await _read_image(file)).convert("RGBA")
+    elif refAssetId:
+        art = _load_asset_image(refAssetId).convert("RGBA")
+    else:
+        raise HTTPException(400, "需要角色图（file 或 refAssetId）")
+    tag_img = (await _read_image(tag)).convert("RGB")
+    try:
+        plist = json.loads(parts or "[]")
+    except Exception:
+        raise HTTPException(400, "parts 不是合法 JSON")
+    if not isinstance(plist, list) or not plist:
+        raise HTTPException(400, "至少要指定一个部位")
+
+    def _run():
+        return parts_pipe.split_parts(art, tag_img, plist, tolerance)
+
+    results = await run_in_threadpool(_run)
+    group_id = uuid.uuid4().hex[:12]
+    items = []
+    for i, (name, img) in enumerate(results):
+        cov = parts_pipe.coverage(name, img)
+        if cov <= 0:
+            items.append({"name": name, "empty": True, "coverage": 0.0})
+            continue
+        item = storage.save_asset(
+            img, kind="frame", name=f"part-{i:02d}-{name}",
+            meta={"pipeline": "parts", "groupId": group_id, "partName": name,
+                  "partId": str(plist[i].get("id") or i), "index": i,
+                  "sourceId": refAssetId, "coverage": round(cov, 5)})
+        items.append({"name": name, "empty": False, "coverage": round(cov, 5),
+                      "asset": item})
+    return {"parts": items, "groupId": group_id}
+
+
 @app.get("/api/sprite/groups")
-async def sprite_groups(pipeline: str = "sheet-split", limit: int = 30):
+async def sprite_groups(pipeline: str = "sheet-split,parts", limit: int = 30):
     """拆分件分组：按 meta.groupId 归组，供编辑器「一键导入拆分件」用。
 
     没有 groupId 的旧数据（拆分接口加这个字段之前产生的）会各自成组，
     也就是仍然退化成「一堆散图」——这是事实，不猜。
     """
+    wanted = {p.strip() for p in (pipeline or "").split(",") if p.strip()}
     items = storage.list_assets()
     groups: Dict[str, Dict[str, Any]] = {}
     for it in items:
-        if (it.get("meta") or {}).get("pipeline") != pipeline:
+        pl = (it.get("meta") or {}).get("pipeline")
+        if pl not in wanted:
             continue
         gid = (it.get("meta") or {}).get("groupId") or f"__loose_{it['id']}"
-        g = groups.setdefault(gid, {"groupId": gid, "pipeline": pipeline, "frames": [],
+        g = groups.setdefault(gid, {"groupId": gid, "pipeline": pl, "frames": [],
                                     "grid": (it.get("meta") or {}).get("grid") or {}})
         g["frames"].append({"id": it["id"], "name": it["name"],
+                            # 部件组用 partName（头/身体/左臂）而不是资产名 part-00-头
+                            "partName": (it.get("meta") or {}).get("partName") or "",
                             "width": it["width"], "height": it["height"],
                             "index": (it.get("meta") or {}).get("index", 0)})
     out = []
     for g in groups.values():
         g["frames"].sort(key=lambda f: f["index"])
         g["count"] = len(g["frames"])
-        g["name"] = (g["frames"][0]["name"] if g["count"] == 1
-                     else f"{g['count']} 件拆分")
+        # 部件组用部位名（头/身体/左臂…）当标题，一眼能认出这是什么角色
+        names = [(f.get("partName") or f["name"]) for f in g["frames"]][:4]
+        g["name"] = (" · ".join(names) if g["pipeline"] == "parts" and names
+                     else (g["frames"][0]["name"] if g["count"] == 1
+                           else f"{g['count']} 件拆分"))
         out.append(g)
     out.sort(key=lambda g: -g["count"])
     return {"groups": out[:max(1, min(limit, 100))],

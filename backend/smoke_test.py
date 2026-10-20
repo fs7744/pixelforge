@@ -576,6 +576,45 @@ async def main() -> None:
     assert moved > 20, f"刷过的顶点应被 b2 带走，实际最大位移 {moved:.1f}px"
     print(f"[9m] paint   → 6 个顶点刷给 b2，最大位移 {moved:.1f}px OK")
 
+    # 部件拆分：角色图 + 色标图 → 按颜色裁出的 RGBA 部件
+    from backend.app.pipelines import parts as parts_pipe
+
+    art = Image.new("RGBA", (64, 64), (0, 0, 0, 0))
+    da = ImageDraw.Draw(art)
+    da.ellipse((24, 4, 40, 20), fill=(240, 200, 180, 255))     # 头
+    da.rectangle((22, 22, 42, 50), fill=(80, 120, 200, 255))    # 身体
+    da.rectangle((44, 24, 58, 34), fill=(200, 80, 60, 255))     # 右臂
+    tag = Image.new("RGB", (64, 64), (0, 0, 0))
+    dtag = ImageDraw.Draw(tag)
+    dtag.ellipse((24, 4, 40, 20), fill=(255, 0, 0))
+    dtag.rectangle((22, 22, 42, 50), fill=(0, 255, 0))
+    dtag.rectangle((44, 24, 58, 34), fill=(0, 0, 255))
+    got = parts_pipe.split_parts(art, tag, [
+        {"id": "head", "name": "头", "color": "#ff0000"},
+        {"id": "body", "name": "身体", "color": "#00ff00"},
+        {"id": "arm", "name": "右臂", "color": "#0000ff"},
+    ])
+    assert [n for n, _ in got] == ["头", "身体", "右臂"], [n for n, _ in got]
+    head_arr = np.asarray(got[0][1])
+    assert head_arr[..., 3].max() > 0
+    # 头的部件里不该出现身体的蓝色像素（颜色裁切串色）
+    vis = head_arr[..., 3] > 8
+    body_leak = int((((head_arr[..., 2] > 150) & (head_arr[..., 0] < 120)) & vis).sum())
+    assert body_leak == 0, f"头部件混进了 {body_leak} 个身体像素"
+    cov = parts_pipe.coverage("头", got[0][1])
+    assert 0.01 < cov < 0.2, cov
+    # 没涂到的部位返回空图而不是报错
+    none = parts_pipe.split_parts(art, tag, [{"id": "tail", "name": "尾巴", "color": "#ffff00"}])[0][1]
+    assert none.getbbox() is None
+    print(f"[9n] parts   → 头/身体/右臂 分色正确（头占比 {cov * 100:.1f}%，未涂部位为空）OK")
+
+    # 颜色距离不能出 NaN：int16 算平方差会溢出回绕成负数，sqrt 得 NaN，
+    # 不报错、只是让对应像素的 mask 静默失效（当时只在控制台看到一行 warning）
+    far = parts_pipe._hex_dist(np.array([[[255, 0, 0], [0, 0, 255]]], dtype=np.uint8),
+                               (255, 255, 255))
+    assert not np.isnan(far).any() and abs(float(far[0, 0]) - 360.62) < 0.1, far
+
+
 
     storage.delete_asset(ta["id"])
 

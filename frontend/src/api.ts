@@ -614,6 +614,17 @@ export const api = {
     setTimeout(() => URL.revokeObjectURL(url), 1000)
   },
 
+  /** 角色部件拆分：角色图 + 色标图 → 各部位 RGBA */
+  parts: (art: File | Blob, tag: Blob, parts: { id: string; name: string; color: string }[],
+          tolerance = 40): Promise<any> => {
+    const fd = new FormData()
+    fd.append('file', art as File)
+    fd.append('tag', tag, 'tag.png')
+    fd.append('parts', JSON.stringify(parts))
+    fd.append('tolerance', String(tolerance))
+    return fetch('/api/pipeline/parts', { method: 'POST', body: fd }).then(json)
+  },
+
   /** 拆分件分组（按 meta.groupId 归组） */
   spriteGroups: (pipeline = 'sheet-split'): Promise<any> =>
     fetch(`/api/sprite/groups?pipeline=${encodeURIComponent(pipeline)}`).then(json),

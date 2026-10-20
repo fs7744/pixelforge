@@ -5,6 +5,7 @@ import { StyleChip } from './Workbench'
 import { openPreview } from '../Preview'
 import { Splitter } from '../split'
 import { newTaskId, TaskProgressBar, useTaskProgress } from '../useTaskProgress'
+import PartPainter from '../components/PartPainter'
 
 type Props = { incoming?: Asset | null }
 
@@ -14,6 +15,7 @@ const PIPELINES = [
   { id: 'refnorm', name: '参考图规范化', tag: 'NORMALIZE', desc: '裁主体 → 方形画布 → 底部对齐基线，参考图几何一致重跑才可比' },
   { id: 'layers', name: '场景语义分层', tag: 'LAYERED', desc: '一张场景图拆成 N 张同坐标 RGBA 图层，视差与前景替换直接用' },
   { id: 'normals', name: '法线 / 材质掩码', tag: 'NORMAL+METAL', desc: '逐帧几何法线 + 金属高光掩码，Godot/Unity 直接吃' },
+  { id: 'parts', name: '角色部件拆分', tag: 'PART-SPLIT', desc: '在图上涂出头/身体/四肢，导出各部件 RGBA（骨骼动画直接用）' },
   { id: 'resize', name: '尺寸规整', tag: 'NEAREST', desc: '最近邻硬缩放 / 等比留白 / RPGMaker 一键' },
   { id: 'sheet', name: 'Sprite Sheet 拆分', tag: 'N×M', desc: '按行列拆帧并生成引擎索引 JSON' },
   { id: 'pixelize', name: '像素化对齐', tag: 'PALETTE', desc: '分块单色 + 限定调色板，把 AI 图变成规整像素风' },
@@ -87,6 +89,19 @@ export default function PostProcess({ incoming }: Props) {
   const taskProgress = useTaskProgress()
   const [error, setError] = useState('')
   const [note, setNote] = useState('')
+  // 部件拆分：预设部位 + 当前涂色 + 上传好的色标图
+  const [partDefs, setPartDefs] = useState([
+    { id: 'head', name: '头', color: '#ff3b30' },
+    { id: 'body', name: '身体', color: '#34c759' },
+    { id: 'arm_l', name: '左上臂', color: '#0a84ff' },
+    { id: 'arm_r', name: '右上臂', color: '#ff9f0a' },
+    { id: 'leg_l', name: '左腿', color: '#bf5af2' },
+    { id: 'leg_r', name: '右腿', color: '#5ac8fa' },
+    { id: 'tail', name: '尾巴/附属', color: '#ff2d55' },
+  ])
+  const [partActive, setPartActive] = useState('head')
+  const [partTag, setPartTag] = useState<Blob | null>(null)
+  const [partOut, setPartOut] = useState<any>(null)
   const [over, setOver] = useState(false)
   const inputRef = useRef<HTMLInputElement>(null)
   // 从资产库选图：后处理最常用的输入就是刚生成的那张，没必要先下载再拖进来
@@ -113,6 +128,8 @@ export default function PostProcess({ incoming }: Props) {
     setIndex(null)
     setError('')
     setNote('')
+    setPartTag(null)
+    setPartOut(null)
   }
 
   // 资产库取图：每次都重拉一次列表，刚生成的图不用刷新页面就能选到
@@ -207,6 +224,16 @@ export default function PostProcess({ incoming }: Props) {
         setNote(
           `${res.meta.layerCount} 层 · ${res.meta.size[0]}×${res.meta.size[1]} · 覆盖率 ${cov}%${warn}`,
         )
+      } else if (pipeline === 'parts') {
+        if (!file) throw new Error('先选一张角色图')
+        if (!partTag) throw new Error('先在预览上涂出部位（至少涂一处）')
+        const res = await api.parts(file, partTag, partDefs)
+        if (res.detail) throw new Error(res.detail)
+        setPartOut(res)
+        const made = (res.parts || []).filter((x: any) => !x.empty)
+        const missed = (res.parts || []).filter((x: any) => x.empty).map((x: any) => x.name)
+        setNote(`生成 ${made.length} 个部件${missed.length ? `；没涂到：${missed.join('、')}` : ''}`
+          + `。到「动画编辑 → 导入拆分件」可一键生成轨道与骨骼。`)
       } else if (pipeline === 'normals') {
         const res = await api.normals(
           {
@@ -576,6 +603,39 @@ export default function PostProcess({ incoming }: Props) {
               参考图来源杂（截图/照片/别家导出），画幅与主体位置不一致会让编辑底座的构图
               跟着漂；规范化后同一角色换图重跑才有可比性。有透明区按 alpha 裁，没有就按
               四角底色做颜色键。
+            </div>
+          </>
+        )}
+
+        {pipeline === 'parts' && (
+          <>
+            <div className="label">部件涂色</div>
+            {file ? (
+              <PartPainter
+                src={before || ''}
+                parts={partDefs}
+                activeId={partActive}
+                onActive={setPartActive}
+                onTag={setPartTag}
+              />
+            ) : (
+              <div className="hint">先在右侧选一张图（最好是已去背的）</div>
+            )}
+            {partOut && (
+              <>
+                <div className="label" style={{ marginTop: 10 }}>生成结果</div>
+                <div className="chips">
+                  {(partOut.parts || []).map((p: any, i: number) => (
+                    <span key={i} className="chip sm" title={`占比 ${(p.coverage * 100).toFixed(1)}%`}>
+                      {p.empty ? `${p.name}（没涂）` : p.name}
+                    </span>
+                  ))}
+                </div>
+              </>
+            )}
+            <div className="hint" style={{ marginTop: 8 }}>
+              部件语义由你涂，机器只负责按颜色裁切并去边缘杂色（de-fringe）。
+              没去背的图也能用，但背景会跟着部件一起进来——先做一次去背更干净。
             </div>
           </>
         )}

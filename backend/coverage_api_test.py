@@ -315,6 +315,34 @@ _hit = next((g for g in _gj.get("groups") or [] if g.get("groupId") == _gid), No
 check("拆分件分组端点", _gr.status_code == 200 and bool(_hit) and _hit["count"] == 16,
       str([(g.get("groupId"), g.get("count")) for g in _gj.get("groups", [])][:4]))
 
+# 角色部件拆分：角色图 + 色标图 → 按颜色裁切，产物带 groupId 供编辑器导入
+_art = Image.new("RGBA", (48, 48), (0, 0, 0, 0))
+_ad = ImageDraw.Draw(_art)
+_ad.ellipse((16, 2, 30, 16), fill=(240, 200, 180, 255))
+_ad.rectangle((14, 18, 32, 44), fill=(80, 120, 200, 255))
+_tag = Image.new("RGB", (48, 48), (0, 0, 0))
+_td = ImageDraw.Draw(_tag)
+_td.ellipse((16, 2, 30, 16), fill=(255, 0, 0))
+_td.rectangle((14, 18, 32, 44), fill=(0, 255, 0))
+_ab = io.BytesIO(); _art.save(_ab, "PNG")
+_tb = io.BytesIO(); _tag.save(_tb, "PNG")
+_pr = client.post("/api/pipeline/parts",
+                  files={"file": ("a.png", _ab.getvalue(), "image/png"),
+                         "tag": ("t.png", _tb.getvalue(), "image/png")},
+                  data={"parts": json.dumps([{"id": "head", "name": "头", "color": "#ff0000"},
+                                             {"id": "body", "name": "身体", "color": "#00ff00"}],
+                                            ensure_ascii=False)})
+_pj = _pr.json() if _pr.status_code == 200 else {}
+for _pp in _pj.get("parts") or []:
+    if _pp.get("asset"):
+        remember(_pp["asset"])
+check("部件拆分 200 / 2 件", _pr.status_code == 200 and len(_pj.get("parts") or []) == 2
+      and not _pj["parts"][0]["empty"], str(_pj)[:110])
+_gr2 = client.get("/api/sprite/groups").json()
+_pg = next((g for g in _gr2.get("groups") or [] if g.get("groupId") == _pj.get("groupId")), None)
+check("部件出现在分组列表（编辑器可导入）", bool(_pg) and _pg["count"] == 2
+      and "头" in _pg["name"], str(_pg)[:110])
+
 # 精灵表拆分默认只切不去背；matte=true 时逐帧清掉键色。
 # 绿幕 + 深色主体：拆完四角应透明，主体完整。
 matte_sheet = Image.new("RGB", (64, 64), (0, 255, 0))
