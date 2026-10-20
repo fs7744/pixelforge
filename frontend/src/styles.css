@@ -781,3 +781,4 @@ button, input, textarea, select { font-family: inherit; }
 .editor-canvas-wrap { align-items: start; justify-items: center; }
 .curve { display: block; background: #14141a; border: 1px solid var(--line); }
 .mk.warp { background: #00d0ff; }
+.panel-inset { border: 1px dashed var(--line); padding: 8px; margin-top: 8px; }

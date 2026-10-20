@@ -337,6 +337,12 @@ export default function Editor() {
   const [wRadius, setWRadius] = useState(2)
   const [wStrength, setWStrength] = useState(0.5)
   const [wDir, setWDir] = useState(1)
+  // 骨链生成器
+  const [genOpen, setGenOpen] = useState(false)
+  const [genCount, setGenCount] = useState(3)
+  const [genLen, setGenLen] = useState(70)
+  const [genAxis, setGenAxis] = useState<'x' | 'y'>('y')
+  const [genFrom, setGenFrom] = useState<'bottom' | 'track'>('bottom')
   const [note, setNote] = useState('')
   const [error, setError] = useState('')
   const [newName, setNewName] = useState('')
@@ -502,6 +508,63 @@ export default function Editor() {
     })
     setSelIk(id)
     setMode('bone')
+  }
+
+  /** 一键生成等距骨链：从 root 接出去，省掉「点 N 次 + 子骨骼再逐根拖位置」。
+   *  之前每根骨骼都要点一次按钮再拖，新工程搭一套骨架的仪式感强到容易劝退。 */
+  const genChain = () => {
+    if (!proj) return
+    const cw = dims[0]
+    const ch = dims[1]
+    let x0 = cw / 2
+    let y0 = ch * 0.85
+    if (genFrom === 'track' && track) {
+      const m = trackMatrix(proj, track, 0)
+      const [px, py] = apply(m, track.pivot?.[0] ?? 0, track.pivot?.[1] ?? 0)
+      x0 = Math.round(px)
+      y0 = Math.round(py)
+    }
+    const stamp = Date.now().toString(36).slice(-4)
+    const ids: string[] = []
+    update((p) => {
+      const rootBone = p.bones[0]
+      let parent = rootBone?.id
+      for (let i = 0; i < genCount; i++) {
+        const id = `c${stamp}${i}`
+        const x = Math.round(x0 + (genAxis === 'x' ? i * genLen : 0))
+        const y = Math.round(y0 + (genAxis === 'y' ? -i * genLen : 0))
+        p.bones.push({
+          id, name: `骨 ${p.bones.length}`, parent,
+          x: i === 0 ? x0 : x, y: i === 0 ? y0 : y, len: genLen, keys: [],
+        })
+        parent = id
+        ids.push(id)
+      }
+    })
+    if (ids.length) setSelBone(ids[ids.length - 1])
+    setNote(`已生成 ${genCount} 节骨链（每节 ${genLen}px，`
+      + `${genAxis === 'x' ? '水平' : '垂直向上'}），当前选中末节`)
+  }
+
+  /** 按名称自动绑轨：轨道名包含骨骼名（或反之）就绑上去。
+   *  位置不可靠——轨道默认全绑在 root 上，「离 pivot 最近」这种启发式没有信息量。 */
+  const autoBind = () => {
+    if (!proj) return
+    let bound = 0
+    for (const t of proj.tracks || []) {
+      const hit = (proj.bones || []).find(
+        (b: any) => t.name && b.name
+          && (t.name.includes(b.name) || b.name.includes(t.name)))
+      if (hit) {
+        bound++
+        update((p) => {
+          const x = p.tracks.find((v: any) => v.id === t.id)
+          if (x) x.bone = hit.id
+        })
+      }
+    }
+    setNote(bound ? `按名称绑定了 ${bound} 条轨道（轨道名包含骨骼名即可）`
+      : '没有名称匹配的轨道：把骨骼改成「上臂 / 腿 / 尾」这类部位名再试')
   }
 
   const upsertIkWeight = (ikId: string, w: number) => {
@@ -892,6 +955,7 @@ export default function Editor() {
             </button>
           ))}
           {proj && (
+            <>
             <button className="chip" onClick={() => update((p) => {
               const id = `b${p.bones.length + 1}`
               const parent = p.bones.find((x: any) => x.id === selBone) || p.bones[0]
@@ -899,6 +963,39 @@ export default function Editor() {
                 x: (parent?.x || p.canvas[0] / 2) + 40, y: parent?.y || p.canvas[1] / 2, keys: [] })
               setSelBone(id)
             })}>+ 子骨骼</button>
+            <button className="chip" onClick={() => setGenOpen((v) => !v)}>
+              {genOpen ? '收起' : '生成骨链'}
+            </button>
+            <button className="chip" onClick={autoBind}>按名绑轨</button>
+            </>
+          )}
+          {genOpen && proj && (
+            <div className="panel-inset">
+              <div className="label">节数 {genCount}</div>
+              <input type="range" min={2} max={6} value={genCount} style={{ width: '100%' }}
+                     onChange={(e) => setGenCount(+e.target.value)} />
+              <div className="label" style={{ marginTop: 6 }}>每节 {genLen}px</div>
+              <input type="range" min={30} max={140} value={genLen} style={{ width: '100%' }}
+                     onChange={(e) => setGenLen(+e.target.value)} />
+              <div className="label" style={{ marginTop: 6 }}>朝向</div>
+              <div className="seg">
+                <button className={genAxis === 'y' ? 'on' : ''} onClick={() => setGenAxis('y')}>
+                  垂直向上
+                </button>
+                <button className={genAxis === 'x' ? 'on' : ''} onClick={() => setGenAxis('x')}>
+                  水平向右
+                </button>
+              </div>
+              <div className="label" style={{ marginTop: 6 }}>起点</div>
+              <div className="seg">
+                <button className={genFrom === 'bottom' ? 'on' : ''}
+                        onClick={() => setGenFrom('bottom')}>画布底部</button>
+                <button className={genFrom === 'track' ? 'on' : ''}
+                        onClick={() => setGenFrom('track')} disabled={!track}>当前轨道</button>
+              </div>
+              <button className="btn btn-ghost btn-block" style={{ marginTop: 8 }}
+                      onClick={genChain}>生成 {genCount} 节</button>
+            </div>
           )}
         </div>
 
@@ -1227,6 +1324,24 @@ export default function Editor() {
               <div className="label" style={{ marginTop: 8 }}>骨骼旋转 {Math.round(bk.rot)}°</div>
               <input type="range" min={-180} max={180} value={bk.rot} style={{ width: '100%' }}
                      onChange={(e) => upsertKey('bone', { rot: +e.target.value })} />
+            </>
+          )
+        })()}
+
+        {proj && (() => {
+          const b = bones.find((v: any) => v.id === selBone)
+          if (!b) return null
+          return (
+            <>
+              <div className="label" style={{ marginTop: 12 }}>骨骼名称</div>
+              <input className="input" value={b.name}
+                     onChange={(e) => update((p) => {
+                       const x = p.bones.find((v: any) => v.id === selBone)
+                       if (x) x.name = e.target.value
+                     })} />
+              <div className="hint">
+                改成「上臂 / 腿 / 尾」这类部位名，左栏的「按名绑轨」才对得上。
+              </div>
             </>
           )
         })()}
