@@ -11,6 +11,7 @@
  */
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { api, Asset } from '../api'
+import PartRigBuilder, { RigPart } from '../components/PartRigBuilder'
 
 type Mode = 'select' | 'bone' | 'warp' | 'brush' | 'weight'
 type Pt = [number, number]
@@ -344,6 +345,7 @@ export default function Editor() {
   const [genLen, setGenLen] = useState(70)
   const [genAxis, setGenAxis] = useState<'x' | 'y'>('y')
   const [genFrom, setGenFrom] = useState<'bottom' | 'track'>('bottom')
+  const [rigOpen, setRigOpen] = useState(false)
   const [note, setNote] = useState('')
   const [error, setError] = useState('')
   const [newName, setNewName] = useState('')
@@ -552,6 +554,45 @@ export default function Editor() {
   /** 一键导入一组拆分件：每件一轨、每件一节骨骼、命名一致 → 自动绑好。
    *  这是走查清单里那条「拆分件直接进编辑器」，前提是资产带 groupId；
    *  老数据没有分组，会在界面上如实显示为散图。 */
+  /** 把服务端算好的骨架方案写进工程：每件一轨 + 一节骨骼，父子按方案来。
+   *  方案（骨骼位置/pivot/父子/缩放）由 parts.plan_rig 在服务端算好，
+   *  这里只做写入——数学只有一处实现，前端不自己推。 */
+  const applyRig = (rig: RigPart[], groupId: string) => {
+    if (!proj) return
+    const stamp = Date.now().toString(36).slice(-4)
+    // rig 里的 parent 指的是「body」这个占位，要换成实际骨骼 id
+    const bodyPart = rig.find((r) => r.isBody) || rig[0]
+    const boneId = (r: RigPart) => `p${stamp}${rig.indexOf(r)}`
+    const parentOf = (r: RigPart) => {
+      if (!r.bone.parent) return proj.bones[0]?.id || 'root'
+      // parent === 'body' 表示挂到躯干
+      if (r.bone.parent === 'body') return boneId(bodyPart)
+      const found = rig.find((x) => x.name === r.bone.parent)
+      return found ? boneId(found) : (proj.bones[0]?.id || 'root')
+    }
+    update((p) => {
+      rig.forEach((r, i) => {
+        const bid = `p${stamp}${i}`
+        p.bones.push({
+          id: bid, name: r.name, parent: parentOf(r),
+          x: r.bone.x, y: r.bone.y, len: r.bone.len, keys: [],
+        })
+        p.tracks.push({
+          id: `t${stamp}${i}`, name: r.name, assetId: r.assetId, bone: bid,
+          pivot: r.pivot,
+          warp: Array(9).fill([0, 0]), warpKeys: [],
+          keyframes: [{ frame: 0, x: 0, y: 0, rot: 0, scale: r.scale,
+            opacity: 1, ease: 'linear' }],
+          fx: [], opacity: 1, blend: 'normal', visible: true,
+        })
+      })
+    })
+    setSelTrack(`t${stamp}0`)
+    setSelBone(`p${stamp}0`)
+    setNote(`已装 ${rig.length} 件轨道与骨骼（group ${groupId}），`
+      + `旋转点已按部位设好：拖骨骼就能摆姿势`)
+  }
+
   const importGroup = async (g: any) => {
     if (!proj) return
     const stamp = Date.now().toString(36).slice(-4)
@@ -1091,6 +1132,10 @@ export default function Editor() {
             导入拆分件
           </button>
         </div>
+        <button className="btn btn-ghost btn-block" style={{ marginTop: 6 }}
+                onClick={() => setRigOpen((v) => !v)}>
+          {rigOpen ? '收起「涂部位建骨架」' : '涂部位建骨架（从角色图直接生成）'}
+        </button>
         {picker && groups && (
           <div className="editor-picker-groups">
             {groups.length === 0 && <div className="hint">库里还没有拆分件；先去后处理跑一次「拆分表」</div>}
@@ -1356,6 +1401,24 @@ export default function Editor() {
         {note && <div className="ok">{note}</div>}
         {error && <div className="err">{error}</div>}
       </main>
+
+      {rigOpen && (
+        <div className="rig-overlay">
+          <div className="rig-panel">
+            <div className="row" style={{ gap: 8, marginBottom: 8 }}>
+              <div className="grow section-title" style={{ margin: 0 }}>
+                涂部位 → 直接生成轨道与骨骼
+              </div>
+              <button className="btn btn-ghost" onClick={() => setRigOpen(false)}>关闭</button>
+            </div>
+            <PartRigBuilder
+              assets={assets}
+              canvas={proj?.canvas || [dims[0], dims[1]]}
+              onApply={applyRig}
+            />
+          </div>
+        </div>
+      )}
 
       <aside className="editor-right">
         <div className="section-title">当前帧</div>

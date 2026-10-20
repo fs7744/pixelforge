@@ -542,6 +542,7 @@ async def pipeline_parts(
     refAssetId: str = Form(""),
     parts: str = Form("[]"),
     tolerance: int = Form(40),
+    canvas: str = Form(""),
 ):
     """角色部件拆分：角色图 + 色标图 → 若干 RGBA 部件（进素材库，带 groupId）。
 
@@ -563,6 +564,12 @@ async def pipeline_parts(
         raise HTTPException(400, "parts 不是合法 JSON")
     if not isinstance(plist, list) or not plist:
         raise HTTPException(400, "至少要指定一个部位")
+    try:
+        cvs = json.loads(canvas) if canvas else [512, 512]
+    except Exception:
+        cvs = [512, 512]
+    if not (isinstance(cvs, list) and len(cvs) >= 2):
+        cvs = [512, 512]
 
     def _run():
         return parts_pipe.split_parts(art, tag_img, plist, tolerance)
@@ -570,19 +577,31 @@ async def pipeline_parts(
     results = await run_in_threadpool(_run)
     group_id = uuid.uuid4().hex[:12]
     items = []
+    rig_input = []
     for i, (name, img) in enumerate(results):
         cov = parts_pipe.coverage(name, img)
         if cov <= 0:
             items.append({"name": name, "empty": True, "coverage": 0.0})
             continue
+        # 裁到自身包围盒：整幅大小的部件在动画里位置全是错的（pivot 落在
+        # 画布底部、部件悬在半空）。bbox 记进 meta，装骨架时要用。
+        trimmed, bbox = parts_pipe.trim_part(img)
         item = storage.save_asset(
-            img, kind="frame", name=f"part-{i:02d}-{name}",
+            trimmed, kind="frame", name=f"part-{i:02d}-{name}",
             meta={"pipeline": "parts", "groupId": group_id, "partName": name,
                   "partId": str(plist[i].get("id") or i), "index": i,
-                  "sourceId": refAssetId, "coverage": round(cov, 5)})
+                  "sourceId": refAssetId, "coverage": round(cov, 5),
+                  "bbox": bbox, "sourceSize": [img.width, img.height]})
         items.append({"name": name, "empty": False, "coverage": round(cov, 5),
+                      "bbox": bbox, "size": [trimmed.width, trimmed.height],
                       "asset": item})
-    return {"parts": items, "groupId": group_id}
+        rig_input.append({"id": item["id"], "name": name,
+                          "size": [trimmed.width, trimmed.height], "bbox": bbox})
+
+    # 顺带把「装骨架」的方案算好：pivot、父子、整体缩放都在服务端决定，
+    # 前端只负责把结果写进工程（数学只有一处实现）
+    rig = parts_pipe.plan_rig(rig_input, cvs) if rig_input else []
+    return {"parts": items, "groupId": group_id, "rig": rig}
 
 
 @app.get("/api/sprite/groups")

@@ -614,14 +614,22 @@ export const api = {
     setTimeout(() => URL.revokeObjectURL(url), 1000)
   },
 
-  /** 角色部件拆分：角色图 + 色标图 → 各部位 RGBA */
-  parts: (art: File | Blob, tag: Blob, parts: { id: string; name: string; color: string }[],
-          tolerance = 40): Promise<any> => {
+  /**
+   * 角色部件拆分：角色图 + 色标图 → 各部位 RGBA。
+   * 传 refAssetId 时不必再传文件（素材库里的图直接引用，省一次上传）。
+   * 返回里带 rig：服务端算好的「骨骼位置 / pivot / 父子 / 缩放」。
+   */
+  parts: (art: File | Blob | null, tag: Blob,
+          parts: { id: string; name: string; color: string }[],
+          tolerance = 40, canvas?: [number, number],
+          refAssetId = ''): Promise<any> => {
     const fd = new FormData()
-    fd.append('file', art as File)
+    if (art) fd.append('file', art as File)
+    if (refAssetId) fd.append('refAssetId', refAssetId)
     fd.append('tag', tag, 'tag.png')
     fd.append('parts', JSON.stringify(parts))
     fd.append('tolerance', String(tolerance))
+    if (canvas) fd.append('canvas', JSON.stringify(canvas))
     return fetch('/api/pipeline/parts', { method: 'POST', body: fd }).then(json)
   },
 

@@ -19,6 +19,10 @@ INDEX_PATH = ASSETS_DIR / "index.json"
 # 前提：单进程部署（start.sh 默认单 worker uvicorn）。多 worker 时各进程
 # 缓存会互相看不到，届时需要换回每次读盘或改存储后端。
 _INDEX_CACHE: Optional[List[Dict[str, Any]]] = None
+# 缓存对应的 index.json 修改时间：外部进程（另一个脚本、另一个服务实例）
+# 改了素材库时，本进程要能看见。纯内存缓存会让服务端一直返回旧列表——
+# 症状是「脚本说存好了，界面里却没这张图」，非常难查。
+_INDEX_CACHE_MTIME: Optional[float] = None
 
 # ---------- 分类标签 ----------
 # 中文名只在这里维护一份，前端拿 facets 直接渲染。
@@ -83,9 +87,11 @@ def asset_pipeline(item: Dict[str, Any]) -> str:
 
 
 def _load_index() -> List[Dict[str, Any]]:
-    global _INDEX_CACHE
-    if _INDEX_CACHE is None:
-        ensure_dirs()
+    global _INDEX_CACHE, _INDEX_CACHE_MTIME
+    ensure_dirs()
+    mtime = INDEX_PATH.stat().st_mtime if INDEX_PATH.exists() else None
+    # 缓存失效条件：还没缓存过，或文件被别人改过（mtime 变了）
+    if _INDEX_CACHE is None or mtime != _INDEX_CACHE_MTIME:
         if INDEX_PATH.exists():
             try:
                 _INDEX_CACHE = json.loads(INDEX_PATH.read_text(encoding="utf-8"))
@@ -93,12 +99,13 @@ def _load_index() -> List[Dict[str, Any]]:
                 _INDEX_CACHE = []
         else:
             _INDEX_CACHE = []
+        _INDEX_CACHE_MTIME = mtime
     # 防御性拷贝：调用方的增删改不直接污染缓存，缓存只由 _save_index 推进
     return list(_INDEX_CACHE)
 
 
 def _save_index(items: List[Dict[str, Any]]) -> None:
-    global _INDEX_CACHE
+    global _INDEX_CACHE, _INDEX_CACHE_MTIME
     # 先写临时文件再原子替换：直接覆盖时若进程中断，index.json 会变成
     # 半截 JSON，_load_index 只能返回空列表，整个资产库等于丢失。
     tmp = INDEX_PATH.with_suffix(".json.tmp")
@@ -109,6 +116,8 @@ def _save_index(items: List[Dict[str, Any]]) -> None:
                    encoding="utf-8")
     tmp.replace(INDEX_PATH)
     _INDEX_CACHE = list(items)
+    # 同步 mtime，否则下次读会因「mtime 变了」白读一次盘
+    _INDEX_CACHE_MTIME = INDEX_PATH.stat().st_mtime if INDEX_PATH.exists() else None
 
 
 def _digest_file(path: Path) -> str:

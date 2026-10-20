@@ -608,6 +608,58 @@ async def main() -> None:
     assert none.getbbox() is None
     print(f"[9n] parts   → 头/身体/右臂 分色正确（头占比 {cov * 100:.1f}%，未涂部位为空）OK")
 
+    # 裁剪 + 装骨架：部件应裁到自身包围盒，骨骼位置落在画布内
+    trimmed, bbox = parts_pipe.trim_part(got[0][1])
+    assert trimmed.width < got[0][1].width, (trimmed.size, got[0][1].size)
+    assert bbox[2] <= trimmed.width and bbox[3] <= trimmed.height, bbox
+
+    rig = parts_pipe.plan_rig([
+        {"id": "a", "name": "头", "size": [20, 16], "bbox": [24, 4, 20, 16]},
+        {"id": "b", "name": "身体", "size": [24, 32], "bbox": [20, 22, 24, 32]},
+        {"id": "c", "name": "右臂", "size": [16, 24], "bbox": [44, 24, 16, 24]},
+    ], [200, 200])
+    assert len(rig) == 3
+    byname = {r["name"]: r for r in rig}
+    # 头 pivot 在下边中点（绕脖子），手臂 pivot 在上边中点（绕肩）
+    assert byname["头"]["pivot"][1] == 16, byname["头"]
+    assert byname["右臂"]["pivot"][1] == 0, byname["右臂"]
+    # 身体是躯干：自己无父，其余都挂躯干
+    assert byname["身体"]["bone"]["parent"] is None
+    assert byname["头"]["bone"]["parent"] == "body"
+    assert byname["右臂"]["bone"]["parent"] == "body"
+    # 骨骼坐标必须落在画布内
+    for r in rig:
+        assert 0 <= r["bone"]["x"] <= 200 and 0 <= r["bone"]["y"] <= 200, r
+    # 整体缩放一致（同一张原图切出来的部件，缩放必须相同）
+    assert abs(byname["头"]["scale"] - byname["右臂"]["scale"]) < 1e-6
+    print(f"[9o] rig     → 部件裁到 {trimmed.size}（bbox {bbox}）；"
+          f"头 pivot 下中点 / 臂 pivot 上中点 / 躯干为父 / 缩放 "
+          f"{rig[0]['scale']:.3f} OK")
+
+    # 框选涂色：色标是矩形、彼此重叠时，部件必须互不重叠。
+    # 之前羽化把边界外也抬成非 0，相邻部件各扩 1px、实心像素互相重叠
+    # ——动画里两个部件抢同一块区域，旋转时互相撕。
+    tag2 = Image.new("RGB", (64, 64), (0, 0, 0))
+    dt2 = ImageDraw.Draw(tag2)
+    dt2.rectangle((22, 2, 40, 18), fill=(255, 0, 0))      # 头（与身体框重叠）
+    dt2.rectangle((20, 14, 42, 44), fill=(0, 255, 0))     # 身体
+    art2 = Image.new("RGBA", (64, 64), (0, 0, 0, 0))
+    da2 = ImageDraw.Draw(art2)
+    da2.ellipse((24, 4, 38, 18), fill=(240, 200, 180, 255))
+    da2.rectangle((22, 20, 40, 44), fill=(80, 130, 200, 255))
+    got2 = parts_pipe.split_parts(art2, tag2, [
+        {"id": "head", "name": "头", "color": "#ff0000"},
+        {"id": "body", "name": "身体", "color": "#00ff00"},
+    ])
+    m_head = np.asarray(got2[0][1].getchannel("A")) > 8
+    m_body = np.asarray(got2[1][1].getchannel("A")) > 8
+    overlap = int((m_head & m_body).sum())
+    assert overlap == 0, f"部件实心像素重叠 {overlap} 个（旋转时会互相撕）"
+    soft = int(((np.asarray(got2[0][1].getchannel("A")) > 0)
+                & (np.asarray(got2[0][1].getchannel("A")) < 250)).sum())
+    assert soft > 0, "边缘应保留半透明过渡带（羽化没生效）"
+    print(f"[9p] 互斥    → 部件实心重叠 0 像素 / 边缘半透明过渡 {soft} 像素 OK")
+
     # 颜色距离不能出 NaN：int16 算平方差会溢出回绕成负数，sqrt 得 NaN，
     # 不报错、只是让对应像素的 mask 静默失效（当时只在控制台看到一行 warning）
     far = parts_pipe._hex_dist(np.array([[[255, 0, 0], [0, 0, 255]]], dtype=np.uint8),

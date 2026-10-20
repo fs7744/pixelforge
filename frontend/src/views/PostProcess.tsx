@@ -6,6 +6,7 @@ import { openPreview } from '../Preview'
 import { Splitter } from '../split'
 import { newTaskId, TaskProgressBar, useTaskProgress } from '../useTaskProgress'
 import PartPainter from '../components/PartPainter'
+import { DEFAULT_PARTS } from '../parts'
 
 type Props = { incoming?: Asset | null }
 
@@ -90,15 +91,7 @@ export default function PostProcess({ incoming }: Props) {
   const [error, setError] = useState('')
   const [note, setNote] = useState('')
   // 部件拆分：预设部位 + 当前涂色 + 上传好的色标图
-  const [partDefs, setPartDefs] = useState([
-    { id: 'head', name: '头', color: '#ff3b30' },
-    { id: 'body', name: '身体', color: '#34c759' },
-    { id: 'arm_l', name: '左上臂', color: '#0a84ff' },
-    { id: 'arm_r', name: '右上臂', color: '#ff9f0a' },
-    { id: 'leg_l', name: '左腿', color: '#bf5af2' },
-    { id: 'leg_r', name: '右腿', color: '#5ac8fa' },
-    { id: 'tail', name: '尾巴/附属', color: '#ff2d55' },
-  ])
+  const [partDefs, setPartDefs] = useState(DEFAULT_PARTS)
   const [partActive, setPartActive] = useState('head')
   const [partTag, setPartTag] = useState<Blob | null>(null)
   const [partOut, setPartOut] = useState<any>(null)

@@ -792,3 +792,30 @@ button, input, textarea, select { font-family: inherit; }
 .painter img { max-width: 100%; max-height: 420px; display: block; }
 .painter canvas { position: absolute; inset: 0; width: 100%; height: 100%; }
 .chip .dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 4px; }
+/* 涂部位建骨架：浮在画布上。左栏太窄，涂色区会小到没法用 */
+.rig-overlay {
+  position: fixed; inset: 0; z-index: 40;
+  background: rgba(8, 8, 12, 0.72);
+  display: flex; align-items: center; justify-content: center;
+  padding: 24px;
+}
+.rig-panel {
+  /* --bg-2 这个变量不存在，用了等于没设背景 → 面板透明、底层内容透出来 */
+  background: #14141a; border: 1px solid var(--line);
+  width: min(880px, 100%); max-height: 100%; overflow-y: auto;
+  padding: 14px;
+  box-shadow: 0 8px 40px rgba(0, 0, 0, 0.6);
+}
+.rig-panel .painter img { max-height: 46vh; }
+.rig-assets {
+  display: grid; grid-template-columns: repeat(auto-fill, minmax(64px, 1fr));
+  gap: 4px; max-height: 132px; overflow-y: auto;
+  padding: 2px; border: 1px solid var(--line);
+}
+.rig-assets img {
+  width: 100%; aspect-ratio: 1; object-fit: contain; cursor: pointer;
+  background: repeating-conic-gradient(#1a1a20 0 25%, #22222a 0 50%) 0 0/10px 10px;
+  border: 1px solid transparent;
+}
+.rig-assets img.on { border-color: var(--green); }
+.painter-box { position: absolute; border: 2px solid; pointer-events: none; }

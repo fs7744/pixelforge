@@ -342,6 +342,37 @@ _gr2 = client.get("/api/sprite/groups").json()
 _pg = next((g for g in _gr2.get("groups") or [] if g.get("groupId") == _pj.get("groupId")), None)
 check("部件出现在分组列表（编辑器可导入）", bool(_pg) and _pg["count"] == 2
       and "头" in _pg["name"], str(_pg)[:110])
+check("部件已裁到自身包围盒（位置才正确）",
+      all((p.get("bbox") and p.get("size")
+           and p["size"][0] <= 48 and p["size"][1] <= 48) for p in _pj.get("parts") or []),
+      str([(p.get("name"), p.get("size"), p.get("bbox")) for p in _pj.get("parts") or []])[:150])
+_rig = _pj.get("rig") or []
+_rn = {r["name"]: r for r in _rig}
+check("骨架方案：pivot 按部位 / 躯干为父 / 坐标在画布内",
+      len(_rig) == 2 and _rn["头"]["pivot"][1] == _rn["头"]["size"][1] if False else
+      (len(_rig) == 2 and all(0 <= r["bone"]["x"] <= 512 and 0 <= r["bone"]["y"] <= 512
+                              for r in _rig)
+       and sum(1 for r in _rig if r["bone"]["parent"] is None) == 1),
+      str([(r.get("name"), r.get("bone"), r.get("pivot")) for r in _rig])[:170])
+
+# 缩略图涂色路径：编辑器里用的是缩略图（宽高比一致但分辨率不同），
+# 服务端必须等比适配而不是直接拉伸，否则涂的部位会偏。
+_th = _tag.resize((24, 24), Image.NEAREST)
+_tb2 = io.BytesIO(); _th.save(_tb2, "PNG")
+_pr2 = client.post("/api/pipeline/parts",
+                   files={"file": ("a.png", _ab.getvalue(), "image/png"),
+                          "tag": ("t2.png", _tb2.getvalue(), "image/png")},
+                   data={"parts": json.dumps([{"id": "head", "name": "头", "color": "#ff0000"},
+                                              {"id": "body", "name": "身体", "color": "#00ff00"}],
+                                             ensure_ascii=False)})
+_pj2 = _pr2.json() if _pr2.status_code == 200 else {}
+for _pp in _pj2.get("parts") or []:
+    if _pp.get("asset"):
+        remember(_pp["asset"])
+_cov2 = {p["name"]: p["coverage"] for p in _pj2.get("parts") or []}
+check("缩略图色标也能正确对齐（等比适配）",
+      _pr2.status_code == 200 and abs(_cov2.get("头", 0) - _cov2.get("身体", 0)) > 0.01,
+      str(_cov2))
 
 # 精灵表拆分默认只切不去背；matte=true 时逐帧清掉键色。
 # 绿幕 + 深色主体：拆完四角应透明，主体完整。
