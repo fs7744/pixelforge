@@ -564,6 +564,9 @@ async def pipeline_parts(
         raise HTTPException(400, "parts 不是合法 JSON")
     if not isinstance(plist, list) or not plist:
         raise HTTPException(400, "至少要指定一个部位")
+    # 部位可以**不写名字**：名字留空时由服务端按几何识别（头/躯干/四肢/尾巴）。
+    # 用户涂色时看到的是「一个绿色的块」，不是「左上臂」——让他先命名再涂，
+    # 等于把工作推给用户。name 为空即表示「你来认」。
     try:
         cvs = json.loads(canvas) if canvas else [512, 512]
     except Exception:
@@ -576,27 +579,57 @@ async def pipeline_parts(
 
     results = await run_in_threadpool(_run)
     group_id = uuid.uuid4().hex[:12]
+
+    # 第一步：切出每个部件并裁到自身包围盒（不裁的话 pivot 落在画布底部，
+    # 部件悬在半空——位置全错）。此时先不命名。
+    cut = []
+    for i, (_raw, img) in enumerate(results):
+        cov = parts_pipe.coverage(_raw, img)
+        if cov <= 0:
+            cut.append({"i": i, "img": img, "cov": cov, "empty": True,
+                        "given": str(plist[i].get("name") or "")})
+            continue
+        trimmed, bbox = parts_pipe.trim_part(img)
+        cut.append({"i": i, "img": trimmed, "raw": img, "cov": cov,
+                    "empty": False, "bbox": bbox,
+                    "given": str(plist[i].get("name") or "")})
+
+    # 第二步：几何识别。判断「这是头还是手臂」必须看**所有部件的关系**，
+    # 所以只能等全部切完再一起判。
+    geo_regions = [{"id": str(c["i"]), "name": c["given"],
+                    "size": [c["img"].width, c["img"].height],
+                    "bbox": c["bbox"]}
+                   for c in cut if not c["empty"]]
+    roles = {g["id"]: g for g in parts_pipe.classify_regions(geo_regions)}
+
     items = []
     rig_input = []
-    for i, (name, img) in enumerate(results):
-        cov = parts_pipe.coverage(name, img)
-        if cov <= 0:
-            items.append({"name": name, "empty": True, "coverage": 0.0})
+    for c in cut:
+        i = c["i"]
+        if c["empty"]:
+            items.append({"name": c["given"] or f"部件{i + 1}", "empty": True,
+                          "coverage": 0.0})
             continue
-        # 裁到自身包围盒：整幅大小的部件在动画里位置全是错的（pivot 落在
-        # 画布底部、部件悬在半空）。bbox 记进 meta，装骨架时要用。
-        trimmed, bbox = parts_pipe.trim_part(img)
+        g = roles.get(str(i))
+        # 用户写了名字就用他的；没写就用识别出来的
+        name = c["given"] or (g["label"] if g else f"部件{i + 1}")
+        trimmed = c["img"]
         item = storage.save_asset(
             trimmed, kind="frame", name=f"part-{i:02d}-{name}",
             meta={"pipeline": "parts", "groupId": group_id, "partName": name,
                   "partId": str(plist[i].get("id") or i), "index": i,
-                  "sourceId": refAssetId, "coverage": round(cov, 5),
-                  "bbox": bbox, "sourceSize": [img.width, img.height]})
-        items.append({"name": name, "empty": False, "coverage": round(cov, 5),
-                      "bbox": bbox, "size": [trimmed.width, trimmed.height],
+                  "sourceId": refAssetId, "coverage": round(c["cov"], 5),
+                  "bbox": c["bbox"], "sourceSize": [c["raw"].width, c["raw"].height],
+                  "role": g["role"] if g else "extra",
+                  "autoNamed": not bool(c["given"])})
+        items.append({"name": name, "empty": False, "coverage": round(c["cov"], 5),
+                      "bbox": c["bbox"], "size": [trimmed.width, trimmed.height],
+                      "role": g["role"] if g else "extra",
+                      "autoNamed": not bool(c["given"]),
                       "asset": item})
         rig_input.append({"id": item["id"], "name": name,
-                          "size": [trimmed.width, trimmed.height], "bbox": bbox})
+                          "autoNamed": not bool(c["given"]),
+                          "size": [trimmed.width, trimmed.height], "bbox": c["bbox"]})
 
     # 顺带把「装骨架」的方案算好：pivot、父子、整体缩放都在服务端决定，
     # 前端只负责把结果写进工程（数学只有一处实现）

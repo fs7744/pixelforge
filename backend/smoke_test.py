@@ -719,6 +719,51 @@ async def main() -> None:
     assert orph["bones"][0].get("parent") is None, orph["bones"]
     print("[9r] 去环    → 环上断开一根 / 坏父级清空 / 渲染不崩 OK")
 
+    # 几何识别：只给几块涂色（不写名字），判断它们是头/躯干/四肢/尾巴
+    roles = {r["id"]: r for r in parts_pipe.classify_regions([
+        {"id": "h", "name": "", "size": [30, 30], "bbox": [85, 10, 30, 30]},
+        {"id": "b", "name": "", "size": [34, 50], "bbox": [83, 44, 34, 50]},
+        {"id": "al", "name": "", "size": [14, 38], "bbox": [64, 46, 14, 38]},
+        {"id": "ar", "name": "", "size": [14, 38], "bbox": [122, 46, 14, 38]},
+        {"id": "ll", "name": "", "size": [15, 42], "bbox": [84, 96, 15, 42]},
+        {"id": "lr", "name": "", "size": [15, 42], "bbox": [101, 96, 15, 42]},
+        {"id": "t", "name": "", "size": [40, 14], "bbox": [120, 70, 40, 14]},
+    ])}
+    assert roles["h"]["role"] == "head", roles
+    assert roles["b"]["role"] == "body", roles
+    assert roles["al"]["role"] == "arm" and roles["al"]["side"] == "l", roles
+    assert roles["ar"]["role"] == "arm" and roles["ar"]["side"] == "r", roles
+    assert roles["ll"]["role"] == "leg" and roles["ll"]["side"] == "l", roles
+    assert roles["lr"]["role"] == "leg" and roles["lr"]["side"] == "r", roles
+    assert roles["t"]["role"] == "tail" and roles["t"]["side"] is None, roles
+    # 关节位置：头绕下边（脖子）、臂绕上边（肩）、腿绕上边（髋）、
+    # 尾巴绕靠身体那端
+    assert roles["h"]["joint"] == "bottom", roles
+    assert roles["al"]["joint"] == "top", roles
+    assert roles["ll"]["joint"] == "top", roles
+    assert roles["t"]["joint"] == "left", roles      # 尾巴在身体右侧 → 关节在左端
+
+    # 自动命名的部件：pivot 按几何走，不按名字
+    auto = parts_pipe.plan_rig([
+        {"id": "h", "name": "", "autoNamed": True, "size": [30, 30], "bbox": [85, 10, 30, 30]},
+        {"id": "b", "name": "", "autoNamed": True, "size": [34, 50], "bbox": [83, 44, 34, 50]},
+        {"id": "al", "name": "", "autoNamed": True, "size": [14, 38], "bbox": [64, 46, 14, 38]},
+    ], [300, 300])
+    am = {r["name"]: r for r in auto}
+    assert set(am) == {"头", "身体", "左臂"}, set(am)
+    assert am["头"]["pivot"][1] == 30, am["头"]        # 下边（绕脖子）
+    assert am["左臂"]["pivot"][1] == 0, am["左臂"]     # 上边（绕肩）
+    # 显式命名的部件：pivot 按名字走（用户故意叫「上臂」画朝上的）
+    manu = parts_pipe.plan_rig([
+        {"id": "b", "name": "身体", "size": [34, 50], "bbox": [83, 44, 34, 50]},
+        {"id": "al", "name": "上臂", "size": [14, 38], "bbox": [64, 46, 14, 38]},
+    ], [300, 300])
+    mm = {r["name"]: r for r in manu}
+    assert mm["上臂"]["pivot"][1] == 0, mm["上臂"]
+    print(f"[9s] 识别    → 头/身体/双臂/双腿/尾巴全部认对；"
+          f"自动命名 pivot 按几何（头 {am['头']['pivot']}）、"
+          f"显式命名按名字（{mm['上臂']['pivot']}）OK")
+
     # 颜色距离不能出 NaN：int16 算平方差会溢出回绕成负数，sqrt 得 NaN，
     # 不报错、只是让对应像素的 mask 静默失效（当时只在控制台看到一行 warning）
     far = parts_pipe._hex_dist(np.array([[[255, 0, 0], [0, 0, 255]]], dtype=np.uint8),

@@ -263,6 +263,162 @@ def _section_group(name: str) -> Optional[str]:
     return core or None
 
 
+# ---------------------------------------------------------------------------
+# 部位语义识别：只给几块涂色，判断它们是头/躯干/四肢/尾巴
+#
+# 为什么要做：用户涂色时其实**不需要知道这是什么部位**——他看到的是
+# 「一个绿色的块」，不是「左上臂」。让他先命名再涂，等于把工作推给用户。
+# 正确顺序是：先涂，机器再告诉他这是啥。
+#
+# 纯几何启发式（没有部位级分割模型）。判断依据只有三样：
+# 相对躯干的位置、自身的宽高比、以及彼此的连接关系。
+# 认错了不要紧——前端可改名，且 pivot 有几何兜底（见下）。
+#
+# **pivot 也按几何定**：关节在部件的哪一端，是可以从「靠近躯干/上一节」
+# 推出来的，比按名字猜「头绕下边、臂绕上边」可靠得多。
+# 用户显式命名的部件仍按名字走（他可能故意叫「上臂」但画的是朝上的）。
+# ---------------------------------------------------------------------------
+
+# 关节在部件的哪一端
+_JOINT_TOP = "top"
+_JOINT_BOTTOM = "bottom"
+_JOINT_LEFT = "left"
+_JOINT_RIGHT = "right"
+
+_ROLE_LABELS = {
+    "body": "身体",
+    "head": "头",
+    "arm": "臂",
+    "leg": "腿",
+    "tail": "尾巴",
+    "extra": "附属",
+}
+
+
+def _union_bbox(regions: Sequence[Dict[str, Any]]) -> List[int]:
+    x0 = min(int(r["bbox"][0]) for r in regions)
+    y0 = min(int(r["bbox"][1]) for r in regions)
+    x1 = max(int(r["bbox"][0]) + int(r["bbox"][2]) for r in regions)
+    y1 = max(int(r["bbox"][1]) + int(r["bbox"][3]) for r in regions)
+    return [x0, y0, x1 - x0, y1 - y0]
+
+
+def _find_body(regions: Sequence[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+    """躯干：包含整个图形竖直中线的、面积最大的部件。
+
+    为什么要「包含中线」而不直接取面积最大：用户可能涂了一件很大的披风，
+    它的面积比躯干还大。披风不会跨越身体的竖直中线，躯干会。
+    """
+    if not regions:
+        return None
+    fb = _union_bbox(regions)
+    mid_y = fb[1] + fb[3] / 2
+    best = None
+    best_score = -1.0
+    for r in regions:
+        x, y, w, h = (int(v) for v in r["bbox"])
+        area = max(1, w * h)
+        # 跨越中线的程度：部件竖直范围与中线那一行的重叠长度
+        cover = max(0.0, min(y + h, mid_y + 1) - max(y, mid_y - 1))
+        span = max(1.0, float(h))
+        score = area * (1.0 + cover / span)
+        if score > best_score:
+            best_score = score
+            best = r
+    return best
+
+
+def classify_regions(regions: Sequence[Dict[str, Any]]
+                     ) -> List[Dict[str, Any]]:
+    """给一组涂出来的部件判断语义角色。
+
+    regions 每项：{id, name, size:[w,h], bbox:[x,y,w,h]}（bbox 是原图坐标）。
+    返回每项额外带：role（body/head/arm/leg/tail/extra）、side（'l'/'r'/None）、
+    joint（关节在部件哪一端）、label（建议的中文名）。
+
+    判定顺序（先排除误判）：
+    1. 躯干：跨越图形竖直中线、面积最大的部件；
+    2. 头：完全在躯干上方（脖子在躯干顶）的那块；
+    3. 尾巴：横向伸出（宽 > 高）且不在躯干左右紧邻位置的；
+    4. 臂/腿：躯干两侧竖直的块，按竖直中心相对躯干中心分臂/腿。
+    """
+    items = [r for r in regions if r.get("bbox")]
+    if not items:
+        return []
+    body = _find_body(items)
+    if body is None:
+        return []
+    bx, by, bw, bh = (int(v) for v in body["bbox"])
+    b_cx = bx + bw / 2
+    b_cy = by + bh / 2
+
+    out: List[Dict[str, Any]] = []
+    for r in items:
+        x, y, w, h = (int(v) for v in r["bbox"])
+        cx = x + w / 2
+        cy = y + h / 2
+        role = "extra"
+        side = None
+        joint = _JOINT_BOTTOM
+
+        if r is body:
+            role = "body"
+            joint = _JOINT_BOTTOM          # 躯干绕胯
+        else:
+            above = (y + h) <= by + bh * 0.12
+            below = y >= by + bh * 0.88
+            left_of = (x + w) <= bx + bw * 0.35
+            right_of = x >= bx + bw * 0.65
+            horizontal = w > h * 1.15
+            if above:
+                role = "head"
+                joint = _JOINT_BOTTOM      # 头绕脖子（在下端）
+            elif left_of or right_of:
+                side = "l" if left_of else "r"
+                if horizontal:
+                    role = "tail"
+                    side = None            # 尾巴不分左右
+                    # 尾巴的关节在靠近身体的那一端
+                    joint = _JOINT_RIGHT if (x + w) <= bx + bw * 0.35 else _JOINT_LEFT
+                elif cy < b_cy:
+                    role = "arm"
+                    joint = _JOINT_TOP      # 垂下的臂：肩在上端
+                else:
+                    role = "leg"
+                    joint = _JOINT_TOP      # 腿：髋在上端
+            elif below:
+                side = "l" if cx < b_cx else "r"
+                role = "leg"
+                joint = _JOINT_TOP
+            else:
+                # 压在躯干上（帽子、披风、护甲）：算附属，关节在下端（贴身）
+                role = "extra"
+                joint = _JOINT_BOTTOM
+
+        label = _ROLE_LABELS.get(role, "部件")
+        if side and role != "tail":
+            label = ("左" if side == "l" else "右") + label
+        out.append({
+            "id": r["id"],
+            "role": role,
+            "side": side,
+            "joint": joint,
+            "label": label,
+        })
+    return out
+
+
+def _joint_pivot(joint: str, w: int, h: int) -> List[int]:
+    """按关节位置算 pivot（部件内的像素坐标）。"""
+    if joint == _JOINT_TOP:
+        return [w // 2, 0]
+    if joint == _JOINT_BOTTOM:
+        return [w // 2, h]
+    if joint == _JOINT_LEFT:
+        return [0, h // 2]
+    return [w, h // 2]
+
+
 def plan_rig(parts: Sequence[Dict[str, Any]],
              canvas: Sequence[int]) -> List[Dict[str, Any]]:
     """给一组部件规划「骨骼位置 + pivot + 缩放 + 父子关系」。
@@ -327,10 +483,26 @@ def plan_rig(parts: Sequence[Dict[str, Any]],
             chain_order[cur["id"]] = prev["id"]
 
     body_id = body["id"]
+    # 几何识别：给出每个部件的角色与「关节在哪一端」。
+    # pivot 优先按几何定（关节位置比名字可靠），但**用户显式命名的部件
+    # 仍按名字走**——他可能故意叫「上臂」而画的是朝上的。
+    geo = {g["id"]: g for g in classify_regions(items)}
+
     out: List[Dict[str, Any]] = []
     for p in items:
         w, h = int(p["size"][0]), int(p["size"][1])
-        piv = _pivot_for(p.get("name") or "", w, h)
+        pname = p.get("name") or ""
+        g = geo.get(p["id"])
+        # 几何优先：识别出的 joint 比名字可靠（「头」该绕下边，
+        # 但用户可能把头画在身体上方之外的地方）。
+        # 但「用户显式命名」时按名字走——他可能故意叫「上臂」而画的是朝上的。
+        # autoNamed 标记区分两者。
+        if g and p.get("autoNamed"):
+            piv = _joint_pivot(g["joint"], w, h)
+            label = g["label"]
+        else:
+            piv = _pivot_for(pname, w, h)
+            label = pname
         bx = (int(p["bbox"][0]) + piv[0]) * scale + ox
         by = (int(p["bbox"][1]) + piv[1]) * scale + oy
         if p is body:
@@ -341,7 +513,10 @@ def plan_rig(parts: Sequence[Dict[str, Any]],
             parent = body_id
         out.append({
             "id": p["id"],
-            "name": p.get("name") or "部件",
+            "name": label or "部件",
+            "role": g["role"] if g else "extra",
+            "side": g["side"] if g else None,
+            "joint": g["joint"] if g else _JOINT_BOTTOM,
             "bone": {"x": round(bx, 1), "y": round(by, 1),
                      "len": max(24, int(max(w, h) * scale)),
                      "parent": parent},

@@ -378,6 +378,50 @@ for _pp in _pj3.get("parts") or []:
 _rg3 = _pj3.get("rig") or []
 _pr3_map = {r["name"]: r["bone"]["parent"] for r in _rg3}
 _rg3_ids = {r["name"]: r["id"] for r in _rg3}
+# 自动识别：部位不写名字，服务端按几何判断角色并命名
+_ar3 = Image.new("RGBA", (120, 160), (0, 0, 0, 0))
+_a3 = ImageDraw.Draw(_ar3)
+_a3.ellipse((50, 6, 70, 26), fill=(240, 200, 170, 255))
+_a3.rectangle((48, 30, 74, 90), fill=(70, 130, 210, 255))
+_a3.rectangle((32, 32, 46, 80), fill=(230, 120, 80, 255))
+_a3.rectangle((76, 32, 90, 80), fill=(230, 120, 80, 255))
+_tg3 = Image.new("RGB", (120, 160), (0, 0, 0))
+_t3 = ImageDraw.Draw(_tg3)
+_t3.ellipse((50, 6, 70, 26), fill=(255, 0, 0))
+_t3.rectangle((48, 30, 74, 90), fill=(0, 255, 0))
+_t3.rectangle((32, 32, 46, 80), fill=(0, 0, 255))
+_t3.rectangle((76, 32, 90, 80), fill=(255, 255, 0))
+_ab3 = io.BytesIO(); _ar3.save(_ab3, "PNG")
+_tb4 = io.BytesIO(); _tg3.save(_tb4, "PNG")
+_pr4 = client.post("/api/pipeline/parts",
+                   files={"file": ("a.png", _ab3.getvalue(), "image/png"),
+                          "tag": ("t4.png", _tb4.getvalue(), "image/png")},
+                   data={"parts": json.dumps([
+                       {"id": "c1", "name": "", "color": "#ff0000"},
+                       {"id": "c2", "name": "", "color": "#00ff00"},
+                       {"id": "c3", "name": "", "color": "#0000ff"},
+                       {"id": "c4", "name": "", "color": "#ffff00"}],
+                       ensure_ascii=False)})
+_pj4 = _pr4.json() if _pr4.status_code == 200 else {}
+for _pp in _pj4.get("parts") or []:
+    if _pp.get("asset"):
+        remember(_pp["asset"])
+_names4 = [p.get("name") for p in _pj4.get("parts") or []]
+_roles4 = [p.get("role") for p in _pj4.get("parts") or []]
+check("自动识别：无名部位按几何命名并给出角色",
+      _pr4.status_code == 200 and "头" in _names4 and "身体" in _names4
+      and "左臂" in _names4 and "右臂" in _names4
+      and "head" in _roles4 and "body" in _roles4,
+      str(list(zip(_names4, _roles4))))
+_rig4 = _pj4.get("rig") or []
+_p4 = {r["name"]: r for r in _rig4}
+_sizes4 = {p.get("name"): p.get("size") for p in _pj4.get("parts") or []}
+check("自动命名的 pivot 按几何（头绕下、臂绕上）",
+      bool(_p4) and "头" in _p4 and "左臂" in _p4
+      and _p4["头"]["pivot"][1] == _sizes4["头"][1]
+      and _p4["左臂"]["pivot"][1] == 0,
+      str([(r.get("name"), r.get("pivot")) for r in _rig4]))
+
 check("分节链：尾巴1→2→3 串成父子链",
       _pr3.status_code == 200 and len(_rg3) == 4
       and _pr3_map.get("尾巴1") == _rg3_ids.get("身体")
