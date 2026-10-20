@@ -1727,6 +1727,26 @@ check("IK pole 与权重落盘",
 check("变形关键帧落盘",
       len((_saved.get("tracks") or [{}])[0].get("warpKeys") or []) == 2,
       str((_saved.get("tracks") or [{}])[0].get("warpKeys"))[:140])
+_w = client.get(f"/api/anim/projects/{_pid}/weights",
+                params={"track": _saved["tracks"][0]["id"], "frame": 0})
+_wj = _w.json() if _w.status_code == 200 else {}
+check("权重可视化端点",
+      _w.status_code == 200 and _wj.get("grid") == 6
+      and len(_wj.get("weights") or []) == 49 and _wj.get("painted") == 0,
+      f"{_w.status_code} {str(_wj)[:110]}")
+
+_painted = _saved["tracks"][0]["id"]
+_saved["tracks"][0]["skin"]["paint"] = {"arm": {"0": 1.0, "1": 0.5}}
+_r = client.put(f"/api/anim/projects/{_pid}", json=_saved)
+_w2 = client.get(f"/api/anim/projects/{_pid}/weights",
+                 params={"track": _painted, "frame": 0}).json()
+check("手刷权重落盘并生效",
+      _r.status_code == 200 and _w2.get("painted") == 2
+      and abs(_w2["weights"][0][1] - 1.0) < 1e-6, str(_w2.get("painted")))
+check("权重端点 · 轨道不存在 → 404",
+      client.get(f"/api/anim/projects/{_pid}/weights",
+                 params={"track": "nope"}).status_code == 404)
+
 check("关键帧贝塞尔落盘",
       (_saved.get("tracks") or [{}])[0]["keyframes"][-1].get("bez") == [0.6, 0.0, 0.4, 1.0],
       str((_saved.get("tracks") or [{}])[0].get("keyframes")))

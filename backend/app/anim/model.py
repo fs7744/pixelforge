@@ -143,9 +143,28 @@ def _skin(v: Any, bone_ids: set) -> Optional[Dict[str, Any]]:
     ids = [i for i in ids if i in bone_ids]
     if not ids:
         return None
+    grid = max(3, min(int(_num(v.get("grid"), 8)), 20))
+    paint: Dict[str, Dict[str, float]] = {}
+    raw = v.get("paint")
+    if isinstance(raw, dict):
+        top = (grid + 1) * (grid + 1) - 1
+        for bid, cells in list(raw.items())[:8]:
+            if bid not in ids or not isinstance(cells, dict):
+                continue
+            clean = {}
+            for idx, val in list(cells.items())[:4096]:
+                try:
+                    i = int(idx)
+                except (TypeError, ValueError):
+                    continue
+                if 0 <= i <= top:
+                    clean[str(i)] = round(max(0.0, min(_num(val), 1.0)), 4)
+            if clean:
+                paint[str(bid)] = clean
     return {"bones": ids,
             "falloff": max(8.0, min(round(_num(v.get("falloff"), 60), 1), 400.0)),
-            "grid": max(3, min(int(_num(v.get("grid"), 8)), 20))}
+            "grid": grid,
+            "paint": paint}
 
 
 def _bez(v: Any) -> Optional[List[float]]:

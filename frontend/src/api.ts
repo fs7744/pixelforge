@@ -614,6 +614,12 @@ export const api = {
     setTimeout(() => URL.revokeObjectURL(url), 1000)
   },
 
+  /** 权重可视化：顶点静止位 + 每骨骼最终权重（数学只在后端算一份） */
+  animWeights: (id: string, trackId: string, frame: number): Promise<any> => {
+    const q = new URLSearchParams({ track: trackId, frame: String(frame) })
+    return fetch(`/api/anim/projects/${id}/weights?${q.toString()}`).then(json)
+  },
+
   /** 导出 Godot 包：anim.json + 纹理 + 参考运行时（骨骼与蒙皮已烘焙） */
   animGodot: async (id: string, name = 'anim') => {
     const res = await fetch(`/api/anim/projects/${id}/export/godot`, { method: 'POST' })

@@ -1552,6 +1552,35 @@ async def anim_frame_png(pid: str, index: int, scale: float = 1.0):
                     headers={"Cache-Control": "no-store"})
 
 
+@app.get("/api/anim/projects/{pid}/weights")
+async def anim_weights(pid: str, track: str, frame: int = 0):
+    """权重可视化数据：顶点静止位 + 每根骨骼的最终权重。
+
+    界面用它画热力图、笔刷用它做命中判断——前端不再自己算一遍权重，
+    免得两套公式漂移（和导出那条原则一致：数学只有一处实现）。
+    """
+    from .anim import model as anim_model
+    from .anim import skin as skin_mod
+
+    proj = anim_model.get(pid)
+    if not proj:
+        raise HTTPException(404, "工程不存在")
+    t = next((x for x in proj.get("tracks") or [] if x["id"] == track), None)
+    if not t:
+        raise HTTPException(404, "轨道不存在")
+    if not t.get("skin"):
+        raise HTTPException(400, "该轨道没开蒙皮")
+    item = storage.get_asset(t["assetId"])
+    if not item:
+        raise HTTPException(404, "轨道贴图不存在")
+    with Image.open(storage.asset_path(item)) as im:
+        size = im.size
+    data = skin_mod.paint_view(proj, t, size, frame)
+    if data is None:
+        raise HTTPException(400, "蒙皮配置不完整（没有参与骨骼）")
+    return data
+
+
 class AnimRenderPayload(BaseModel):
     frames: Optional[str] = None
     scale: float = 1.0

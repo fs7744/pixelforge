@@ -12,7 +12,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { api, Asset } from '../api'
 
-type Mode = 'select' | 'bone' | 'warp' | 'brush'
+type Mode = 'select' | 'bone' | 'warp' | 'brush' | 'weight'
 type Pt = [number, number]
 
 type Aff = { a: number; b: number; c: number; d: number; e: number; f: number }
@@ -331,6 +331,12 @@ export default function Editor() {
   const [picker, setPicker] = useState(false)
   const [busy, setBusy] = useState(false)
   const [godotBusy, setGodotBusy] = useState(false)
+  // 权重笔刷：视图数据来自后端（数学只有一处实现），这里只负责显示与写入 paint
+  const [wView, setWView] = useState<any>(null)
+  const [wBone, setWBone] = useState('')
+  const [wRadius, setWRadius] = useState(2)
+  const [wStrength, setWStrength] = useState(0.5)
+  const [wDir, setWDir] = useState(1)
   const [note, setNote] = useState('')
   const [error, setError] = useState('')
   const [newName, setNewName] = useState('')
@@ -418,6 +424,23 @@ export default function Editor() {
     }, ms)
     return () => window.clearInterval(id)
   }, [playing, proj])
+
+  // 权重视图：轨道 / 帧 / 轨道改动（bump）变化时重拉
+  useEffect(() => {
+    if (mode !== 'weight' || !pid || !track?.skin) {
+      setWView(null)
+      return
+    }
+    let alive = true
+    api.animWeights(pid, track.id, frame)
+      .then((v) => {
+        if (!alive) return
+        setWView(v)
+        setWBone((b) => (v.bones?.some((x: any) => x.id === b) ? b : v.bones?.[0]?.id || ''))
+      })
+      .catch(() => setWView(null))
+    return () => { alive = false }
+  }, [mode, pid, track?.id, track?.skin, frame, bump])
 
   // ---------- 坐标 ----------
   const toCanvas = (e: { clientX: number; clientY: number }): Pt => {
@@ -535,6 +558,19 @@ export default function Editor() {
     const [x, y] = toCanvas(e)
     ;(e.target as Element).setPointerCapture?.(e.pointerId)
 
+    if (mode === 'weight' && wView) {
+      const g = wView.grid + 1
+      let best = -1
+      let bestD = 1e9
+      wView.rest.forEach((p: number[], i: number) => {
+        const d = Math.hypot(p[0] - x, p[1] - y)
+        if (d < bestD) { bestD = d; best = i }
+      })
+      if (bestD < 18 / zoom) {
+        dragRef.current = { kind: 'weight', idx: best, g }
+      }
+      return
+    }
     if (mode === 'brush' && track) {
       dragRef.current = { kind: 'brush', points: [[x, y, 1]] as number[][] }
       return
@@ -626,6 +662,39 @@ export default function Editor() {
           k.y += dy
         })
       }
+      return
+    }
+    if (d.kind === 'weight') {
+      const g = d.g
+      const ci = wView?.bones?.findIndex((b: any) => b.id === wBone) ?? -1
+      if (ci < 0) return
+      const ci0 = d.idx % g
+      const rj0 = Math.floor(d.idx / g)
+      const step = 0.04 * wStrength * wDir
+      const next = wView.weights.map((row: number[]) => [...row])
+      for (let j = rj0 - wRadius; j <= rj0 + wRadius; j++) {
+        for (let i = ci0 - wRadius; i <= ci0 + wRadius; i++) {
+          if (i < 0 || j < 0 || i >= g || j >= g) continue
+          if (Math.hypot(i - ci0, j - rj0) > wRadius) continue
+          const v = j * g + i
+          next[v][ci] = Math.max(0, Math.min(1, (next[v][ci] || 0) + step))
+        }
+      }
+      setWView({ ...wView, weights: next })
+      update((p) => {
+        const t = p.tracks.find((v: any) => v.id === track.id)
+        if (!t?.skin) return
+        t.skin.paint = t.skin.paint || {}
+        const cells = t.skin.paint[wBone] || {}
+        for (let j = rj0 - wRadius; j <= rj0 + wRadius; j++) {
+          for (let i = ci0 - wRadius; i <= ci0 + wRadius; i++) {
+            if (i < 0 || j < 0 || i >= g || j >= g) continue
+            if (Math.hypot(i - ci0, j - rj0) > wRadius) continue
+            cells[String(j * g + i)] = +next[j * g + i][ci].toFixed(3)
+          }
+        }
+        t.skin.paint[wBone] = cells
+      })
       return
     }
     if (d.kind === 'ik') {
@@ -899,9 +968,11 @@ export default function Editor() {
             {playing ? '暂停' : '播放'}
           </button>
           <div className="seg">
-            {(['select', 'bone', 'warp', 'brush'] as Mode[]).map((m) => (
-              <button key={m} className={mode === m ? 'on' : ''} onClick={() => setMode(m)}>
-                {m === 'select' ? '移动' : m === 'bone' ? '骨骼' : m === 'warp' ? '变形' : '笔刷'}
+            {(['select', 'bone', 'warp', 'brush', 'weight'] as Mode[]).map((m) => (
+              <button key={m} className={mode === m ? 'on' : ''} onClick={() => setMode(m)}
+                      disabled={m === 'weight' && !track?.skin}>
+                {m === 'select' ? '移动' : m === 'bone' ? '骨骼' : m === 'warp' ? '变形'
+                  : m === 'brush' ? '笔刷' : '权重'}
               </button>
             ))}
           </div>
@@ -1008,6 +1079,28 @@ export default function Editor() {
                     />
                   </g>
                 ))}
+                {/* 权重热力：当前骨骼权重 0→红，1→蓝 */}
+                {mode === 'weight' && wView && (() => {
+                  const ci = wView.bones.findIndex((b: any) => b.id === wBone)
+                  const g = wView.grid + 1
+                  return (
+                    <g>
+                      {wView.rest.map((p: number[], i: number) => {
+                        const w = ci >= 0 ? (wView.weights[i]?.[ci] ?? 0) : 0
+                        const r = Math.round(255 * (1 - w))
+                        const b = Math.round(255 * w)
+                        const gch = Math.round(60 + 40 * (1 - Math.abs(w - 0.5) * 2))
+                        return (
+                          <g key={i}>
+                            <circle cx={p[0]} cy={p[1]} r={6 / zoom}
+                                    fill={`rgba(${r},${gch},${b},0.55)`}
+                                    stroke="rgba(255,255,255,0.35)" strokeWidth={0.6 / zoom} />
+                          </g>
+                        )
+                      })}
+                    </g>
+                  )
+                })()}
                 {/* 变形网格 */}
                 {mode === 'warp' && track && (() => {
                   const m = trackMatrix(proj, track, frame)
@@ -1214,6 +1307,51 @@ export default function Editor() {
             </>
           )
         })()}
+
+        {mode === 'weight' && track?.skin && (
+          <>
+            <div className="section-title" style={{ marginTop: 14 }}>权重笔刷</div>
+            {!wView ? (
+              <div className="hint">正在读取权重…</div>
+            ) : (
+              <>
+                <div className="label">正在刷的骨骼</div>
+                <div className="chips">
+                  {wView.bones.map((b: any) => (
+                    <button key={b.id} className={`chip sm ${b.id === wBone ? 'on' : ''}`}
+                            onClick={() => setWBone(b.id)}>{b.name}</button>
+                  ))}
+                </div>
+                <div className="label" style={{ marginTop: 8 }}>方向</div>
+                <div className="seg">
+                  <button className={wDir > 0 ? 'on' : ''} onClick={() => setWDir(1)}>刷入</button>
+                  <button className={wDir < 0 ? 'on' : ''} onClick={() => setWDir(-1)}>刷出</button>
+                </div>
+                <div className="label" style={{ marginTop: 8 }}>半径 {wRadius} 格</div>
+                <input type="range" min={1} max={5} value={wRadius} style={{ width: '100%' }}
+                       onChange={(e) => setWRadius(+e.target.value)} />
+                <div className="label" style={{ marginTop: 6 }}>
+                  强度 {Math.round(wStrength * 100)}%
+                </div>
+                <input type="range" min={0.05} max={1} step={0.05} value={wStrength}
+                       style={{ width: '100%' }}
+                       onChange={(e) => setWStrength(+e.target.value)} />
+                <div className="hint" style={{ marginTop: 6 }}>
+                  已手刷 {wView.painted || 0} 个顶点（红色 = 完全不跟该骨骼，蓝色 = 完全跟）。
+                  网格密度改了要重刷——顶点下标会错位。
+                </div>
+                <button className="btn btn-ghost btn-block" style={{ marginTop: 6 }}
+                        onClick={() => {
+                          update((p) => {
+                            const t = p.tracks.find((v: any) => v.id === track.id)
+                            if (t?.skin) t.skin.paint = {}
+                          })
+                          setWView({ ...wView, painted: 0 })
+                        }}>清除全部手刷（回到自动权重）</button>
+              </>
+            )}
+          </>
+        )}
 
         {mode === 'brush' && (
           <>

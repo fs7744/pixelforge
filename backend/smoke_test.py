@@ -553,6 +553,30 @@ async def main() -> None:
     print(f"[9l] export  → 用 anim.json 重建帧与直出帧一致（RGB MAD {mad_new:.2f} / "
           f"alpha {a_mad:.2f}）OK")
 
+    # 手刷权重：把最左边几个顶点强行刷给 b2，旋转时它们就该跟着 b2 走
+    from backend.app.anim import skin as skin_mod
+
+    pproj = _skin_proj(45, True)
+    cells = {str(i): 1.0 for i in range(6)}
+    pproj["tracks"][0]["skin"]["paint"] = {"b2": cells}
+    pproj = anim_model.normalize(pproj)
+    painted_img = anim_render.render_frame(pproj, 0, tex)
+    view = skin_mod.paint_view(pproj, pproj["tracks"][0], band.size, 0)
+    assert view["painted"] == 6 and len(view["weights"]) == 121, view["painted"]
+    assert abs(view["weights"][0][1] - 1.0) < 1e-6, view["weights"][0]
+
+    # 直接比顶点：刷过的顶点应该被 b2 拉走一大截
+    twin = anim_model.normalize({
+        **pproj, "tracks": [{**pproj["tracks"][0],
+                             "skin": {**pproj["tracks"][0]["skin"], "paint": {}}}]})
+    vp = skin_mod.deform(pproj, pproj["tracks"][0], band.size, 0)
+    va = skin_mod.deform(twin, twin["tracks"][0], band.size, 0)
+    moved = max(math.hypot(vp[0][i][0] - va[0][i][0], vp[0][i][1] - va[0][i][1])
+                for i in range(6))
+    assert moved > 20, f"刷过的顶点应被 b2 带走，实际最大位移 {moved:.1f}px"
+    print(f"[9m] paint   → 6 个顶点刷给 b2，最大位移 {moved:.1f}px OK")
+
+
     storage.delete_asset(ta["id"])
 
 
