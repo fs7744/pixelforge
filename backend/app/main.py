@@ -1691,6 +1691,52 @@ async def anim_project_delete(pid: str):
     return {"ok": True}
 
 
+@app.get("/api/anim/projects/{pid}/export.gif")
+async def anim_export_gif(pid: str, fps: int = 0, scale: float = 1.0,
+                          loop: int = 0, maxColors: int = 256):
+    """导出 GIF：一段能直接贴到聊天/网页里的循环动画。
+
+    GIF 的限制写在 anim/gif.py 顶部：256 色、1-bit 透明、逐帧栅格化。
+    要保真请用 PNG 序列（export/zip）或 Godot 骨架包。
+    """
+    from .anim import model as anim_model
+    from .anim import render as anim_render
+    from .anim import gif as gif_mod
+
+    proj = anim_model.get(pid)
+    if not proj:
+        raise HTTPException(404, "工程不存在")
+
+    def _load(aid: str):
+        item = storage.get_asset(aid)
+        if not item:
+            return None
+        p = storage.asset_path(item)
+        if not p.is_file():
+            return None
+        return Image.open(p).convert("RGBA")
+
+    def _run():
+        pairs = anim_render.render_frames(proj, None, _load, scale=scale)
+        imgs = [im for _, im in pairs]
+        fps_v = int(fps) or int(proj.get("fps") or 12)
+        dur = max(20, int(round(1000.0 / max(1, fps_v))))
+        return gif_mod.to_gif(imgs, duration_ms=dur, loop=loop,
+                              max_colors=max(16, min(256, int(maxColors))))
+
+    try:
+        data = await run_in_threadpool(_run)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    name = f"{(proj.get('name') or 'anim')}.gif".replace('"', "")
+    quoted = urllib.parse.quote(name)
+    ascii_name = "".join(c if c.isascii() and c not in ' "\\' else "_" for c in name) or "anim.gif"
+    return Response(content=data, media_type="image/gif",
+                    headers={"Content-Disposition":
+                             f"attachment; filename=\"{ascii_name}\"; filename*=UTF-8''{quoted}",
+                             "Cache-Control": "no-store"})
+
+
 @app.get("/api/anim/projects/{pid}/review.png")
 async def anim_review_png(pid: str, cols: int = 0, scale: float = 1.0):
     """帧审查图：所有帧排成网格，标出逐帧差异与循环接缝。

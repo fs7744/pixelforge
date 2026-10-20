@@ -637,6 +637,23 @@ export const api = {
   spriteGroups: (pipeline = 'sheet-split'): Promise<any> =>
     fetch(`/api/sprite/groups?pipeline=${encodeURIComponent(pipeline)}`).then(json),
 
+  /** 导出 GIF（自带编码器：全局调色板 + 全局透明索引） */
+  animGif: async (id: string, name = 'anim', fps = 0, scale = 1) => {
+    const q = new URLSearchParams({ fps: String(fps), scale: String(scale) })
+    const res = await fetch(`/api/anim/projects/${id}/export.gif?${q.toString()}`)
+    if (!res.ok) {
+      const d = await res.json().catch(() => ({}))
+      throw new Error(d.detail || 'GIF 导出失败')
+    }
+    const blob = await res.blob()
+    const url = URL.createObjectURL(blob)
+    const a = document.createElement('a')
+    a.href = url
+    a.download = `${name}.gif`
+    a.click()
+    setTimeout(() => URL.revokeObjectURL(url), 1000)
+  },
+
   /** 版本快照列表（服务端留的历史，刷新页面也不丢） */
   animSnapshots: (id: string): Promise<{ snapshots: any[] }> =>
     fetch(`/api/anim/projects/${id}/snapshots`).then(json),

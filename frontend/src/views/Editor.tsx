@@ -341,6 +341,7 @@ export default function Editor() {
   const [groups, setGroups] = useState<any[] | null>(null)
   const [busy, setBusy] = useState(false)
   const [godotBusy, setGodotBusy] = useState(false)
+  const [gifBusy, setGifBusy] = useState(false)
   // 权重笔刷：视图数据来自后端（数学只有一处实现），这里只负责显示与写入 paint
   const [wView, setWView] = useState<any>(null)
   const [wBone, setWBone] = useState('')
@@ -1094,6 +1095,20 @@ export default function Editor() {
     await loadList()
   }
 
+  const doGif = async () => {
+    if (!pid || !proj) return
+    setGifBusy(true)
+    setError('')
+    try {
+      await api.animGif(pid, proj.name || 'anim', proj.fps || 12)
+      setNote('已导出 GIF：256 色、1-bit 透明、逐帧栅格化（要保真请用 ZIP 帧序列）')
+    } catch (e: any) {
+      setError(e.message || String(e))
+    } finally {
+      setGifBusy(false)
+    }
+  }
+
   const doGodot = async () => {
     if (!pid || !proj) return
     setGodotBusy(true)
@@ -1408,6 +1423,10 @@ export default function Editor() {
           </div>
           <button className="btn" disabled={busy || !pid} onClick={doExport}>
             {busy ? '导出中…' : '导出 ZIP（含法线）'}
+          </button>
+          <button className="btn btn-ghost" disabled={gifBusy || !pid} onClick={doGif}
+                  title="循环 GIF（256 色 / 1-bit 透明）">
+            {gifBusy ? '导出中…' : '导出 GIF'}
           </button>
           <button className="btn btn-ghost" disabled={godotBusy || !pid} onClick={doGodot}>
             {godotBusy ? '打包中…' : '导出 Godot 包'}

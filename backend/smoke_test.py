@@ -874,6 +874,35 @@ async def main() -> None:
     assert _red_px(normal) == 0, f"正常循环不该有红框：{_red_px(normal)}"
     assert _red_px(stuck) > 0, "卡住的那一帧应被标出"
     print(f"[9v] 审查图  → 正常循环 0 标记 / 卡住帧被红框标出 OK")
+
+    # GIF 导出：自写编码器（全局调色板 + 全局透明索引）
+    # 为什么不用 PIL 的 save("GIF")：它会给每帧建局部调色表并重排索引，
+    # 透明索引就指错了——实测皮肤色的像素被当成透明，帧里出现大块洋红。
+    from backend.app.anim import gif as gif_mod
+
+    def _gif_frame(i, n=4):
+        im = Image.new("RGBA", (32, 32), (0, 0, 0, 0))
+        dr = ImageDraw.Draw(im)
+        dr.ellipse((2 + i * 3, 6, 18 + i * 3, 22), fill=(255, 120, 40, 255))
+        return im
+
+    gframes = [_gif_frame(i) for i in range(4)]
+    gdata = gif_mod.to_gif(gframes, duration_ms=120)
+    assert gdata[:6] == b"GIF89a", gdata[:6]
+    gb = Image.open(io.BytesIO(gdata))
+    assert gb.n_frames == 4, gb.n_frames
+    assert gb.size == (32, 32), gb.size
+    # 各帧的皮肤色必须一致（全局调色板 → 不闪）
+    skin = []
+    for i in range(gb.n_frames):
+        gb.seek(i)
+        skin.append(gb.convert("RGB").getpixel((6, 14)))
+    assert len(set(skin)) == 1, f"帧间颜色不一致（会闪）：{skin}"
+    # 透明像素不能变成内容色（哨兵色索引）
+    gb.seek(0)
+    assert gb.convert("RGBA").getpixel((0, 0))[3] == 0, "透明像素应真透明"
+    print(f"[9w] gif     → {len(gdata)} 字节 {gb.n_frames} 帧，"
+          f"帧间颜色一致 {skin[0]}，透明区真透明 OK")
     print(f"[9u] 置信度  → 清晰 {clear['h']['conf']:.2f}/"
           f"{clear['al']['conf']:.2f} vs 帽子歧义 {vague['h']['conf']:.2f}"
           f"/头悬空 {far['h']['conf']:.2f}；"
