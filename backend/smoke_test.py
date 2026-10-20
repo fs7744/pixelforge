@@ -501,6 +501,58 @@ async def main() -> None:
     assert dy > 3, f"弯下去后质心应下移，实际 {dy:.1f}px"
     print(f"[9j] skin    → 静止位与原渲染 MAD={still_mad:.2f}；转 45° 后 "
           f"右段形变 {right / max(1.0, left):.1f}× 左段，质心下移 {dy:.1f}px OK")
+
+    # Godot 包：骨骼世界矩阵与蒙皮顶点都烘焙进 anim.json，运行时不再算
+    from backend.app.anim import export as anim_export
+
+    gproj = _skin_proj(30, True)
+    gproj["tracks"].append({"id": "t2", "name": "刚体", "assetId": ta["id"],
+                            "bone": "b2", "pivot": [5, 5],
+                            "keyframes": [{"frame": 0, "x": 10}]})
+    gproj = anim_model.normalize(gproj)
+    blob = anim_export.build_zip(gproj, lambda aid: storage.asset_path(storage.get_asset(aid)))
+    with zipfile.ZipFile(io.BytesIO(blob)) as zf:
+        names = set(zf.namelist())
+        gdata = json.loads(zf.read("anim.json"))
+    assert "anim.json" in names and "anim_player.gd" in names and "README.txt" in names
+    assert f"textures/{ta['id']}.png" in names, names
+    assert gdata["frames"] == 1 and len(gdata["boneFrames"]) == 1
+    assert len(gdata["tracks"]) == 2, [t["name"] for t in gdata["tracks"]]
+
+    skinned = next(t for t in gdata["tracks"] if t["skinned"])
+    rigid = next(t for t in gdata["tracks"] if not t["skinned"])
+    assert len(skinned["mesh"]["uv"]) == 11 * 11 and len(skinned["mesh"]["triangles"]) == 200
+    assert len(skinned["frames"][0]["verts"]) == 11 * 11 * 2
+    # 骨骼世界矩阵要和渲染层完全对得上（差 0.01px 以上就说明两套数学漂了）
+    b2m = gdata["boneFrames"][0]["b2"]["m"]
+    real = anim_render.bone_world(gproj, 0)["b2"]
+    assert abs(b2m[4] - float(real[0, 2])) < 0.01 and abs(b2m[5] - float(real[1, 2])) < 0.01, \
+        (b2m, real)
+    # 刚体轨道：矩阵应等于「骨骼世界 × 关键帧位移」，这里 x=10 直接体现在 e 上
+    assert rigid["frames"][0]["m"][4] > 0, rigid["frames"][0]["m"]
+    print(f"[9k] export  → Godot 包 {len(blob) // 1024}KB："
+          f"{len(names)} 文件 · 蒙皮 UV {len(skinned['mesh']['uv'])} / 三角 "
+          f"{len(skinned['mesh']['triangles'])} · 骨骼矩阵一致 OK")
+
+    # 用包里的数据重建一帧，应该和渲染结果几乎一致（MAD 只在插值误差量级）
+    recon = np.zeros((120, 240, 4), np.uint8)
+    uv = skinned["mesh"]["uv"]
+    verts = skinned["frames"][0]["verts"]
+    for tri in skinned["mesh"]["triangles"]:
+        src_tri = [tuple(uv[i]) for i in tri]
+        dst_tri = [(verts[i * 2], verts[i * 2 + 1]) for i in tri]
+        anim_render._blit_triangle(recon, np.asarray(band), src_tri, dst_tri)
+    # 只比蒙皮轨道：gproj 里还有一条刚体轨道，不参与这次重建
+    solo = json.loads(json.dumps(gproj))
+    solo["tracks"] = solo["tracks"][:1]
+    exp = np.asarray(anim_render.render_frame(solo, 0, tex).convert("RGBA"), np.int16)
+    got = recon.astype(np.int16)
+    mad_new = float(np.abs(exp[..., :3] - got[..., :3]).mean())
+    a_mad = float(np.abs(exp[..., 3] - got[..., 3]).mean())
+    assert mad_new < 8 and a_mad < 8, f"导出数据重建偏差过大：RGB {mad_new:.1f} alpha {a_mad:.1f}"
+    print(f"[9l] export  → 用 anim.json 重建帧与直出帧一致（RGB MAD {mad_new:.2f} / "
+          f"alpha {a_mad:.2f}）OK")
+
     storage.delete_asset(ta["id"])
 
 

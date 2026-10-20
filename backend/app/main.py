@@ -1615,6 +1615,34 @@ async def anim_project_render(pid: str, payload: AnimRenderPayload):
                              f"attachment; filename=\"{ascii_name}\"; filename*=UTF-8''{quoted}"})
 
 
+@app.post("/api/anim/projects/{pid}/export/godot")
+async def anim_export_godot(pid: str):
+    """导出 Godot 包：anim.json + textures + 运行时 + 说明。
+
+    骨骼矩阵与蒙皮顶点都在这里**烘焙**好，运行时不做骨链/权重计算——
+    否则引擎侧要把 FABRIK、权重公式再实现一遍，两边一漂画面就对不上。
+    """
+    from .anim import export as anim_export
+    from .anim import model as anim_model
+
+    proj = anim_model.get(pid)
+    if not proj:
+        raise HTTPException(404, "工程不存在")
+
+    def _asset_path(aid: str):
+        item = storage.get_asset(aid)
+        return storage.asset_path(item) if item else None
+
+    data = await run_in_threadpool(anim_export.build_zip, proj, _asset_path)
+    raw = f"{proj.get('name') or 'anim'}-godot.zip"
+    ascii_name = "".join(ch if ch.isascii() and ch not in ' "\\' else "_" for ch in raw) \
+        or f"anim-{pid}-godot.zip"
+    quoted = urllib.parse.quote(raw)
+    return Response(content=data, media_type="application/zip",
+                    headers={"Content-Disposition":
+                             f"attachment; filename=\"{ascii_name}\"; filename*=UTF-8''{quoted}"})
+
+
 @app.post("/api/pipeline/normals")
 async def pipeline_normals(
     file: Optional[UploadFile] = File(None),

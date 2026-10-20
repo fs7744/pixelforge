@@ -614,6 +614,22 @@ export const api = {
     setTimeout(() => URL.revokeObjectURL(url), 1000)
   },
 
+  /** 导出 Godot 包：anim.json + 纹理 + 参考运行时（骨骼与蒙皮已烘焙） */
+  animGodot: async (id: string, name = 'anim') => {
+    const res = await fetch(`/api/anim/projects/${id}/export/godot`, { method: 'POST' })
+    if (!res.ok) {
+      const d = await res.json().catch(() => ({}))
+      throw new Error(d.detail || '导出失败')
+    }
+    const blob = await res.blob()
+    const url = URL.createObjectURL(blob)
+    const a = document.createElement('a')
+    a.href = url
+    a.download = `${name}-godot.zip`
+    a.click()
+    setTimeout(() => URL.revokeObjectURL(url), 1000)
+  },
+
   // ---- 法线 / 材质掩码 ----
   normals: (
     payload: {

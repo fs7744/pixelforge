@@ -330,6 +330,7 @@ export default function Editor() {
   const [assets, setAssets] = useState<Asset[]>([])
   const [picker, setPicker] = useState(false)
   const [busy, setBusy] = useState(false)
+  const [godotBusy, setGodotBusy] = useState(false)
   const [note, setNote] = useState('')
   const [error, setError] = useState('')
   const [newName, setNewName] = useState('')
@@ -719,6 +720,20 @@ export default function Editor() {
     await loadList()
   }
 
+  const doGodot = async () => {
+    if (!pid || !proj) return
+    setGodotBusy(true)
+    setError('')
+    try {
+      await api.animGodot(pid, proj.name || 'anim')
+      setNote('已导出 Godot 包：anim.json + textures/ + anim_player.gd + README')
+    } catch (e: any) {
+      setError(e.message || String(e))
+    } finally {
+      setGodotBusy(false)
+    }
+  }
+
   const doExport = async () => {
     if (!pid || !proj) return
     setBusy(true)
@@ -902,6 +917,9 @@ export default function Editor() {
           </select>
           <button className="btn" disabled={busy || !pid} onClick={doExport}>
             {busy ? '导出中…' : '导出 ZIP（含法线）'}
+          </button>
+          <button className="btn btn-ghost" disabled={godotBusy || !pid} onClick={doGodot}>
+            {godotBusy ? '打包中…' : '导出 Godot 包'}
           </button>
         </div>
 

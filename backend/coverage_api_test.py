@@ -1708,6 +1708,7 @@ _proj["ik"] = [{"id": "ik1", "name": "手部 IK", "end": "arm", "chain": 2,
                           "y": _proj["bones"][0]["y"] - 30, "w": 0.5}]}]
 _proj["tracks"] = [{"id": "t1", "name": "条", "assetId": _tex["id"], "bone": "arm",
                     "pivot": [20, 20],
+                    "skin": {"bones": ["root", "arm"], "falloff": 55, "grid": 6},
                     "warpKeys": [{"frame": 0, "warp": [[0, 0]] * 9},
                                  {"frame": 3, "warp": [[6, 0]] * 9, "bez": [0.4, 0, 0.2, 1]}],
                     "keyframes": [{"frame": 0, "x": 0},
@@ -1751,6 +1752,26 @@ check("ZIP 含帧/拼图/法线/工程",
       and any(n.startswith("normals/") for n in _names), str(_names[:6]))
 check("工程出现在列表",
       any(p.get("id") == _pid for p in client.get("/api/anim/projects").json()["projects"]))
+_r = client.post(f"/api/anim/projects/{_pid}/export/godot")
+_gnames = []
+_gdata = {}
+if _r.status_code == 200 and _r.content[:2] == b"PK":
+    with zipfile.ZipFile(io.BytesIO(_r.content)) as _zf:
+        _gnames = _zf.namelist()
+        _gdata = json.loads(_zf.read("anim.json"))
+check("Godot 导出 200", _r.status_code == 200 and _r.content[:2] == b"PK", str(_r.status_code))
+check("包含 anim.json / 贴图 / 运行时 / 说明",
+      "anim.json" in _gnames and "anim_player.gd" in _gnames
+      and "README.txt" in _gnames and any(n.startswith("textures/") for n in _gnames),
+      str(_gnames[:5]))
+check("骨骼逐帧矩阵数量正确",
+      len(_gdata.get("boneFrames") or []) == 4 and "arm" in _gdata["boneFrames"][0],
+      str(len(_gdata.get("boneFrames") or [])))
+check("蒙皮轨道带烘焙网格",
+      bool(_gdata["tracks"][0].get("skinned"))
+      and len(_gdata["tracks"][0]["mesh"]["uv"]) == 7 * 7,
+      str(_gdata["tracks"][0].get("mesh", {}).get("uv"))[:80])
+
 check("删除工程", client.delete(f"/api/anim/projects/{_pid}").status_code == 200)
 check("删除后再取 → 404", client.get(f"/api/anim/projects/{_pid}").status_code == 404)
 
