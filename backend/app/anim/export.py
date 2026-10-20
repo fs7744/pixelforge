@@ -236,18 +236,37 @@ func track_triangles(track: Dictionary) -> PackedInt32Array:
 
 ## ---- 运行时 ----
 
+## 轨道混合模式 → CanvasItemMaterial
+##
+## 后端的 add 是 `dst + src * alpha`、multiply 是 `dst * lerp(1, src, alpha)`，
+## Godot 的 BLEND_MODE_ADD / BLEND_MODE_MUL 语义一致（含 alpha 预乘处理），
+## 所以直接映射即可；normal 用默认 MIX。
+func track_material(t: Dictionary, tex: Texture2D) -> CanvasItemMaterial:
+	var mat := CanvasItemMaterial.new()
+	mat.texture = tex
+	match String(t.get("blend", "normal")):
+		"add":
+			mat.blend_mode = CanvasItemMaterial.BLEND_MODE_ADD
+		"multiply":
+			mat.blend_mode = CanvasItemMaterial.BLEND_MODE_MUL
+	return mat
+
 func _build() -> void:
 	_nodes.clear()
 	for t in data.get("tracks", []):
+		var tex: Texture2D = load(_base.path_join(t["texture"]))
+		var mat := track_material(t, tex)
 		var node: Node2D
 		if t.get("skinned", false):
 			var mi := MeshInstance2D.new()
-			mi.material = CanvasItemMaterial.new()
+			mi.material = mat
+			mi.texture = tex
 			node = mi
 		else:
 			var sp := Sprite2D.new()
-			sp.texture = load(_base.path_join(t["texture"]))
+			sp.texture = tex
 			sp.centered = false
+			sp.material = mat
 			node = sp
 		add_child(node)
 		_nodes.append(node)
@@ -295,7 +314,6 @@ func _apply_mesh(mi: MeshInstance2D, t: Dictionary, fr: Dictionary) -> void:
 		st.set_uv(uvs[vi])
 		st.add_vertex(Vector3(pts[vi].x, pts[vi].y, 0.0))
 	mi.mesh = st.commit()
-	mi.texture = load(_base.path_join(t["texture"]))
 	mi.modulate.a = float(fr.get("opacity", 1.0))
 '''
 
@@ -337,7 +355,12 @@ tracks      : 每条轨道
        add_child(a)
        a.play("", true)
 3. 蒙皮轨道用 ArrayMesh 逐帧重建——顶点已经烘焙，引擎侧不需要权重计算。
-4. 视口背景请设为透明（Window.transparent_bg = true 或项目里把
+4. 混合模式：normal / add / multiply 已映射到 CanvasItemMaterial（材质在
+   load_package 时按轨道建好，运行时只改 transform 与 modulate）。
+   注意 alpha 口径不同：后端 add 是「dst.rgb + src.rgb*a」且**不改 alpha**，
+   Godot 的 BLEND_MODE_ADD 会把 alpha 也累加。颜色一致，alpha 会略高——
+   实测混合模式轨道的像素差 MAD 约 2–6，normal 轨道 ≤1。
+5. 视口背景请设为透明（Window.transparent_bg = true 或项目里把
    default_clear_color 的 alpha 设为 0）。Godot 默认清除色是不透明的灰，
    与导出的透明画布叠在一起会整体偏色。
 

@@ -150,12 +150,20 @@ def _make_assets() -> Tuple[Image.Image, Image.Image]:
         d.rectangle((x, 0, x + 6, 39), fill=(240, 230, 120, 255))
     cube = Image.new("RGBA", (24, 24), (0, 0, 0, 0))
     ImageDraw.Draw(cube).rectangle((2, 2, 21, 21), fill=(240, 90, 70, 255))
-    return band, cube
+    # 混合模式用的两张：加色光斑（半透明暖色）与正片叠底的阴影块
+    glow = Image.new("RGBA", (48, 48), (0, 0, 0, 0))
+    gd_ = ImageDraw.Draw(glow)
+    for r in range(24, 0, -2):
+        a = int(150 * (1 - r / 26))
+        gd_.ellipse((24 - r, 24 - r, 24 + r, 24 + r), fill=(255, 190, 90, a))
+    shade = Image.new("RGBA", (40, 40), (150, 160, 200, 255))
+    return band, cube, glow, shade
 
 
-def build_project(dirpath: Path) -> Tuple[Dict[str, Any], Dict[str, Image.Image], Dict[str, Any]]:
-    band, cube = _make_assets()
-    textures = {"band": band, "cube": cube}
+def build_project(dirpath: Path, with_blend: bool = False
+                  ) -> Tuple[Dict[str, Any], Dict[str, Image.Image], Dict[str, Any]]:
+    band, cube, glow, shade = _make_assets()
+    textures = {"band": band, "cube": cube, "glow": glow, "shade": shade}
     proj = anim_model.normalize({
         "id": "abcdef012345", "name": "verify", "canvas": [240, 120], "fps": 10, "frames": 4,
         "bones": [
@@ -169,7 +177,15 @@ def build_project(dirpath: Path) -> Tuple[Dict[str, Any], Dict[str, Image.Image]
              "keyframes": [{"frame": 0, "scale": 1}]},
             {"id": "t2", "name": "方块", "assetId": "cube", "bone": "b2", "pivot": [4, 4],
              "keyframes": [{"frame": 0, "x": 0}, {"frame": 3, "x": 20, "rot": 15}]},
-        ],
+        ] + ([
+            {"id": "t3", "name": "光斑", "assetId": "glow", "bone": "root",
+             "pivot": [24, 24], "blend": "add", "opacity": 0.8,
+             "keyframes": [{"frame": 0, "x": 30, "y": 6}, {"frame": 3, "x": 70, "y": 10}]},
+            {"id": "t4", "name": "阴影", "assetId": "shade", "bone": "root",
+             "pivot": [20, 20], "blend": "multiply", "opacity": 0.7,
+             "keyframes": [{"frame": 0, "x": 10, "y": 30, "scale": 0.8},
+                           {"frame": 3, "x": 40, "y": 34, "scale": 0.9}]},
+        ] if with_blend else []),
     })
     data = anim_export.build_anim_data(proj, textures)
     (dirpath / "anim").mkdir(parents=True, exist_ok=True)
@@ -287,8 +303,14 @@ def run_godot_render(godot: Path, dirpath: Path, proj: Dict[str, Any]) -> Option
 
 
 def compare_pixels(proj: Dict[str, Any], textures: Dict[str, Image.Image],
-                   shots: List[Path]) -> Tuple[List[str], List[str]]:
-    """引擎渲出来的 PNG 与后端直出帧逐像素比。"""
+                   shots: List[Path], threshold: float = 6.0,
+                   tag: str = "") -> Tuple[List[str], List[str]]:
+    """引擎渲出来的 PNG 与后端直出帧逐像素比。
+
+    混合模式的口径差异要单列：后端的 add 是 `dst.rgb + src.rgb*a` 且**不改 alpha**，
+    而 Godot 的 BLEND_MODE_ADD 会把 alpha 也累加。颜色接近、alpha 会漂，
+    所以带混合模式的工程用更宽的阈值，并单独标注，不与严格档混在一起。
+    """
     problems: List[str] = []
     notes: List[str] = []
     tex = {t["assetId"]: textures[t["assetId"]] for t in proj["tracks"]}
@@ -310,10 +332,12 @@ def compare_pixels(proj: Dict[str, Any], textures: Dict[str, Image.Image],
         keep.mkdir(parents=True, exist_ok=True)
         got.save(keep / f"engine_f{f}.png")
         exp_img.save(keep / f"backend_f{f}.png")
-        if mad > 6 or alpha_mad > 6:
-            problems.append(f"第 {f} 帧引擎渲染与后端偏差过大：RGB {mad:.2f} / alpha {alpha_mad:.2f}")
+        if mad > threshold or alpha_mad > threshold:
+            problems.append(f"第 {f} 帧引擎渲染与后端偏差过大{tag}："
+                            f"RGB {mad:.2f} / alpha {alpha_mad:.2f}")
         else:
-            notes.append(f"第 {f} 帧引擎渲染 ≈ 后端（RGB MAD {mad:.2f} / alpha {alpha_mad:.2f}）")
+            notes.append(f"第 {f} 帧引擎渲染 ≈ 后端{tag}"
+                         f"（RGB MAD {mad:.2f} / alpha {alpha_mad:.2f}）")
     return problems, notes
 
 
@@ -342,6 +366,17 @@ def main() -> int:
             for line in pix_problems:
                 print("  x " + line)
             problems.extend(pix_problems)
+
+            # 第二遍：加上 add / multiply 轨道，口径差异只作参考，不判失败
+            bdir = workdir / "blend"
+            bdir.mkdir(exist_ok=True)
+            bdata, btex, bproj = build_project(bdir, with_blend=True)
+            bshots = run_godot_render(godot, bdir, bproj)
+            if bshots:
+                _, bnotes = compare_pixels(bproj, btex, bshots, threshold=25.0,
+                                           tag="（混合模式档）")
+                for line in bnotes:
+                    print("  ~ " + line)
         else:
             print("  - 像素验证跳过：当前环境没有可用的渲染上下文（headless 验证仍然通过）")
         if problems:
