@@ -1392,6 +1392,16 @@ export default function Editor() {
                   onChange={(e) => setZoom(+e.target.value)}>
             {[0.5, 0.75, 1, 1.5, 2].map((z) => <option key={z} value={z}>{Math.round(z * 100)}%</option>)}
           </select>
+          <button className="btn btn-ghost"
+                  onClick={() => {
+                    if (!pid) return
+                    // 审查图：新标签打开。帧多的时候图很大，
+                    // 塞进编辑器会把布局撑坏，不如单独看。
+                    window.open(`/api/anim/projects/${pid}/review.png`, '_blank')
+                  }}
+                  title="把所有帧排成网格，标出逐帧差异与循环接缝">
+            审查图
+          </button>
           <div className="seg" title="撤销 / 重做（Ctrl+Z / Ctrl+Shift+Z）">
             <button disabled={!histState.canUndo} onClick={undo}>撤销</button>
             <button disabled={!histState.canRedo} onClick={redo}>重做</button>

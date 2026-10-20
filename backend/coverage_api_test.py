@@ -1952,6 +1952,11 @@ _s2 = client.put(f"/api/anim/projects/{_pid}", json=_saved).json()
 _sn = client.get(f"/api/anim/projects/{_pid}/snapshots")
 _snj = _sn.json() if _sn.status_code == 200 else {}
 _slist = _snj.get("snapshots") or []
+# 帧审查图：所有帧排成网格（编辑器里改完关键帧用肉眼验收）
+_rv = client.get(f"/api/anim/projects/{_pid}/review.png")
+check("帧审查图端点", _rv.status_code == 200 and _rv.content[:4] == b"\x89PNG",
+      f"{_rv.status_code} {len(_rv.content)} bytes")
+
 check("版本快照：保存后有历史", _sn.status_code == 200 and len(_slist) >= 1,
       f"{len(_slist)} 份")
 _sid = _slist[0]["id"] if _slist else ""
@@ -1962,6 +1967,20 @@ _kf_before = len(_saved["tracks"][0]["keyframes"]) - 1   # append 之前
 _kf_after = len(((_rj.get("tracks") or [{}])[0] or {}).get("keyframes") or [])
 check("恢复快照：回到旧内容", _rr.status_code == 200 and _kf_after == _kf_before,
       f"恢复后 {_kf_after} 个，应为 {_kf_before}")
+# 同一秒内连续保存两次：快照 id 必须不撞名。
+# 之前用秒级时间戳 + 随机后缀，文件名仍可能相同（同秒）→ 互相覆盖，
+# 版本历史凭空少一条。改成毫秒级前缀。
+_pid2 = client.post("/api/anim/projects", json={"name": "撞名测试", "canvas": [128, 128],
+                                                 "frames": 2}).json()["id"]
+_p2 = client.get(f"/api/anim/projects/{_pid2}").json()
+for _i in range(3):
+    _p2["name"] = f"撞名测试 {_i}"
+    client.put(f"/api/anim/projects/{_pid2}", json=_p2)
+_sn2 = client.get(f"/api/anim/projects/{_pid2}/snapshots").json()
+check("连续保存不撞名（快照不丢）", len(_sn2.get("snapshots") or []) == 3,
+      f"{len(_sn2.get('snapshots') or [])} 份，应为 3")
+client.delete(f"/api/anim/projects/{_pid2}")
+
 check("恢复不存在的快照 → 404",
       client.post(f"/api/anim/projects/{_pid}/snapshots/nope-nope/restore").status_code == 404)
 

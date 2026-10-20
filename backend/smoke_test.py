@@ -843,6 +843,37 @@ async def main() -> None:
     body_c = next((r for r in cape.values() if r["role"] == "body"), None)
     assert body_c is not None and body_c["conf"] < 0.55, cape
     assert "核对" in body_c["reason"], body_c
+
+
+    # 帧审查图：卡住的那一帧要能被标出来
+    # 判据是「连续两个极小的 Δ 夹着的那一帧」——试过「Δ 小于中位数一半」
+    # 会标 3 帧（卡住帧 + 两个邻居），只看「局部极小」则一帧都标不出。
+    import math as _m
+    from backend.app.pipelines import review as review_pipe
+
+    def _rev_frame(i, stuck=False):
+        im = Image.new("RGBA", (64, 64), (0, 0, 0, 0))
+        dr = ImageDraw.Draw(im)
+        ph = (3 if stuck else i) / 8 * 6.283
+        dr.ellipse((26, 6, 38, 18), fill=(240, 200, 170, 255))
+        dr.rectangle((24, 20, 40, 40), fill=(70, 130, 210, 255))
+        for sgn in (1, -1):
+            a = ph * sgn
+            dr.line((30, 40, 30 + _m.sin(a) * 14, 40 + _m.cos(a) * 14),
+                    fill=(60, 90, 140, 255), width=4)
+        return im
+
+    def _red_px(sheet_img):
+        arr = np.asarray(sheet_img)
+        return int(((arr[..., 0] > 200) & (arr[..., 1] < 120)
+                    & (arr[..., 2] < 120)).sum())
+
+    normal = review_pipe.contact_sheet([_rev_frame(i) for i in range(8)], cols=8)
+    stuck = review_pipe.contact_sheet(
+        [_rev_frame(i, stuck=(i == 4)) for i in range(8)], cols=8)
+    assert _red_px(normal) == 0, f"正常循环不该有红框：{_red_px(normal)}"
+    assert _red_px(stuck) > 0, "卡住的那一帧应被标出"
+    print(f"[9v] 审查图  → 正常循环 0 标记 / 卡住帧被红框标出 OK")
     print(f"[9u] 置信度  → 清晰 {clear['h']['conf']:.2f}/"
           f"{clear['al']['conf']:.2f} vs 帽子歧义 {vague['h']['conf']:.2f}"
           f"/头悬空 {far['h']['conf']:.2f}；"

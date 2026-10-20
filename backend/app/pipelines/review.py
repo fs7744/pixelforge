@@ -19,6 +19,7 @@ _BG = (26, 28, 34)
 _FG = (235, 238, 245)
 _DIM = (140, 146, 160)
 _SEAM = (255, 213, 0)
+_STUCK = (255, 90, 90)      # 卡住/跑飞的帧
 _LABEL_H = 26
 _PAD = 6
 _COLS_MAX = 8
@@ -51,6 +52,31 @@ def contact_sheet(
     for i in range(n - 1):
         diffs[i] = float(np.abs(rgbs[i] - rgbs[i + 1]).mean())
 
+    # 异常帧检测：某一帧与前后两帧的相似度明显高于其它帧 → 姿势卡住/跑飞。
+    #
+    # 注意：**不能只看「到下一帧的差异」**——跑飞的那帧往往与前后帧差得远，
+    # 于是它的 Δ 反而最小（看起来"没动"）。所以这里比的是
+    # 「本帧与前后帧的平均差异」是否**明显低于**整段的典型值：
+    # 一帧静止在循环里，其它帧都在动 → 它就是卡住的那帧。
+    #
+    # 卡住帧的判据：**连续两个极小的 Δ 夹着的那一帧**。
+    #
+    # 为什么是这个形状：一帧卡住（复制了上一帧）时，
+    # 「上一帧→它」和「它→下一帧」两个 Δ 都≈0，序列里出现 **0, 0**；
+    # 卡住的那一帧就在这两个 0 中间。
+    #
+    # 试过其它判据都不对：
+    # · 只看「Δ 小于中位数一半」→ 会标 3 帧（卡住帧 + 两个邻居）；
+    # · 只看「局部极小」→ 一帧都标不出（卡住时是两个连续的 0，不构成极小）。
+    med = float(np.median([d for d in diffs if d is not None])) if n > 1 else 0.0
+    still: List[bool] = [False] * n
+    if n > 2 and med > 0.5:
+        thr = med * 0.5
+        for i in range(n - 1):
+            # diffs[i] 与 diffs[i+1] 都极小 → 第 i+1 帧（0 基）卡住
+            if diffs[i] < thr and diffs[i + 1] < thr:
+                still[i + 1] = True
+
     for i, f in enumerate(frames):
         c, r = i % cols, i // cols
         x = pad + c * (cw + pad)
@@ -60,12 +86,18 @@ def contact_sheet(
         # 首尾帧（循环接缝的两端）描琥珀边
         if i == 0 or i == n - 1:
             d.rectangle([x - 1, y - 1, x + cw, y + ch], outline=_SEAM, width=2)
+        # 卡住/跑飞的帧描红边——这是最需要人看一眼的地方
+        if still[i]:
+            d.rectangle([x - 2, y - 2, x + cw + 1, y + ch + 1], outline=_STUCK, width=2)
         # 标签：序号 + 到下一帧的差异 + 接缝标记
         parts = [f"{i + 1}"]
         if diffs[i] is not None:
             parts.append(f"Δ{diffs[i]:.1f}")
         if i == n - 1:
             parts.append("接缝→1")
-        d.text((x + 2, y + ch + 5), "  ".join(parts), fill=_FG if i < n - 1 else _SEAM, font=font)
+        if still[i]:
+            parts.append("⚠ 卡住")
+        color = _STUCK if still[i] else (_FG if i < n - 1 else _SEAM)
+        d.text((x + 2, y + ch + 5), "  ".join(parts), fill=color, font=font)
 
     return sheet

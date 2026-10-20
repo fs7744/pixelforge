@@ -1691,6 +1691,45 @@ async def anim_project_delete(pid: str):
     return {"ok": True}
 
 
+@app.get("/api/anim/projects/{pid}/review.png")
+async def anim_review_png(pid: str, cols: int = 0, scale: float = 1.0):
+    """帧审查图：所有帧排成网格，标出逐帧差异与循环接缝。
+
+    数字指标回答「哪一帧有问题」，但用户最终是用眼睛验收的——尤其在
+    动画编辑器里改完关键帧，得一眼看出「哪帧姿势跑飞了」。
+    """
+    from .anim import model as anim_model
+    from .anim import render as anim_render
+    from .pipelines import review as review_pipe
+
+    proj = anim_model.get(pid)
+    if not proj:
+        raise HTTPException(404, "工程不存在")
+
+    def _asset_path(aid: str):
+        item = storage.get_asset(aid)
+        return storage.asset_path(item) if item else None
+
+    def _load(aid: str):
+        p = _asset_path(aid)
+        if not p or not p.is_file():
+            return None
+        return Image.open(p).convert("RGBA")
+
+    def _run():
+        imgs = [im for _, im in anim_render.render_frames(proj, None, _load, scale)]
+        return review_pipe.contact_sheet(imgs, cols=cols)
+
+    try:
+        sheet = await run_in_threadpool(_run)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    buf = io.BytesIO()
+    sheet.save(buf, "PNG")
+    return Response(content=buf.getvalue(), media_type="image/png",
+                    headers={"Cache-Control": "no-store"})
+
+
 @app.get("/api/anim/projects/{pid}/snapshots")
 async def anim_snapshots(pid: str):
     """版本快照列表（新的在前）。前端撤销栈只在本页有效，刷新就没了，

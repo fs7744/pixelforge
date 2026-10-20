@@ -130,7 +130,11 @@ def snapshot(proj: Dict[str, Any]) -> Optional[str]:
     try:
         d = SNAPSHOT_DIR / str(pid)
         d.mkdir(parents=True, exist_ok=True)
-        snap_id = f"{int(time.time())}-{uuid.uuid4().hex[:6]}"
+        # 毫秒级时间戳 + 随机后缀：
+        # 用秒级会撞名——同一秒内连续保存两次，文件名相同就互相覆盖了
+        # （实测踩到：两次 PUT 后只剩一份快照，版本历史直接少一条）。
+        # 毫秒前缀同时保证字典序 = 时间序，列表排序不用另写比较器。
+        snap_id = f"{int(time.time() * 1000)}-{uuid.uuid4().hex[:6]}"
         (d / f"{snap_id}.json").write_text(p.read_text(encoding="utf-8"), encoding="utf-8")
         # 只留最近 N 份，多了删最老的
         files = sorted(d.glob("*.json"), key=lambda x: x.name, reverse=True)
@@ -167,7 +171,7 @@ def list_snapshots(pid: str) -> List[Dict[str, Any]]:
 
 def restore_snapshot(pid: str, snap_id: str) -> Optional[Dict[str, Any]]:
     """把某个快照恢复成当前工程（恢复前先给现状也存一份快照，可再退回去）。"""
-    if not _ID_RE.match(pid or "") or not re.match(r"^[0-9a-z-]{4,40}$", snap_id or ""):
+    if not _ID_RE.match(pid or "") or not re.match(r"^\d{10,16}-[0-9a-f]{4,12}$", snap_id or ""):
         return None
     f = SNAPSHOT_DIR / pid / f"{snap_id}.json"
     if not f.is_file():
