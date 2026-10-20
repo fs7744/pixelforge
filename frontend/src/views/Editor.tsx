@@ -836,14 +836,21 @@ export default function Editor() {
         if (!t?.skin) return
         t.skin.paint = t.skin.paint || {}
         const cells = t.skin.paint[wBone] || {}
+        // 按**归一化坐标 (u,v)** 存，不按顶点下标。
+        // 顶点下标依赖网格密度，改了密度同一份数据就指向别的位置（权重全错位），
+        // (u,v) 是贴图上的固定位置，改密度后服务端重新采样，权重跟着走。
+        const gridN = g - 1
         for (let j = rj0 - wRadius; j <= rj0 + wRadius; j++) {
           for (let i = ci0 - wRadius; i <= ci0 + wRadius; i++) {
             if (i < 0 || j < 0 || i >= g || j >= g) continue
             if (Math.hypot(i - ci0, j - rj0) > wRadius) continue
-            cells[String(j * g + i)] = +next[j * g + i][ci].toFixed(3)
+            const key = `${(i / gridN).toFixed(4)},${(j / gridN).toFixed(4)}`
+            cells[key] = +next[j * g + i][ci].toFixed(3)
           }
         }
         t.skin.paint[wBone] = cells
+        // 记下写这批数据时的网格密度：以后读旧数据要靠它换算
+        t.skin.paintGrid = gridN
       })
       return
     }
@@ -1629,8 +1636,8 @@ export default function Editor() {
                        style={{ width: '100%' }}
                        onChange={(e) => setWStrength(+e.target.value)} />
                 <div className="hint" style={{ marginTop: 6 }}>
-                  已手刷 {wView.painted || 0} 个顶点（红色 = 完全不跟该骨骼，蓝色 = 完全跟）。
-                  网格密度改了要重刷——顶点下标会错位。
+                  已手刷 {wView.painted || 0} 处（红色 = 完全不跟该骨骼，蓝色 = 完全跟）。
+                  权重按贴图上的固定位置存，改网格密度不会错位。
                 </div>
                 <button className="btn btn-ghost btn-block" style={{ marginTop: 6 }}
                         onClick={() => {

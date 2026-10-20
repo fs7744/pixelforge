@@ -144,26 +144,53 @@ def _skin(v: Any, bone_ids: set) -> Optional[Dict[str, Any]]:
     if not ids:
         return None
     grid = max(3, min(int(_num(v.get("grid"), 8)), 20))
+    # 手刷权重按 **归一化坐标 (u, v)** 存，不按顶点下标。
+    #
+    # 为什么：顶点下标依赖网格密度，改了密度同一份数据就指向别的位置
+    # （用户会看到「权重全错位」，只能全部重刷）。
+    # (u,v) ∈ [0,1]² 是贴图上的固定位置，密度变了重新采样即可，权重跟着走。
+    #
+    # 格式：{骨骼id: {"u,v": 权重}}，键是 "0.25,0.5" 这样的字符串。
+    # 旧数据（按整数下标存的）读进来时按旧密度换算成 (u,v)——
+    # 换算需要知道旧密度，用 v 里的 paintGrid 字段；没有就按当前 grid 猜。
     paint: Dict[str, Dict[str, float]] = {}
     raw = v.get("paint")
+    raw_grid = max(3, min(int(_num(v.get("paintGrid"), grid)), 20))
     if isinstance(raw, dict):
-        top = (grid + 1) * (grid + 1) - 1
         for bid, cells in list(raw.items())[:8]:
             if bid not in ids or not isinstance(cells, dict):
                 continue
-            clean = {}
-            for idx, val in list(cells.items())[:4096]:
-                try:
-                    i = int(idx)
-                except (TypeError, ValueError):
-                    continue
-                if 0 <= i <= top:
-                    clean[str(i)] = round(max(0.0, min(_num(val), 1.0)), 4)
+            clean: Dict[str, float] = {}
+            for key, val in list(cells.items())[:4096]:
+                w = round(max(0.0, min(_num(val), 1.0)), 4)
+                if "," in str(key):
+                    # 已是 (u,v) 格式
+                    try:
+                        us, vs = str(key).split(",", 1)
+                        pu, pv = float(us), float(vs)
+                    except (TypeError, ValueError):
+                        continue
+                    if 0.0 <= pu <= 1.0 and 0.0 <= pv <= 1.0:
+                        clean[f"{pu:.4f},{pv:.4f}"] = w
+                else:
+                    # 旧格式：整数顶点下标 → 按旧密度换算
+                    try:
+                        i = int(key)
+                    except (TypeError, ValueError):
+                        continue
+                    top = (raw_grid + 1) * (raw_grid + 1) - 1
+                    if 0 <= i <= top:
+                        gx = i % (raw_grid + 1)
+                        gy = i // (raw_grid + 1)
+                        pu = gx / raw_grid
+                        pv = gy / raw_grid
+                        clean[f"{pu:.4f},{pv:.4f}"] = w
             if clean:
                 paint[str(bid)] = clean
     return {"bones": ids,
             "falloff": max(8.0, min(round(_num(v.get("falloff"), 60), 1), 400.0)),
             "grid": grid,
+            "paintGrid": raw_grid,
             "paint": paint}
 
 

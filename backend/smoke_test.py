@@ -576,6 +576,42 @@ async def main() -> None:
     assert moved > 20, f"刷过的顶点应被 b2 带走，实际最大位移 {moved:.1f}px"
     print(f"[9m] paint   → 6 个顶点刷给 b2，最大位移 {moved:.1f}px OK")
 
+    # 权重按 (u,v) 存：改网格密度后权重应**跟着走**，而不是错位。
+    # 之前按顶点下标存，改密度 = 同一份数据指向别的位置，用户只能全部重刷。
+    def _skin_with(grid_n: int, paint: dict):
+        q = json.loads(json.dumps(_skin_proj(45, True)))
+        q["tracks"][0]["skin"]["grid"] = grid_n
+        q["tracks"][0]["skin"]["paint"] = paint
+        return anim_model.normalize(q)
+
+    # 在 (u,v) = (0.1, 0.5) 附近刷一片（u 方向 0.0~0.3）
+    cells_uv = {f"{i / 10:.4f},0.5000": 1.0 for i in range(4)}
+    paint_uv = {"b2": cells_uv}
+
+    w10 = skin_mod.apply_paint(
+        skin_mod.setup(_skin_with(10, paint_uv), _skin_with(10, paint_uv)["tracks"][0],
+                       band.size, 0), paint_uv)
+    w16 = skin_mod.apply_paint(
+        skin_mod.setup(_skin_with(16, paint_uv), _skin_with(16, paint_uv)["tracks"][0],
+                       band.size, 0), paint_uv)
+    # b2 在 weights 里的列号：bones = [b1, b2] → b2 是第 1 列
+    n10 = sum(1 for row in w10 if row[1] > 0.9)
+    n16 = sum(1 for row in w16 if row[1] > 0.9)
+    assert n10 > 0, n10
+    assert n16 > 0, n16
+    # 密度变大 → 被刷到的顶点数变多（同一片区域），但**位置不变**：
+    # 两者的 u 覆盖区间应基本一致
+    def _u_span(weights, grid_n):
+        us = []
+        for v, row in enumerate(weights):
+            if row[1] > 0.9:
+                us.append((v % (grid_n + 1)) / grid_n)
+        return (min(us), max(us)) if us else (0, 0)
+    s10, s16 = _u_span(w10, 10), _u_span(w16, 16)
+    assert abs(s10[0] - s16[0]) < 0.12 and abs(s10[1] - s16[1]) < 0.12, (s10, s16)
+    print(f"[9n] paintUV → 密度 10→16 权重位置不变（u 跨度 {s10[0]:.2f}-{s10[1]:.2f} "
+          f"vs {s16[0]:.2f}-{s16[1]:.2f}），命中顶点 {n10} → {n16} OK")
+
     # 部件拆分：角色图 + 色标图 → 按颜色裁出的 RGBA 部件
     from backend.app.pipelines import parts as parts_pipe
 
@@ -606,7 +642,7 @@ async def main() -> None:
     # 没涂到的部位返回空图而不是报错
     none = parts_pipe.split_parts(art, tag, [{"id": "tail", "name": "尾巴", "color": "#ffff00"}])[0][1]
     assert none.getbbox() is None
-    print(f"[9n] parts   → 头/身体/右臂 分色正确（头占比 {cov * 100:.1f}%，未涂部位为空）OK")
+    print(f"[9o] parts   → 头/身体/右臂 分色正确（头占比 {cov * 100:.1f}%，未涂部位为空）OK")
 
     # 裁剪 + 装骨架：部件应裁到自身包围盒，骨骼位置落在画布内
     trimmed, bbox = parts_pipe.trim_part(got[0][1])
@@ -635,7 +671,7 @@ async def main() -> None:
         assert 0 <= r["bone"]["x"] <= 200 and 0 <= r["bone"]["y"] <= 200, r
     # 整体缩放一致（同一张原图切出来的部件，缩放必须相同）
     assert abs(byname["头"]["scale"] - byname["右臂"]["scale"]) < 1e-6
-    print(f"[9o] rig     → 部件裁到 {trimmed.size}（bbox {bbox}）；"
+    print(f"[9p] rig     → 部件裁到 {trimmed.size}（bbox {bbox}）；"
           f"头 pivot 下中点 / 臂 pivot 上中点 / 躯干为父 / 缩放 "
           f"{rig[0]['scale']:.3f} OK")
 
@@ -661,7 +697,7 @@ async def main() -> None:
     soft = int(((np.asarray(got2[0][1].getchannel("A")) > 0)
                 & (np.asarray(got2[0][1].getchannel("A")) < 250)).sum())
     assert soft > 0, "边缘应保留半透明过渡带（羽化没生效）"
-    print(f"[9p] 互斥    → 部件实心重叠 0 像素 / 边缘半透明过渡 {soft} 像素 OK")
+    print(f"[9q] 互斥    → 部件实心重叠 0 像素 / 边缘半透明过渡 {soft} 像素 OK")
 
     # 分节链：尾巴1/2/3 应串成父子链；左上臂/右上臂 不得被误串
     chain = parts_pipe.plan_rig([
@@ -695,7 +731,7 @@ async def main() -> None:
     ys = [float(w[b][1, 2]) for b in ("t1", "t2", "t3")]
     assert ys[0] < ys[1] < ys[2], ys     # 逐节下移 → 斜着摆开了
     assert abs(float(w["t3"][1, 2]) - 140.0) < 1.0, ys
-    print(f"[9q] 分节链  → 尾巴1→2→3 串成链 / 手臂不误串；转 30° 后逐节下移 "
+    print(f"[9r] 分节链  → 尾巴1→2→3 串成链 / 手臂不误串；转 30° 后逐节下移 "
           f"{ys[0]:.0f}→{ys[1]:.0f}→{ys[2]:.0f} OK")
 
     # 父子成环：前端有拦截，但服务端必须自己也能挡住（API 可被直接调用）
@@ -717,7 +753,7 @@ async def main() -> None:
         "bones": [{"id": "a", "name": "A", "parent": "nope", "x": 10, "y": 10}],
     })
     assert orph["bones"][0].get("parent") is None, orph["bones"]
-    print("[9r] 去环    → 环上断开一根 / 坏父级清空 / 渲染不崩 OK")
+    print("[9s] 去环    → 环上断开一根 / 坏父级清空 / 渲染不崩 OK")
 
     # 几何识别：只给几块涂色（不写名字），判断它们是头/躯干/四肢/尾巴
     roles = {r["id"]: r for r in parts_pipe.classify_regions([
@@ -760,7 +796,7 @@ async def main() -> None:
     ], [300, 300])
     mm = {r["name"]: r for r in manu}
     assert mm["上臂"]["pivot"][1] == 0, mm["上臂"]
-    print(f"[9s] 识别    → 头/身体/双臂/双腿/尾巴全部认对；"
+    print(f"[9t] 识别    → 头/身体/双臂/双腿/尾巴全部认对；"
           f"自动命名 pivot 按几何（头 {am['头']['pivot']}）、"
           f"显式命名按名字（{mm['上臂']['pivot']}）OK")
 
@@ -807,7 +843,7 @@ async def main() -> None:
     body_c = next((r for r in cape.values() if r["role"] == "body"), None)
     assert body_c is not None and body_c["conf"] < 0.55, cape
     assert "核对" in body_c["reason"], body_c
-    print(f"[9t] 置信度  → 清晰 {clear['h']['conf']:.2f}/"
+    print(f"[9u] 置信度  → 清晰 {clear['h']['conf']:.2f}/"
           f"{clear['al']['conf']:.2f} vs 帽子歧义 {vague['h']['conf']:.2f}"
           f"/头悬空 {far['h']['conf']:.2f}；"
           f"披风包住躯干时躯干 conf={body_c['conf']:.2f} 并提示核对 OK")

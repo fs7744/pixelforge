@@ -102,19 +102,89 @@ def apply_paint(info: Dict[str, Any], paint: Optional[Dict[str, Any]]) -> List[L
     """
     idx = info["index"]
     n = len(info["rest"])
+    grid = int(info["grid"])
+
+    # 手刷数据按 (u,v) 存，这里重采样到当前网格的每个顶点。
+    #
+    # 为什么是重采样而不是直接查表：顶点下标依赖网格密度，改了密度同一份
+    # 数据就指向别的位置（权重全错位，只能全部重刷）。(u,v) 是贴图上的
+    # 固定位置，密度变了重新采样，权重跟着走。
+    #
+    # 采样用**双线性**：权重是连续量（刷出来是一片区域，不是几个孤立点），
+    # 最近邻会在网格变密时把边界锯齿化。
+    sampled: Dict[int, List[Tuple[float, float, float]]] = {}
+    if paint:
+        for bid, cells in paint.items():
+            col = idx.get(bid)
+            if col is None or not cells:
+                continue
+            pts: List[Tuple[float, float, float]] = []
+            for key, val in cells.items():
+                try:
+                    us, vs = str(key).split(",", 1)
+                    u, v = float(us), float(vs)
+                except (TypeError, ValueError):
+                    continue
+                pts.append((u, v, max(0.0, min(1.0, float(val)))))
+            if pts:
+                sampled[col] = pts
+
+    def _sample_uv(u: float, v: float,
+                    pts: List[Tuple[float, float, float]]) -> Optional[float]:
+        """在 (u,v) 处双线性采样手刷权重；附近没有数据点则返回 None。"""
+        best = None
+        best_d = 1e9
+        for (pu, pv, w) in pts:
+            d = (pu - u) ** 2 + (pv - v) ** 2
+            if d < best_d:
+                best_d = d
+                best = (pu, pv, w)
+        if best is None:
+            return None
+        # 影响半径：1.5 个网格单位。超过这个距离就认为「这块没刷过」——
+        # 网格变粗时不能把远处的刷点也算进来，否则整张图都会被染色。
+        radius = 1.5 / max(1.0, float(grid))
+        if best_d > radius * radius:
+            return None
+        # 双线性：找 (u,v) 周围的四个数据点
+        us = sorted({p[0] for p in pts})
+        vs = sorted({p[1] for p in pts})
+        u0 = max([x for x in us if x <= u], default=us[0])
+        u1 = min([x for x in us if x >= u], default=us[-1])
+        v0 = max([y for y in vs if y <= v], default=vs[0])
+        v1 = min([y for y in vs if y >= v], default=vs[-1])
+        if (u1 - u0) < 1e-9 or (v1 - v0) < 1e-9:
+            return best[2]
+        fu = (u - u0) / (u1 - u0)
+        fv = (v - v0) / (v1 - v0)
+
+        def _w_at(pu: float, pv: float) -> float:
+            for (a, b, w) in pts:
+                if abs(a - pu) < 1e-6 and abs(b - pv) < 1e-6:
+                    return w
+            return best[2]
+
+        w00 = _w_at(u0, v0)
+        w10 = _w_at(u1, v0)
+        w01 = _w_at(u0, v1)
+        w11 = _w_at(u1, v1)
+        return (w00 * (1 - fu) * (1 - fv) + w10 * fu * (1 - fv)
+                + w01 * (1 - fu) * fv + w11 * fu * fv)
+
     out: List[List[float]] = []
     for v in range(n):
         auto = info["auto"][v]
         row = list(auto)
         painted: Dict[int, float] = {}
-        if paint:
-            for bid, cells in paint.items():
-                col = idx.get(bid)
-                if col is None:
-                    continue
-                raw = cells.get(str(v))
-                if raw is not None:
-                    painted[col] = max(0.0, min(1.0, float(raw)))
+        if sampled:
+            gx = v % (grid + 1)
+            gy = v // (grid + 1)
+            u = gx / grid
+            vv = gy / grid
+            for col, pts in sampled.items():
+                got = _sample_uv(u, vv, pts)
+                if got is not None:
+                    painted[col] = got
 
         if painted:
             total = sum(painted.values())
