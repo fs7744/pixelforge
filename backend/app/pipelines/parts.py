@@ -14,7 +14,8 @@
 """
 from __future__ import annotations
 
-from typing import Any, Dict, List, Sequence, Tuple
+import re
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
 from PIL import Image
@@ -241,6 +242,27 @@ def _pivot_for(name: str, w: int, h: int) -> List[int]:
     return [w // 2, h]
 
 
+# 部位名里的数字后缀是「分节」的显式意图：尾巴1/尾巴2/尾巴3、上臂1/上臂2…
+_SECTION_NUM = re.compile(r"^(.*?)[0-9０-９]+$")
+
+
+def _section_group(name: str) -> Optional[str]:
+    """部位名带数字后缀时，返回它所属的分节组（去掉数字的核心词）。
+
+    「尾巴1」「尾巴2」→ 尾巴；「上臂1」「上臂2」→ 上臂。
+    返回 None 表示不是分节部件（头、身体、左臂 这类整体部位）。
+
+    为什么用「显式数字」而不是自动猜「左臂/小臂/手」是一条链：
+    几何启发式会把「左上臂/右上臂」误串成一条链（核心词都是「臂」），
+    而它们本该是两条独立的肢体。数字是用户明确表达的意图，不用猜。
+    """
+    m = _SECTION_NUM.match((name or "").strip())
+    if not m:
+        return None
+    core = m.group(1).strip()
+    return core or None
+
+
 def plan_rig(parts: Sequence[Dict[str, Any]],
              canvas: Sequence[int]) -> List[Dict[str, Any]]:
     """给一组部件规划「骨骼位置 + pivot + 缩放 + 父子关系」。
@@ -282,13 +304,41 @@ def plan_rig(parts: Sequence[Dict[str, Any]],
     if body is None:
         body = max(items, key=_area)
 
+    # 分节组：同组内按「原图里从上到下（纵向）或从左到右（横向）」串成链。
+    # 尾巴1→尾巴2→尾巴3 这样接起来，转第一节时后面几节跟着摆，才有波浪。
+    groups: Dict[str, List[Dict[str, Any]]] = {}
+    for p in items:
+        g = _section_group(p.get("name") or "")
+        if g:
+            groups.setdefault(g, []).append(p)
+
+    # 链内顺序：纵向的按 y 排，横向的（高度差不多）按 x 排
+    chain_order: Dict[str, str] = {}      # part id → 前一节 id
+    for g, members in groups.items():
+        if len(members) < 2:
+            continue
+        ys = [int(m["bbox"][1]) for m in members]
+        vertical = (max(ys) - min(ys)) > max(
+            int(m["bbox"][3]) for m in members) * 0.6
+        ordered = sorted(members, key=lambda m: (
+            int(m["bbox"][1]) if vertical else int(m["bbox"][0]),
+            int(m["bbox"][0])))
+        for prev, cur in zip(ordered, ordered[1:]):
+            chain_order[cur["id"]] = prev["id"]
+
+    body_id = body["id"]
     out: List[Dict[str, Any]] = []
     for p in items:
         w, h = int(p["size"][0]), int(p["size"][1])
         piv = _pivot_for(p.get("name") or "", w, h)
         bx = (int(p["bbox"][0]) + piv[0]) * scale + ox
         by = (int(p["bbox"][1]) + piv[1]) * scale + oy
-        parent = None if p is body else "body"
+        if p is body:
+            parent = None
+        elif p["id"] in chain_order:
+            parent = chain_order[p["id"]]
+        else:
+            parent = body_id
         out.append({
             "id": p["id"],
             "name": p.get("name") or "部件",

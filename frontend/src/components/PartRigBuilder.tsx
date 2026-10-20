@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from 'react'
 import { api, Asset } from '../api'
 import PartPainter, { PartDef } from './PartPainter'
-import { DEFAULT_PARTS } from '../parts'
+import { DEFAULT_PARTS, EXTRA_PARTS } from '../parts'
 
 export type RigPart = {
   id: string
@@ -38,6 +38,7 @@ export default function PartRigBuilder({ assets, canvas, onApply }: Props) {
     [assets])
   const [srcId, setSrcId] = useState('')
   const [parts, setParts] = useState<PartDef[]>(DEFAULT_PARTS)
+  const [withTail, setWithTail] = useState(false)
   const [activeId, setActiveId] = useState(DEFAULT_PARTS[0].id)
   const [tag, setTag] = useState<Blob | null>(null)
   const [busy, setBusy] = useState(false)
@@ -110,7 +111,23 @@ export default function PartRigBuilder({ assets, canvas, onApply }: Props) {
 
       {src && (
         <>
-          <div className="label" style={{ marginTop: 8 }}>涂部位</div>
+          <div className="row" style={{ gap: 8, marginTop: 8 }}>
+            <div className="label grow">涂部位</div>
+            <label className="hint" style={{ display: 'flex', gap: 5, alignItems: 'center' }}>
+              <input
+                type="checkbox"
+                checked={withTail}
+                onChange={(e) => {
+                  setWithTail(e.target.checked)
+                  setParts(e.target.checked
+                    ? [...DEFAULT_PARTS, ...EXTRA_PARTS]
+                    : DEFAULT_PARTS)
+                  if (!e.target.checked) setActiveId(DEFAULT_PARTS[0].id)
+                }}
+              />
+              尾巴分节
+            </label>
+          </div>
           <PartPainter
             src={api.assetThumb(src.id, 320)}
             parts={parts}
@@ -129,6 +146,9 @@ export default function PartRigBuilder({ assets, canvas, onApply }: Props) {
           <div className="hint">
             头与躯干的旋转点在下方（绕脖子/胯），四肢在上方（绕肩/胯）。
             部件会按原图位置整体缩放居中放进画布。
+            <br />
+            勾了「尾巴分节」时，尾巴1/2/3 会串成一条链：
+            转第一节，后面几节跟着摆。
           </div>
         </>
       )}

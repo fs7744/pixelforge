@@ -623,10 +623,13 @@ async def main() -> None:
     # 头 pivot 在下边中点（绕脖子），手臂 pivot 在上边中点（绕肩）
     assert byname["头"]["pivot"][1] == 16, byname["头"]
     assert byname["右臂"]["pivot"][1] == 0, byname["右臂"]
-    # 身体是躯干：自己无父，其余都挂躯干
+    # 身体是躯干：自己无父，其余都挂躯干。
+    # parent 现在是**部件 id**（不再是 "body" 占位）——服务端算好的层级。
+    ids = {r["name"]: r["id"] for r in rig}
+    body_id = byname["身体"]["id"]
     assert byname["身体"]["bone"]["parent"] is None
-    assert byname["头"]["bone"]["parent"] == "body"
-    assert byname["右臂"]["bone"]["parent"] == "body"
+    assert byname["头"]["bone"]["parent"] == body_id
+    assert byname["右臂"]["bone"]["parent"] == body_id
     # 骨骼坐标必须落在画布内
     for r in rig:
         assert 0 <= r["bone"]["x"] <= 200 and 0 <= r["bone"]["y"] <= 200, r
@@ -659,6 +662,62 @@ async def main() -> None:
                 & (np.asarray(got2[0][1].getchannel("A")) < 250)).sum())
     assert soft > 0, "边缘应保留半透明过渡带（羽化没生效）"
     print(f"[9p] 互斥    → 部件实心重叠 0 像素 / 边缘半透明过渡 {soft} 像素 OK")
+
+    # 分节链：尾巴1/2/3 应串成父子链；左上臂/右上臂 不得被误串
+    chain = parts_pipe.plan_rig([
+        {"id": "a", "name": "身体", "size": [40, 60], "bbox": [80, 60, 40, 60]},
+        {"id": "b", "name": "头", "size": [30, 30], "bbox": [85, 20, 30, 30]},
+        {"id": "c", "name": "尾巴1", "size": [20, 20], "bbox": [120, 70, 20, 20]},
+        {"id": "d", "name": "尾巴2", "size": [20, 20], "bbox": [140, 70, 20, 20]},
+        {"id": "e", "name": "尾巴3", "size": [20, 20], "bbox": [160, 70, 20, 20]},
+        {"id": "f", "name": "左上臂", "size": [16, 40], "bbox": [60, 62, 16, 40]},
+        {"id": "g", "name": "右上臂", "size": [16, 40], "bbox": [124, 62, 16, 40]},
+    ], [300, 300])
+    par = {r["id"]: r["bone"]["parent"] for r in chain}
+    assert par["c"] == "a", par          # 尾巴1 挂躯干
+    assert par["d"] == "c", par          # 尾巴2 挂尾巴1
+    assert par["e"] == "d", par          # 尾巴3 挂尾巴2
+    assert par["f"] == "a" and par["g"] == "a", par   # 两条手臂各自挂躯干
+    assert par["a"] is None, par         # 躯干是顶层
+
+    # 链式旋转：转第一节，后面的节跟着摆成一条斜线（波浪的形状）
+    cproj = anim_model.normalize({
+        "id": "abcdef012351", "name": "chain", "canvas": [300, 200], "frames": 1,
+        "bones": [
+            {"id": "root", "parent": None, "x": 30, "y": 100, "len": 40},
+            {"id": "t1", "parent": "root", "x": 60, "y": 100, "len": 40,
+             "keys": [{"frame": 0, "rot": 30}]},
+            {"id": "t2", "parent": "t1", "x": 100, "y": 100, "len": 40},
+            {"id": "t3", "parent": "t2", "x": 140, "y": 100, "len": 40},
+        ],
+    })
+    w = anim_render.bone_world(cproj, 0)
+    ys = [float(w[b][1, 2]) for b in ("t1", "t2", "t3")]
+    assert ys[0] < ys[1] < ys[2], ys     # 逐节下移 → 斜着摆开了
+    assert abs(float(w["t3"][1, 2]) - 140.0) < 1.0, ys
+    print(f"[9q] 分节链  → 尾巴1→2→3 串成链 / 手臂不误串；转 30° 后逐节下移 "
+          f"{ys[0]:.0f}→{ys[1]:.0f}→{ys[2]:.0f} OK")
+
+    # 父子成环：前端有拦截，但服务端必须自己也能挡住（API 可被直接调用）
+    cyc = anim_model.normalize({
+        "id": "abcdef012352", "name": "cyc", "canvas": [200, 200], "frames": 1,
+        "bones": [
+            {"id": "a", "name": "A", "parent": "b", "x": 10, "y": 10},
+            {"id": "b", "name": "B", "parent": "c", "x": 20, "y": 20},
+            {"id": "c", "name": "C", "parent": "a", "x": 30, "y": 30},
+        ],
+    })
+    pm = {b["id"]: b.get("parent") for b in cyc["bones"]}
+    assert pm["a"] is None, pm       # 环上有一根被断开
+    assert not (pm["b"] == "c" and pm["c"] == "a" and pm["a"] == "b"), pm
+    anim_render.render_frame(cyc, 0, lambda _: None)   # 不能崩
+    # 父不存在也要被清掉
+    orph = anim_model.normalize({
+        "id": "abcdef012353", "name": "orph", "canvas": [200, 200], "frames": 1,
+        "bones": [{"id": "a", "name": "A", "parent": "nope", "x": 10, "y": 10}],
+    })
+    assert orph["bones"][0].get("parent") is None, orph["bones"]
+    print("[9r] 去环    → 环上断开一根 / 坏父级清空 / 渲染不崩 OK")
 
     # 颜色距离不能出 NaN：int16 算平方差会溢出回绕成负数，sqrt 得 NaN，
     # 不报错、只是让对应像素的 mask 静默失效（当时只在控制台看到一行 warning）

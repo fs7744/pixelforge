@@ -560,14 +560,13 @@ export default function Editor() {
   const applyRig = (rig: RigPart[], groupId: string) => {
     if (!proj) return
     const stamp = Date.now().toString(36).slice(-4)
-    // rig 里的 parent 指的是「body」这个占位，要换成实际骨骼 id
-    const bodyPart = rig.find((r) => r.isBody) || rig[0]
+    // rig 里的 parent 是**部件 id**（服务端算好的层级）：
+    // null = 躯干（挂 root），其它是父部件的 id。
+    // 躯干之外的部件若没给 parent，退回挂 root。
     const boneId = (r: RigPart) => `p${stamp}${rig.indexOf(r)}`
     const parentOf = (r: RigPart) => {
       if (!r.bone.parent) return proj.bones[0]?.id || 'root'
-      // parent === 'body' 表示挂到躯干
-      if (r.bone.parent === 'body') return boneId(bodyPart)
-      const found = rig.find((x) => x.name === r.bone.parent)
+      const found = rig.find((x) => x.id === r.bone.parent)
       return found ? boneId(found) : (proj.bones[0]?.id || 'root')
     }
     update((p) => {
@@ -1472,8 +1471,38 @@ export default function Editor() {
                        const x = p.bones.find((v: any) => v.id === selBone)
                        if (x) x.name = e.target.value
                      })} />
+              <div className="label" style={{ marginTop: 8 }}>父骨骼</div>
+              <select className="input" value={b.parent || ''}
+                      onChange={(e) => {
+                        const want = e.target.value || null
+                        update((p) => {
+                          const x = p.bones.find((v: any) => v.id === selBone)
+                          if (!x) return
+                          // 不能挂到自己或自己的后代上——那会成环，
+                          // FK 级联就会无限递归（后端有环检测，但骨架会直接坏掉）
+                          if (want === selBone) return
+                          const desc = new Set<string>()
+                          const walk = (id: string) => {
+                            desc.add(id)
+                            const b2 = p.bones.find((v: any) => v.id === id)
+                            if (b2?.parent) walk(b2.parent)
+                          }
+                          if (x.parent) walk(x.parent)
+                          if (want && desc.has(want)) {
+                            setError('不能把骨骼挂到它自己的后代上（会成环）')
+                            return
+                          }
+                          x.parent = want
+                        })
+                      }}>
+                <option value="">（顶层 · 根）</option>
+                {bones.filter((x: any) => x.id !== selBone).map((x: any) => (
+                  <option key={x.id} value={x.id}>{x.name}</option>
+                ))}
+              </select>
               <div className="hint">
                 改成「上臂 / 腿 / 尾」这类部位名，左栏的「按名绑轨」才对得上。
+                父骨骼决定联动：转父级，子级跟着转（尾巴分节就是这样串起来的）。
               </div>
             </>
           )

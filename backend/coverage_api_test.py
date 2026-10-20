@@ -348,6 +348,43 @@ check("部件已裁到自身包围盒（位置才正确）",
       str([(p.get("name"), p.get("size"), p.get("bbox")) for p in _pj.get("parts") or []])[:150])
 _rig = _pj.get("rig") or []
 _rn = {r["name"]: r for r in _rig}
+# 分节链：尾巴1/2/3 串成父子链
+_art2 = Image.new("RGBA", (120, 60), (0, 0, 0, 0))
+_a2 = ImageDraw.Draw(_art2)
+_a2.rectangle((20, 10, 50, 50), fill=(70, 130, 210, 255))
+for _i in range(3):
+    _a2.rectangle((55 + _i * 20, 25, 55 + (_i + 1) * 20, 35),
+                   fill=(150, 110, 200, 255))
+_tg2 = Image.new("RGB", (120, 60), (0, 0, 0))
+_t2 = ImageDraw.Draw(_tg2)
+_t2.rectangle((20, 10, 50, 50), fill=(0, 255, 0))
+for _i, _c in enumerate([(255, 60, 90), (200, 100, 250), (160, 130, 90)]):
+    _t2.rectangle((55 + _i * 20, 25, 55 + (_i + 1) * 20, 35), fill=_c)
+_ab2 = io.BytesIO(); _art2.save(_ab2, "PNG")
+_tb3 = io.BytesIO(); _tg2.save(_tb3, "PNG")
+_pr3 = client.post("/api/pipeline/parts",
+                   files={"file": ("a.png", _ab2.getvalue(), "image/png"),
+                          "tag": ("t3.png", _tb3.getvalue(), "image/png")},
+                   data={"parts": json.dumps([
+                       {"id": "body", "name": "身体", "color": "#00ff00"},
+                       {"id": "t1", "name": "尾巴1", "color": "#ff3c5a"},
+                       {"id": "t2", "name": "尾巴2", "color": "#c864fa"},
+                       {"id": "t3", "name": "尾巴3", "color": "#a0825a"}],
+                       ensure_ascii=False)})
+_pj3 = _pr3.json() if _pr3.status_code == 200 else {}
+for _pp in _pj3.get("parts") or []:
+    if _pp.get("asset"):
+        remember(_pp["asset"])
+_rg3 = _pj3.get("rig") or []
+_pr3_map = {r["name"]: r["bone"]["parent"] for r in _rg3}
+_rg3_ids = {r["name"]: r["id"] for r in _rg3}
+check("分节链：尾巴1→2→3 串成父子链",
+      _pr3.status_code == 200 and len(_rg3) == 4
+      and _pr3_map.get("尾巴1") == _rg3_ids.get("身体")
+      and _pr3_map.get("尾巴2") == _rg3_ids.get("尾巴1")
+      and _pr3_map.get("尾巴3") == _rg3_ids.get("尾巴2"),
+      str(_pr3_map))
+
 check("骨架方案：pivot 按部位 / 躯干为父 / 坐标在画布内",
       len(_rig) == 2 and _rn["头"]["pivot"][1] == _rn["头"]["size"][1] if False else
       (len(_rig) == 2 and all(0 <= r["bone"]["x"] <= 512 and 0 <= r["bone"]["y"] <= 512
