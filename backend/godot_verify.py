@@ -283,7 +283,8 @@ def verify_frames(data: Dict[str, Any], got: Dict[str, Any],
     return out
 
 
-def run_godot_render(godot: Path, dirpath: Path, proj: Dict[str, Any]) -> Optional[List[Path]]:
+def run_godot_render(godot: Path, dirpath: Path, proj: Dict[str, Any],
+                     skip_import: bool = False) -> Optional[List[Path]]:
     """带渲染跑一遍，把每帧存成 PNG。失败返回 None（多半是没 GPU / 无显示）。"""
     cw, ch = proj["canvas"]
     (dirpath / "project.godot").write_text(
@@ -291,8 +292,9 @@ def run_godot_render(godot: Path, dirpath: Path, proj: Dict[str, Any]) -> Option
     (dirpath / "render.gd").write_text(RENDER_GD, encoding="utf-8")
     out_dir = dirpath / "out"
     # 先跑一次 import：PNG 必须先生成 .import/.ctex，否则 load() 找不到资源
-    subprocess.run([str(godot), "--headless", "--import", "--path", str(dirpath)],
-                   capture_output=True, text=True, timeout=300)
+    if not skip_import:
+        subprocess.run([str(godot), "--headless", "--import", "--path", str(dirpath)],
+                       capture_output=True, text=True, timeout=300)
     proc = subprocess.run([str(godot), "--path", str(dirpath), "--script", "render.gd"],
                           capture_output=True, text=True, timeout=300)
     shots = sorted(out_dir.glob("f*.png")) if out_dir.is_dir() else []
@@ -367,7 +369,21 @@ def main() -> int:
                 print("  x " + line)
             problems.extend(pix_problems)
 
-            # 第二遍：加上 add / multiply 轨道，口径差异只作参考，不判失败
+            # 第二遍：刻意**不做 import**，验证「导出包拖进 Godot 直接跑」这条
+            # 用户最可能走的路径（早先这里 load() 全部失败，动画还静默少画一截）
+            ndir = workdir / "noimport"
+            ndir.mkdir(exist_ok=True)
+            ndata, ntex, nproj = build_project(ndir)
+            nshots = run_godot_render(godot, ndir, nproj, skip_import=True)
+            if nshots:
+                n_problems, n_notes = compare_pixels(nproj, ntex, nshots)
+                for line in n_notes:
+                    print("  o " + line)
+                for line in n_problems:
+                    print("  x 无 import 场景偏差：" + line)
+                problems.extend(n_problems)
+
+            # 第三遍：加上 add / multiply 轨道，口径差异只作参考，不判失败
             bdir = workdir / "blend"
             bdir.mkdir(exist_ok=True)
             bdata, btex, bproj = build_project(bdir, with_blend=True)

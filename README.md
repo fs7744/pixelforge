@@ -123,6 +123,8 @@ mkdir -p ~/.u2net && curl -L -o ~/.u2net/u2net.onnx \
 
 ## 功能
 
+> 编辑器的上手路径与已知限制见 [docs/anim-walkthrough.md](docs/anim-walkthrough.md)。
+
 | 模块 | 说明 |
 |---|---|
 | 生成工作台 | 10 个提示词模板 × 6 分类，15 种游戏美术画风（含 HD-2D），参数面板，结果网格，一键送后处理 |

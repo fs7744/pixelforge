@@ -236,6 +236,29 @@ func track_triangles(track: Dictionary) -> PackedInt32Array:
 
 ## ---- 运行时 ----
 
+## 贴图加载：先按原始文件读，再退回导入系统
+##
+## 导出包不是 Godot 工程，PNG 没有 .import/.ctex，直接 load() 会报
+## 「No loader found」。Image.load_from_file() 不依赖导入流程（编辑器 /
+## 源码运行下 res:// 是真实目录时可用）；而导出成 PCK 后只有导入资源能读，
+## 那时再退回 load()。两条路都失败时返回 null，由调用方跳过该轨道——
+## 早先这里直接把 null 赋给材质，脚本会在 track_material 里报错中断，
+## 动画「少画一截」还只在 stderr 里留个警告，极难察觉。
+func load_texture(path: String) -> Texture2D:
+	var img := Image.new()
+	if img.load(path) == OK:
+		return ImageTexture.create_from_image(img)
+	if ResourceLoader.exists(path):
+		var res = load(path)
+		if res is Texture2D:
+			return res
+	push_error("贴图加载失败：%s" % path)
+	missing_textures.append(path)
+	return null
+
+## 加载失败的贴图（调用方可据此提示用户先在 Godot 里 import）
+var missing_textures: Array[String] = []
+
 ## 轨道混合模式 → CanvasItemMaterial
 ##
 ## 后端的 add 是 `dst + src * alpha`、multiply 是 `dst * lerp(1, src, alpha)`，
@@ -243,7 +266,8 @@ func track_triangles(track: Dictionary) -> PackedInt32Array:
 ## 所以直接映射即可；normal 用默认 MIX。
 func track_material(t: Dictionary, tex: Texture2D) -> CanvasItemMaterial:
 	var mat := CanvasItemMaterial.new()
-	mat.texture = tex
+	if tex != null:
+		mat.texture = tex
 	match String(t.get("blend", "normal")):
 		"add":
 			mat.blend_mode = CanvasItemMaterial.BLEND_MODE_ADD
@@ -253,20 +277,23 @@ func track_material(t: Dictionary, tex: Texture2D) -> CanvasItemMaterial:
 
 func _build() -> void:
 	_nodes.clear()
+	missing_textures.clear()
 	for t in data.get("tracks", []):
-		var tex: Texture2D = load(_base.path_join(t["texture"]))
+		var tex := load_texture(_base.path_join(t["texture"]))
 		var mat := track_material(t, tex)
 		var node: Node2D
 		if t.get("skinned", false):
 			var mi := MeshInstance2D.new()
 			mi.material = mat
-			mi.texture = tex
+			if tex != null:
+				mi.texture = tex
 			node = mi
 		else:
 			var sp := Sprite2D.new()
-			sp.texture = tex
 			sp.centered = false
 			sp.material = mat
+			if tex != null:
+				sp.texture = tex
 			node = sp
 		add_child(node)
 		_nodes.append(node)
@@ -360,7 +387,12 @@ tracks      : 每条轨道
    注意 alpha 口径不同：后端 add 是「dst.rgb + src.rgb*a」且**不改 alpha**，
    Godot 的 BLEND_MODE_ADD 会把 alpha 也累加。颜色一致，alpha 会略高——
    实测混合模式轨道的像素差 MAD 约 2–6，normal 轨道 ≤1。
-5. 视口背景请设为透明（Window.transparent_bg = true 或项目里把
+5. **贴图加载**：load_texture() 先按原始文件读（Image.load_from_file），
+   失败再退回 Godot 的导入资源（load）。所以这个包**不先 import 也能直接跑**；
+   但如果你把文件夹导成 PCK 发布，请照常让 Godot 走一遍导入流程，
+   否则 PCK 里读不到原始 PNG。加载失败的贴图会 push_error 并记在
+   missing_textures 里，不会让整段动画中断。
+6. 视口背景请设为透明（Window.transparent_bg = true 或项目里把
    default_clear_color 的 alpha 设为 0）。Godot 默认清除色是不透明的灰，
    与导出的透明画布叠在一起会整体偏色。
 

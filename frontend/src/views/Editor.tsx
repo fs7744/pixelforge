@@ -755,6 +755,15 @@ export default function Editor() {
 
   // ---------- 操作 ----------
   const addTrack = (a: Asset) => {
+    // pivot 默认取**底部中心**而不是几何中心：动画里锚点几乎总是「脚底/落地点」，
+    // 几何中心会让角色一放进来就悬在半空还得自己往上拖。
+    // 素材尺寸和画布差太多时明确提示——之前是默默出画布，用户一脸茫然。
+    const canvasW = proj?.canvas?.[0] || dims[0]
+    const canvasH = proj?.canvas?.[1] || dims[1]
+    const hint = (a.width > canvasW || a.height > canvasH)
+      ? ` 素材 ${a.width}×${a.height} 超出画布 ${canvasW}×${canvasH}，建议调大画布或用关键帧缩小。`
+      : ''
+    setNote(`已添加轨道：${a.name}（pivot 落在底部中心）${hint}`)
     // id 先算好：写在 setState 更新函数里的话，React 严格模式重放会生成两个 id
     const tid = Math.random().toString(16).slice(2, 10)
     update((p) => {
@@ -764,7 +773,7 @@ export default function Editor() {
         name: a.name || '轨道',
         assetId: a.id,
         bone: selBone || 'root',
-        pivot: [Math.round(a.width / 2), Math.round(a.height / 2)],
+        pivot: [Math.round(a.width / 2), a.height],
         warp: Array(9).fill([0, 0]),
         keyframes: [{ frame: 0, x: 0, y: 0, rot: 0, scale: 1, opacity: 1, ease: 'linear' }],
         fx: [], opacity: 1, blend: 'normal', visible: true,
@@ -772,7 +781,6 @@ export default function Editor() {
     })
     setSelTrack(tid)
     setPicker(false)
-    setNote(`已添加轨道：${a.name}`)
   }
 
   const createProject = async () => {
@@ -849,13 +857,20 @@ export default function Editor() {
           <button className="btn btn-ghost" onClick={createProject}>新建</button>
         </div>
         <div className="row" style={{ gap: 6, marginTop: 6 }}>
-          <select className="input grow" value={size[0]}
-                  onChange={(e) => {
-                    const w = +e.target.value
-                    setSize([w, w])
-                  }}>
-            {[256, 384, 512, 768].map((s) => <option key={s} value={s}>{s}×{s}</option>)}
-          </select>
+          <input className="input" type="number" style={{ width: 64 }} value={size[0]} min={16}
+                 onChange={(e) => setSize([+e.target.value || 512, size[1]])} />
+          <span className="hint">×</span>
+          <input className="input" type="number" style={{ width: 64 }} value={size[1]} min={16}
+                 onChange={(e) => setSize([size[0], +e.target.value || 512])} />
+          <div className="chips">
+            {[256, 384, 512, 768].map((v) => (
+              <button key={v} className="chip sm"
+                      onClick={() => setSize([v, v])}>{v}</button>
+            ))}
+          </div>
+        </div>
+        <div className="row" style={{ gap: 6, marginTop: 4 }}>
+          <button className="btn btn-ghost grow" onClick={createProject}>按此尺寸新建</button>
           <button className="btn btn-ghost" disabled={!pid} onClick={removeProject}>删除</button>
         </div>
         <div className="chips mt8">
