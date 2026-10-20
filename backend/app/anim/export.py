@@ -337,6 +337,9 @@ tracks      : 每条轨道
        add_child(a)
        a.play("", true)
 3. 蒙皮轨道用 ArrayMesh 逐帧重建——顶点已经烘焙，引擎侧不需要权重计算。
+4. 视口背景请设为透明（Window.transparent_bg = true 或项目里把
+   default_clear_color 的 alpha 设为 0）。Godot 默认清除色是不透明的灰，
+   与导出的透明画布叠在一起会整体偏色。
 
 注意
 ----

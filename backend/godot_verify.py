@@ -43,6 +43,56 @@ config/name="pf-anim-verify"
 renderer/rendering_method="gl_compatibility"
 """
 
+# 像素验证要真渲染：视口尺寸对齐画布、关掉拉伸，截出来的图才能直接和后端比对
+PROJECT_GODOT_DISPLAY = """config_version=5
+
+[application]
+config/name="pf-anim-render"
+
+[display]
+window/size/viewport_width={w}
+window/size/viewport_height={h}
+window/size/window_width_override={w}
+window/size/window_height_override={h}
+window/stretch/mode="disabled"
+
+[rendering]
+renderer/rendering_method="gl_compatibility"
+"""
+
+RENDER_GD = """extends SceneTree
+const Anim = preload("res://anim/anim_player.gd")
+var _anim
+var _f := 0
+var _total := 0
+var _wait := 0
+
+func _initialize():
+	# 背景必须透明：Godot 默认清除色是不透明的灰，跟后端的透明画布一比就是全屏差异
+	root.transparent_bg = true
+	RenderingServer.set_default_clear_color(Color(0, 0, 0, 0))
+	_anim = Anim.new()
+	root.add_child(_anim)
+	_anim.load_package("res://anim/")
+	_total = _anim.frame_count()
+	DirAccess.make_dir_recursive_absolute("res://out")
+
+func _process(_d):
+	if _f >= _total:
+		print("PFRENDER ", _total)
+		quit(0)
+		return true
+	_anim._apply(_f)
+	_wait += 1
+	# 等两帧：第一次 _apply 之后渲染还没提交，等一帧再截图
+	if _wait >= 2:
+		_wait = 0
+		var img = root.get_texture().get_image()
+		img.save_png("res://out/f%d.png" % _f)
+		_f += 1
+	return false
+"""
+
 VERIFY_GD = """extends SceneTree
 const Anim = preload("res://anim/anim_player.gd")
 
@@ -217,6 +267,56 @@ def verify_frames(data: Dict[str, Any], got: Dict[str, Any],
     return out
 
 
+def run_godot_render(godot: Path, dirpath: Path, proj: Dict[str, Any]) -> Optional[List[Path]]:
+    """带渲染跑一遍，把每帧存成 PNG。失败返回 None（多半是没 GPU / 无显示）。"""
+    cw, ch = proj["canvas"]
+    (dirpath / "project.godot").write_text(
+        PROJECT_GODOT_DISPLAY.format(w=cw, h=ch), encoding="utf-8")
+    (dirpath / "render.gd").write_text(RENDER_GD, encoding="utf-8")
+    out_dir = dirpath / "out"
+    # 先跑一次 import：PNG 必须先生成 .import/.ctex，否则 load() 找不到资源
+    subprocess.run([str(godot), "--headless", "--import", "--path", str(dirpath)],
+                   capture_output=True, text=True, timeout=300)
+    proc = subprocess.run([str(godot), "--path", str(dirpath), "--script", "render.gd"],
+                          capture_output=True, text=True, timeout=300)
+    shots = sorted(out_dir.glob("f*.png")) if out_dir.is_dir() else []
+    if proc.returncode != 0 or not shots:
+        print("    (渲染不可用) " + (proc.stderr or proc.stdout or "")[-200:].replace("\n", " "))
+        return None
+    return shots
+
+
+def compare_pixels(proj: Dict[str, Any], textures: Dict[str, Image.Image],
+                   shots: List[Path]) -> Tuple[List[str], List[str]]:
+    """引擎渲出来的 PNG 与后端直出帧逐像素比。"""
+    problems: List[str] = []
+    notes: List[str] = []
+    tex = {t["assetId"]: textures[t["assetId"]] for t in proj["tracks"]}
+    for shot in shots:
+        f = int(shot.stem[1:])
+        if f >= int(proj["frames"]):
+            continue
+        exp_img = anim_render.render_frame(proj, f, tex.get)
+        got = Image.open(shot).convert("RGBA")
+        if got.size != (exp_img.width, exp_img.height):
+            notes.append(f"第 {f} 帧尺寸不同（引擎 {got.size} / 后端 {exp_img.size}），跳过")
+            continue
+        a = np.asarray(exp_img, np.int16)
+        b = np.asarray(got, np.int16)
+        mad = float(np.abs(a[..., :3] - b[..., :3]).mean())
+        alpha_mad = float(np.abs(a[..., 3] - b[..., 3]).mean())
+        # 无论通过与否都留档：出问题时直接看图比读数字快
+        keep = ROOT / "data" / "tmp" / "godot_render"
+        keep.mkdir(parents=True, exist_ok=True)
+        got.save(keep / f"engine_f{f}.png")
+        exp_img.save(keep / f"backend_f{f}.png")
+        if mad > 6 or alpha_mad > 6:
+            problems.append(f"第 {f} 帧引擎渲染与后端偏差过大：RGB {mad:.2f} / alpha {alpha_mad:.2f}")
+        else:
+            notes.append(f"第 {f} 帧引擎渲染 ≈ 后端（RGB MAD {mad:.2f} / alpha {alpha_mad:.2f}）")
+    return problems, notes
+
+
 def main() -> int:
     godot = find_godot()
     if not godot:
@@ -233,6 +333,17 @@ def main() -> int:
             print("  x " + line)
         for line in verify_frames(data, got, textures, proj):
             print("  - " + line)
+
+        shots = run_godot_render(godot, workdir, proj)
+        if shots:
+            pix_problems, pix_notes = compare_pixels(proj, textures, shots)
+            for line in pix_notes:
+                print("  - " + line)
+            for line in pix_problems:
+                print("  x " + line)
+            problems.extend(pix_problems)
+        else:
+            print("  - 像素验证跳过：当前环境没有可用的渲染上下文（headless 验证仍然通过）")
         if problems:
             print("[godot] 验证未通过")
             return 1
